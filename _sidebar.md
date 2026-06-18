@@ -9,9 +9,8 @@
 - **TypeScript**
   - [📘 Teoría + ejercicios](typescript.md)
 
-- **Backend**
-  - [🦅 NestJS](nestjs.md)
   - **Backend / NestJS**
+  - [🦅 NestJS](nestjs.md)
   - [🧩 Patrones de diseño en NestJS](nestjs-patrones.md)
   - [🎯 NestJS nivel Senior](nestjs-senior.md)
 
