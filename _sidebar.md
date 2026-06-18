@@ -9,5 +9,8 @@
 - **TypeScript**
   - [📘 Teoría + ejercicios](typescript.md)
 
+- **Backend**
+  - [🦅 NestJS](nestjs.md)
+
 - **Enlaces**
   - [Repositorio en GitHub](https://github.com/jzamituy/fullstack-roadmap)
