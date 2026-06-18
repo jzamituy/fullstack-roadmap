@@ -11,6 +11,10 @@
 
 - **Backend**
   - [🦅 NestJS](nestjs.md)
+  - **Backend / NestJS**
+  - [🧩 Patrones de diseño en NestJS](nestjs-patrones.md)
+  - [🎯 NestJS nivel Senior](nestjs-senior.md)
+
 
 - **Enlaces**
   - [Repositorio en GitHub](https://github.com/jzamituy/fullstack-roadmap)
