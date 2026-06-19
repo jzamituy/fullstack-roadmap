@@ -37,6 +37,7 @@
 
 - **Cloud / AWS**
   - [☁️ AWS para backend](aws.md)
+  - [🛠️ AWS hands-on con CDK](aws-practica.md)
 
 - **Enlaces**
   - [Repositorio en GitHub](https://github.com/jzamituy/fullstack-roadmap)

@@ -8,6 +8,8 @@
 
 **Para practicar.** Una cuenta AWS (capa gratuita), el **AWS CLI** (`aws configure`) y el **AWS SDK v3** para Node (`@aws-sdk/client-*`). Para infraestructura como código, **AWS CDK** (en TypeScript, ideal para vos) o Terraform. Cuidado con los costos: apagá lo que levantes.
 
+> Este módulo cubre los **conceptos y el criterio** (qué servicio elegir y cuándo). La **práctica con código** —infraestructura como código con CDK, más S3, RDS/Aurora, API Gateway, SNS, ElastiCache, Step Functions, networking, costos y el Well-Architected Framework— vive en el módulo siguiente, **[AWS hands-on con CDK](aws-practica.md)**.
+
 **Índice de módulos**
 1. El modelo mental de AWS (regiones, IAM, "todo es un servicio")
 2. Cómputo: Lambda vs. ECS/Fargate (cuándo cada uno)
