@@ -2,7 +2,7 @@
 
 **Para frontend en transición a full stack · de lo básico a lo avanzado · 2026**
 
-> Cómo usar esta guía: leé la teoría de cada módulo, hacé los ejercicios **sin mirar las soluciones**, y recién después contrastá con la sección final. NestJS es un framework de Node.js sobre TypeScript que usa **decoradores** y **inyección de dependencias**; si venís de React, pensalo como "Angular para el backend". Para practicar, arrancá un proyecto con `npm i -g @nestjs/cli` y `nest new mi-api` (o probá los snippets mentalmente; el foco acá es entender los patrones). El `tsconfig` que genera el CLI ya viene en modo estricto y con `experimentalDecorators`.
+> Cómo usar esta guía: leé la teoría de cada módulo, hacé los ejercicios **sin mirar las soluciones**, y recién después contrastá con la sección final. NestJS es un framework de Node.js sobre TypeScript que usa **decoradores** y **inyección de dependencias**; si venís de React, pensalo como "Angular para el backend". Para practicar, arrancá un proyecto con `npm i -g @nestjs/cli` y `nest new mi-api` (o probá los snippets mentalmente; el foco acá es entender los patrones). El `tsconfig` que genera el CLI ya viene en modo estricto y con `experimentalDecorators` + `emitDecoratorMetadata`. Este último, junto con `reflect-metadata`, es lo que habilita la **DI por tipo**: Nest lee el tipo del parámetro del constructor para saber qué inyectar. Por eso las **clases** se inyectan sin token, pero las **interfaces** (que no existen en runtime) sí lo necesitan.
 
 **Índice de módulos**
 1. Arquitectura: módulos, controladores y providers
@@ -91,7 +91,7 @@ export class UsersController {
 }
 ```
 
-Nest serializa automáticamente lo que retornás a JSON y responde `200` (o `201` en `@Post`). Para cambiar el código usás `@HttpCode(204)`.
+Nest serializa automáticamente lo que retornás a JSON y responde `200` (o `201` en `@Post`). Para cambiar el código usás `@HttpCode(204)`. Ojo con `@Res()`: si respondés a mano (`res.json(...)`), **desactivás la serialización y el manejo de status de Nest** salvo que pases `@Res({ passthrough: true })`. Por eso conviene evitar `@Res()` salvo necesidad real.
 
 **Ejercicios 2**
 2.1 Escribí un método que maneje `GET /products/:id` y devuelva `{ id }` (el `id` viene como string del param).
@@ -128,7 +128,7 @@ export class ServicioX {
 }
 ```
 
-Las interfaces de TS **no existen en runtime**, por eso para inyectar "una interfaz" usás un token (string o `Symbol`) y `useClass`/`useValue`.
+Las interfaces de TS **no existen en runtime**, por eso para inyectar "una interfaz" usás un token (string o `Symbol`) y `useClass`/`useValue`. En producción se prefiere un **`Symbol` centralizado en una constante** (`export const MAILER = Symbol('MAILER')`) en vez de strings mágicos repetidos: evita colisiones y errores de tipeo entre el `provide` y el `@Inject`.
 
 **Ejercicios 3**
 3.1 Tenés `@Injectable() class Logger { log(msg: string): void {} }`. Escribí un `OrdersService` que lo reciba por constructor y tenga un método `crear()` que loguee `"orden creada"`.
@@ -196,11 +196,11 @@ Para activarlo globalmente (en `main.ts`):
 
 ```ts
 app.useGlobalPipes(
-  new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true }),
+  new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),
 );
 ```
 
-`whitelist` borra propiedades no declaradas; `forbidNonWhitelisted` directamente rechaza el request si sobran props. Esto cierra el hueco del `any` que viste al hacer `JSON.parse` en el módulo de TypeScript: los datos externos quedan validados antes de tocar tu lógica.
+`whitelist` borra propiedades no declaradas; `forbidNonWhitelisted` directamente rechaza el request si sobran props; `transform: true` hace que `class-transformer` **instancie el DTO** y convierta tipos primitivos (p. ej. un `@Param` numérico llega como `number`, sin `ParseIntPipe` manual). En producción casi siempre se activan los tres juntos. Esto cierra el hueco del `any` que viste al hacer `JSON.parse` en el módulo de TypeScript: los datos externos quedan validados antes de tocar tu lógica.
 
 **Ejercicios 5**
 5.1 Escribí un `CreateUserDto` con `email` (string con formato email), `password` (string, mínimo 8 caracteres) y `edad` opcional (entero, mínimo 18). Pista: `@IsEmail`, `@MinLength`, `@IsOptional`, `@IsInt`, `@Min`.
@@ -327,12 +327,12 @@ export class TransformInterceptor implements NestInterceptor {
 }
 ```
 
-Orden de ejecución de un request: **middleware → guards → interceptors (antes) → pipes → handler → interceptors (después)**. Conocer este orden te ahorra horas de debugging.
+Orden de ejecución de un request: **middleware → guards → interceptors (antes) → pipes → handler → interceptors (después) → exception filters**. Conocer este orden te ahorra horas de debugging. Un detalle clave: como los **guards corren antes que los pipes**, dentro de un guard el body **todavía no está validado ni transformado**.
 
 **Ejercicios 9**
 9.1 Escribí un `LoggingInterceptor` que mida cuánto tarda el handler y lo loguee al terminar. Pista: tomá un timestamp antes y usá `tap(() => ...)` de RxJS en el `pipe`.
 9.2 Escribí un interceptor `EnvelopeInterceptor` que envuelva cualquier respuesta en `{ ok: true, data }`.
-9.3 Ordená estas etapas según se ejecutan: pipes, handler, guards, middleware.
+9.3 Ordená estas etapas según se ejecutan: pipes, handler, guards, middleware, interceptors (antes y después).
 
 ---
 
@@ -414,6 +414,35 @@ describe("ProductsService", () => {
 
 Para tests que necesitan el contenedor de DI, usás `Test.createTestingModule({...}).compile()` y `module.get(...)`. La clave: como el service depende de una interfaz, el mock es trivial (un objeto que la cumple), sin tocar la base real.
 
+Un test **e2e** levanta la app real y le pega con `supertest`:
+
+```ts
+import { Test } from "@nestjs/testing";
+import { INestApplication } from "@nestjs/common";
+import request from "supertest";
+import { AppModule } from "../src/app.module";
+
+describe("Products (e2e)", () => {
+  let app: INestApplication;
+
+  beforeAll(async () => {
+    const moduleRef = await Test.createTestingModule({
+      imports: [AppModule],
+    }).compile();
+    app = moduleRef.createNestApplication();
+    await app.init();
+  });
+
+  it("GET /products devuelve 200", () => {
+    return request(app.getHttpServer()).get("/products").expect(200);
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+});
+```
+
 **Ejercicios 12**
 12.1 Escribí un mock de `UserRepository` (del módulo 11) donde `findById` siempre devuelva un usuario fijo.
 12.2 Escribí un test unitario de un `UsersService` que verifique que `obtener(1)` devuelve el usuario del mock.
@@ -424,6 +453,13 @@ Para tests que necesitan el contenedor de DI, usás `Test.createTestingModule({.
 # Soluciones
 
 > Mirá esto solo después de intentarlo. Si tu solución difiere pero es correcta y type-safe, probablemente también esté bien — hay más de un camino.
+>
+> Los snippets de soluciones **omiten los imports** por brevedad (`@nestjs/common`, `class-validator`, `rxjs`, etc.) y asumen estos tipos de dominio, usados en varios módulos:
+>
+> ```ts
+> interface Usuario { id: number; email: string; }
+> interface Producto { id: number; nombre: string; precio: number; stock: number; }
+> ```
 
 ### Módulo 1
 ```ts
@@ -577,6 +613,8 @@ findActivos(
 ): { activos: boolean } {
   return { activos };
 }
+// DefaultValuePipe solo aplica si `activos` viene ausente/undefined. Si llega vacío
+//  (`?activos=`), ParseBoolPipe recibe "" y falla con 400.
 
 // 6.3
 @Injectable()
@@ -627,6 +665,9 @@ export class ApiKeyGuard implements CanActivate {
     return req.headers["x-api-key"] === "secreto";
   }
 }
+// En producción la API key se lee de ConfigService/env (NUNCA hardcodeada, como dice
+//  el módulo 10) y la comparación debería ser de tiempo constante
+//  (crypto.timingSafeEqual) para no filtrar info por el tiempo de respuesta.
 
 // 8.2
 @UseGuards(ApiKeyGuard)
@@ -663,7 +704,8 @@ export class EnvelopeInterceptor implements NestInterceptor {
 }
 
 // 9.3
-// Orden de ejecución: middleware → guards → pipes → handler.
+// Orden de ejecución: middleware → guards → interceptors (antes) → pipes →
+//  handler → interceptors (después) → exception filters.
 ```
 
 ### Módulo 10
@@ -747,4 +789,4 @@ describe("UsersService", () => {
 
 ## Siguientes pasos
 
-Con estos 12 módulos ya entendés la columna vertebral de NestJS: el flujo request → controlador → service, la DI con tokens, validación con DTOs, y la separación por capas (guards, pipes, interceptors, repositorios). Recomendado a continuación: conectar una base real con **Prisma** o **TypeORM** implementando la interfaz `Repository`, sumar **autenticación JWT** con Passport sobre el `AuthGuard`, y documentar la API con **Swagger** (`@nestjs/swagger`). Cuando eso fluya, el próximo módulo natural del temario es **bases de datos (PostgreSQL + SQL)** para no depender de un repositorio en memoria.
+Con estos 12 módulos ya entendés la columna vertebral de NestJS: el flujo request → controlador → service, la DI con tokens, validación con DTOs, y la separación por capas (guards, pipes, interceptors, repositorios). El recorrido natural por el temario desde acá: **PostgreSQL + ORM** para reemplazar el repositorio en memoria por uno real (Prisma/TypeORM sobre la interfaz `Repository`), el módulo de **Autenticación y autorización** (JWT/Passport sobre el `AuthGuard` que viste acá), **Testing** para profundizar unit + e2e, y **Swagger** (en el módulo de *Tiempo real + Swagger*) para documentar la API. Más adelante, **Patrones de diseño en NestJS** y **NestJS nivel Senior** llevan todo esto a escala de producción.
