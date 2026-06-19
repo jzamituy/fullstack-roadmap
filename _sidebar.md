@@ -17,5 +17,8 @@
 - **Bases de datos**
   - [🐘 PostgreSQL + ORM](postgresql.md)
 
+- **Seguridad**
+  - [🔐 Autenticación y autorización](autenticacion.md)
+
 - **Enlaces**
   - [Repositorio en GitHub](https://github.com/jzamituy/fullstack-roadmap)
