@@ -47,6 +47,13 @@ const datos = await fs.promises.readFile("archivo.txt"); // el hilo atiende otra
 
 El corolário, que vas a profundizar en el módulo 7: Node brilla con I/O, pero si le metés trabajo **CPU-bound** pesado en el hilo principal, lo **bloqueás** — y como es un solo hilo, *toda* la app se congela.
 
+**Un matiz clave: el thread pool de libuv.** "No bloqueante en un solo hilo" no significa que *toda* la I/O sea mágica en el kernel. Hay que distinguir:
+
+- **I/O de red** (sockets, HTTP, TCP): es realmente event-driven en el sistema operativo (`epoll`/`kqueue`); no usa hilos extra.
+- **I/O de filesystem (`fs.*`), `dns.lookup`, y operaciones de librerías nativas como `crypto` (`pbkdf2`, `bcrypt`) o `zlib`**: corren en el **thread pool de libuv**, que por defecto tiene **4 hilos** (configurable con la variable `UV_THREADPOOL_SIZE`).
+
+Esto importa en producción: si disparás muchos `bcrypt` o lecturas de archivo a la vez, podés **saturar esos 4 hilos** y formar una cola, aunque tu event loop esté libre. Por eso un `bcrypt` con factor de costo alto es, en la práctica, trabajo pesado a vigilar (conecta con el módulo 7).
+
 **Ejercicios 1**
 1.1 En una frase: ¿cómo puede un solo hilo de JavaScript atender miles de requests concurrentes?
 1.2 Clasificá cada tarea como I/O-bound o CPU-bound: (a) consultar Postgres; (b) calcular el factorial de un número gigante; (c) llamar a la API de Stripe; (d) redimensionar una imagen.
@@ -61,15 +68,18 @@ El corolário, que vas a profundizar en el módulo 7: Node brilla con I/O, pero 
 El event loop pasa por **fases**, en orden, en cada vuelta ("tick"). Las que importan conocer:
 
 1. **Timers**: ejecuta callbacks de `setTimeout` / `setInterval` vencidos.
-2. **Pending / Poll**: acá se procesan la mayoría de los callbacks de I/O (lecturas, red, DB). Es donde Node "espera" eventos nuevos si no hay nada pendiente.
-3. **Check**: ejecuta callbacks de `setImmediate`.
-4. **Close**: callbacks de cierre (ej. un socket que se cerró).
+2. **Pending callbacks**: ciertos callbacks de I/O diferidos (p. ej. algunos errores de TCP). Es una fase aparte, distinta de "poll".
+3. **Poll**: acá se procesan la mayoría de los callbacks de I/O (lecturas, red, DB). Es donde Node "espera" eventos nuevos si no hay nada pendiente.
+4. **Check**: ejecuta callbacks de `setImmediate`.
+5. **Close**: callbacks de cierre (ej. un socket que se cerró).
+
+(Node tiene además fases internas "idle/prepare" de uso interno que no necesitás manejar.)
 
 ```
    ┌─────────────┐
 ┌─>│   timers    │  setTimeout, setInterval
 │  ├─────────────┤
-│  │  pending    │
+│  │  pending    │  callbacks de I/O diferidos (errores TCP, etc.)
 │  ├─────────────┤
 │  │    poll     │  ← I/O: red, archivos, DB (acá se pasa la mayor parte del tiempo)
 │  ├─────────────┤
@@ -83,6 +93,8 @@ El event loop pasa por **fases**, en orden, en cada vuelta ("tick"). Las que imp
 La idea central: el event loop solo ejecuta **una cosa a la vez** (es un solo hilo). Si una de esas "cosas" tarda mucho (un cálculo pesado, un `while` infinito), **bloquea todo el loop**: ningún timer, ninguna I/O, ningún request se atiende hasta que termine. Esa es la razón por la que "no bloquear el event loop" es un mandamiento en Node.
 
 **Importante:** entre cada callback (y entre fases), Node vacía las **microtasks** (módulo 3). Ese detalle explica el orden de salida que confunde a todos.
+
+**`setTimeout(fn, 0)` vs `setImmediate(fn)`** (pregunta clásica de entrevista): en el **nivel top-level** el orden **no es determinista** (depende de cuánto tardó en arrancar el loop). Pero **dentro de un callback de I/O** (fase poll), `setImmediate` **siempre** corre antes que `setTimeout(fn, 0)`, porque la fase *check* viene justo después de *poll*, mientras que los timers recién se ejecutan en la vuelta siguiente.
 
 **Ejercicios 2**
 2.1 ¿En qué fase del event loop se ejecutan los callbacks de `setTimeout`? ¿Y los de la mayoría de las operaciones de I/O?
@@ -98,7 +110,7 @@ La idea central: el event loop solo ejecuta **una cosa a la vez** (es un solo hi
 - **Macrotasks** (o "tasks"): callbacks de `setTimeout`, `setInterval`, `setImmediate`, I/O. Se ejecutan en las fases del event loop (módulo 2).
 - **Microtasks**: callbacks de **Promises** (`.then`, `await`) y `queueMicrotask`. Además, `process.nextTick` tiene una cola propia con prioridad **aún mayor**.
 
-La regla de oro: **después de cada macrotask (y al terminar el código síncrono), Node vacía TODAS las microtasks pendientes antes de pasar a la siguiente macrotask.** Y dentro de las microtasks, primero `process.nextTick`, después las Promises.
+La regla de oro (en Node): **después de cada callback individual y entre cada fase del event loop** (no solo "después de cada macrotask"), Node vacía primero la cola de `process.nextTick` y luego la de microtasks/Promises, antes de continuar. Es una diferencia con el navegador, que las vacía solo al terminar cada tarea.
 
 ```ts
 console.log("1: síncrono");
@@ -154,7 +166,7 @@ fs.readFile("a.txt", (err, data) => {
 
 **2. Promises**: un objeto que representa un valor futuro (`pending` → `fulfilled`/`rejected`). Se encadenan con `.then`/`.catch`, aplanando el anidamiento.
 
-**3. async/await**: azúcar sintáctico **sobre Promises**. `await` "pausa" la función hasta que la Promise se resuelve, pero **sin bloquear el hilo** — Node sigue atendiendo otras cosas mientras tanto. El código asíncrono se lee como síncrono.
+**3. async/await**: azúcar sintáctico **sobre Promises**. `await` "pausa" la función hasta que la Promise se resuelve, pero **sin bloquear el hilo** — Node sigue atendiendo otras cosas mientras tanto. El código asíncrono se lee como síncrono. Por dentro no es una transpilación literal a `.then`: el motor compila la función `async` como una **máquina de estados** (una corrutina) que **suspende** la ejecución en cada `await` y la **reanuda** cuando la Promise se resuelve, conservando las variables locales entre medio. Eso es lo que realmente es "async de verdad".
 
 ```ts
 async function cargar(): Promise<string> {
@@ -208,7 +220,7 @@ try {
 ```
 
 - **`forEach` con async no espera**: `array.forEach(async ...)` lanza todas las Promises pero **no** las espera. Para esperar en un loop, usá `for...of` con `await`, o `Promise.all` (módulo 6).
-- **Red de seguridad global**: registrá handlers de `process.on("unhandledRejection")` y `uncaughtException` para loguear y apagar ordenadamente; pero son la **última** línea, no el mecanismo normal de manejo.
+- **Red de seguridad global**: registrá handlers de `process.on("unhandledRejection")` y `uncaughtException` para loguear y apagar ordenadamente; pero son la **última** línea, no el mecanismo normal de manejo. Importante (2026): en las versiones LTS actuales (Node 18/20/22) el comportamiento por defecto ante una unhandled rejection es **terminar el proceso** (`--unhandled-rejections=throw`); antes de Node 15 solo emitía un warning. Razón de más para `await`/`.catch` siempre.
 
 La regla: **siempre** `await` (o `.catch`) toda Promise. Una Promise sin manejar es un error que se pierde — o peor, tira el proceso.
 
@@ -294,13 +306,14 @@ La regla: **Node es para I/O, no para crunchear números en el hilo principal.**
 const todo = await fs.promises.readFile("enorme.csv");
 res.send(todo);
 
-// BIEN: lo procesa en chunks; memoria constante sin importar el tamaño
-fs.createReadStream("enorme.csv").pipe(res);
+// BIEN: lo procesa en chunks con memoria constante, y pipeline propaga errores y cierra bien
+import { pipeline } from "node:stream/promises";
+await pipeline(fs.createReadStream("enorme.csv"), res);
 ```
 
-Los tipos: **Readable** (fuente, ej. leer un archivo), **Writable** (destino, ej. una respuesta HTTP), **Transform** (transforma en el medio, ej. comprimir). Se conectan con `.pipe()` (o `pipeline()`, que maneja errores mejor).
+Los tipos: **Readable** (fuente, ej. leer un archivo), **Writable** (destino, ej. una respuesta HTTP), **Transform** (transforma en el medio, ej. comprimir). Se conectan con `pipeline()` (recomendado: maneja errores y cierra los streams) o el más viejo `.pipe()` (respeta backpressure pero **no** propaga errores).
 
-El concepto que distingue a quien entiende streams: **backpressure** (contrapresión). Si la fuente produce datos **más rápido** de lo que el destino los consume (leés un archivo veloz pero lo escribís a una red lenta), los chunks se acumularían en memoria hasta reventar. Los streams manejan esto automáticamente al usar `.pipe()`/`pipeline()`: la fuente **pausa** cuando el destino está saturado y **reanuda** cuando se libera. Por eso `.pipe()` es mejor que leer todo y escribir a mano: respeta el backpressure por vos.
+El concepto que distingue a quien entiende streams: **backpressure** (contrapresión). Si la fuente produce datos **más rápido** de lo que el destino los consume (leés un archivo veloz pero lo escribís a una red lenta), los chunks se acumularían en memoria hasta reventar. Los streams manejan esto automáticamente al usar `pipeline()`/`.pipe()`: la fuente **pausa** cuando el destino está saturado y **reanuda** cuando se libera. Por eso conectar streams es mejor que leer todo y escribir a mano: respeta el backpressure por vos (y con `pipeline()`, además, propaga errores y cierra los streams correctamente).
 
 Conexión con el resto: cuando un ORM "streamea" un resultado grande, o cuando subís/bajás archivos en tu API, estás usando streams. Entenderlos evita el clásico "se me cae el proceso por OOM (out of memory)" al manejar archivos grandes.
 
@@ -332,7 +345,7 @@ pedidos.confirmar(42); // dispara el listener → "Pedido 42 confirmado"
 
 Es **desacople**: quien emite no sabe quién escucha ni cuántos. Esto conecta directo con los **eventos de dominio** del archivo senior (`PedidoConfirmado`) y con el sistema de eventos de NestJS (`@nestjs/event-emitter`), que es justamente un `EventEmitter` integrado a la DI.
 
-Detalles a conocer: los listeners corren de forma **síncrona** en el orden en que se registraron; un error tirado dentro de un listener de `error` sin manejar puede tumbar el proceso (por eso siempre se escucha el evento `error` en streams y sockets); y hay un límite por defecto de listeners (avisa con un warning de posible "memory leak" si registrás demasiados sin querer).
+Detalles a conocer: los listeners de tus propios emisores corren de forma **síncrona** en el orden en que se registraron (aunque varios emisores nativos —como el evento `'connection'` de un server— disparan en un tick posterior); un error tirado dentro de un listener de `error` sin manejar puede tumbar el proceso (por eso siempre se escucha el evento `error` en streams y sockets); y hay un límite por defecto de listeners (avisa con un warning de posible "memory leak" si registrás demasiados sin querer).
 
 **Ejercicios 9**
 9.1 ¿Qué patrón de diseño implementa `EventEmitter` y qué desacopla?
@@ -360,7 +373,7 @@ export { miFuncion };
 
 Cómo Node decide cuál usar: por la extensión (`.mjs` = ESM, `.cjs` = CJS) o por `"type": "module"` en el `package.json` (entonces los `.js` son ESM). En proyectos TypeScript escribís `import`/`export` siempre, y el `tsconfig` (`module`) decide a qué se compila.
 
-Lo que conviene saber para no sufrir: **mezclar los dos da fricción**. Un paquete "ESM-only" no se puede `require()` desde CJS de la forma clásica; y `import` de un módulo CJS a veces necesita el default import. La tendencia 2026 es claramente hacia **ESM**, pero como hay años de librerías en CJS, entender la diferencia te ahorra errores tipo `ERR_REQUIRE_ESM` o `Cannot use import statement outside a module`.
+Lo que conviene saber para no sufrir: **mezclar los dos da fricción**. Históricamente un paquete "ESM-only" no se podía `require()` desde CJS; y `import` de un módulo CJS a veces necesita el default import. Matiz 2026: Node 20.19+ / 22+ ya permite **`require()` de módulos ESM síncronos** (sin top-level await), así que la interoperabilidad mejoró bastante respecto de años anteriores. La tendencia sigue siendo claramente hacia **ESM**, pero como hay años de librerías en CJS, entender la diferencia te ahorra errores tipo `ERR_REQUIRE_ESM` o `Cannot use import statement outside a module`.
 
 **Ejercicios 10**
 10.1 ¿Cuál es la diferencia de sintaxis básica para importar entre CommonJS y ESM?
@@ -403,7 +416,7 @@ En NestJS esto se integra con los **lifecycle hooks** (`enableShutdownHooks()`, 
 
 **Teoría.** "Si Node es un solo hilo, ¿no desperdicia los demás núcleos de la CPU?" Sí, un proceso Node usa un núcleo para tu JS. Para aprovechar más, hay tres caminos (que responden a problemas distintos):
 
-- **`cluster` / múltiples procesos**: lanzás **varios procesos** Node (idealmente uno por núcleo), todos escuchando el mismo puerto; el SO reparte las conexiones. Cada proceso tiene su propio event loop. Multiplica la capacidad de atender I/O concurrente en una sola máquina. (En la práctica moderna, esto lo hace un gestor como PM2 o, más común, corriendo varias réplicas del contenedor.)
+- **`cluster` / múltiples procesos**: lanzás **varios procesos** Node (idealmente uno por núcleo), todos escuchando el mismo puerto; el SO reparte las conexiones. Cada proceso tiene su propio event loop. Sirve para **aprovechar varios núcleos ejecutando tu JavaScript en paralelo**: ayuda cuando el cuello de botella es el CPU/JS del hilo principal (parsing, serialización, validación, render), no la espera de I/O — un solo proceso ya maneja muchísima I/O concurrente. El resultado es más throughput de requests por máquina. (En la práctica moderna esto lo hace un gestor como PM2 o, más común, corriendo varias réplicas del contenedor.)
 - **`worker_threads`**: hilos dentro de **un** proceso, pensados para trabajo **CPU-bound** (módulo 7), no para escalar I/O. Sacás el cálculo pesado del hilo principal.
 - **Escalado horizontal**: correr **muchas instancias** de tu app (en contenedores) detrás de un **load balancer**. Es el modelo dominante en la nube y el que menciona el roadmap. La capacidad crece agregando réplicas.
 
@@ -483,7 +496,8 @@ El requisito que hace posible el escalado horizontal —y la pregunta que sigue 
     `await Promise.all(ids.map((id) => borrar(id)))` (en paralelo).
 5.3 Es una Promise que se rechazó y nadie manejó con catch/try-catch. Conviene un
     handler global de unhandledRejection para loguearla y apagar ordenadamente: una
-    rejection no manejada puede, según la versión/config, tumbar el proceso.
+    rejection no manejada tumba el proceso por defecto desde Node 15+ (es el
+    comportamiento estándar en Node 18/20/22).
 ```
 
 ### Módulo 6
@@ -563,9 +577,10 @@ El requisito que hace posible el escalado horizontal —y la pregunta que sigue 
 ### Módulo 12
 ```
 12.1 cluster lanza varios PROCESOS Node (cada uno con su event loop) para aprovechar
-     varios núcleos atendiendo I/O concurrente. worker_threads son HILOS dentro de un
-     proceso, pensados para sacar trabajo CPU-bound del hilo principal, no para escalar
-     I/O.
+     varios núcleos ejecutando JavaScript en paralelo (más throughput cuando el límite
+     es el CPU/JS del hilo principal, no la I/O, que un solo proceso ya maneja de sobra).
+     worker_threads son HILOS dentro de un proceso, pensados para sacar trabajo
+     CPU-bound del hilo principal.
 12.2 Stateless = el proceso no guarda en su memoria estado que deba sobrevivir entre
      requests (sesiones, caché local). Es requisito del escalado horizontal porque cada
      request puede caer en una instancia distinta: si el estado viviera en una sola, las
