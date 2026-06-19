@@ -26,5 +26,8 @@
 - **Testing**
   - [🧪 Testing práctico](testing.md)
 
+- **DevOps**
+  - [🐳 Docker, deploy y CI/CD](docker-deploy.md)
+
 - **Enlaces**
   - [Repositorio en GitHub](https://github.com/jzamituy/fullstack-roadmap)
