@@ -9,11 +9,13 @@
 - **TypeScript**
   - [📘 Teoría + ejercicios](typescript.md)
 
-  - **Backend / NestJS**
+- **Backend / NestJS**
   - [🦅 NestJS](nestjs.md)
   - [🧩 Patrones de diseño en NestJS](nestjs-patrones.md)
   - [🎯 NestJS nivel Senior](nestjs-senior.md)
 
+- **Bases de datos**
+  - [🐘 PostgreSQL + ORM](postgresql.md)
 
 - **Enlaces**
   - [Repositorio en GitHub](https://github.com/jzamituy/fullstack-roadmap)
