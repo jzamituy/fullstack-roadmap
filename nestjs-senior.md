@@ -116,6 +116,9 @@ La jugada Senior: **un modelo por contexto**, cada uno con solo lo que ese conte
 ```ts
 // En vez de pasar `number` suelto para plata (propenso a errores: ¿centavos? ¿qué moneda?)
 class Dinero {
+  // El constructor privado recibe CENTAVOS (entero); el factory `crear` recibe
+  // unidades (ej. 9.99) y las convierte. Por eso `sumar` llama al constructor
+  // directo: ya está trabajando en centavos.
   private constructor(
     public readonly montoEnCentavos: number,
     public readonly moneda: string,
@@ -143,6 +146,7 @@ class Dinero {
 class Pedido {
   private lineas: LineaPedido[] = [];
   private estado: "borrador" | "confirmado" = "borrador";
+  private eventos: object[] = []; // eventos de dominio acumulados
 
   agregarLinea(producto: string, cantidad: number) {
     if (this.estado === "confirmado")
@@ -154,9 +158,19 @@ class Pedido {
     if (this.lineas.length === 0)
       throw new Error("Un pedido vacío no se puede confirmar"); // invariante protegida
     this.estado = "confirmado";
+    this.eventos.push(new PedidoConfirmado(/* id */)); // registra el hecho, no lo publica
+  }
+
+  // el caso de uso "drena" estos eventos tras guardar y los vuelca al outbox (sección 3.3)
+  drenarEventos(): object[] {
+    const e = this.eventos;
+    this.eventos = [];
+    return e;
   }
 }
 ```
+
+El agregado **registra** los eventos de dominio (no los publica): el caso de uso los drena después de guardar y los escribe en el `outbox` (sección 3.3). Esos son los mismos eventos de dominio que consumen los módulos de **Redis** (colas) y **AWS** (EventBridge).
 
 La regla clave del agregado: **es el límite de una transacción**. Modificás un agregado por operación, y se guarda entero o no se guarda. Esto evita estados inconsistentes y te dice naturalmente dónde poner los límites transaccionales (ver sección 3).
 
@@ -225,6 +239,8 @@ await this.uow.runInTransaction(async (tx) => {
 - A favor: garantía real de "se guardó el cambio ⟺ se publicará el evento" (al menos una vez).
 - En contra: agregás una tabla, un worker y la posibilidad de entregar un evento **más de una vez** (de ahí la importancia de la idempotencia, abajo).
 - Cuándo: siempre que un cambio de estado deba propagarse a otro sistema de forma confiable. Es de los patrones que más diferencian a un Senior backend.
+
+El worker que publica el outbox se implementa de dos formas: **polling** de la tabla (simple, con algo de latencia y carga sobre la DB) o **CDC** (Change Data Capture, ej. Debezium leyendo el WAL de Postgres) — más complejo de operar pero sin polling. Si el orden importa, garantizalo **por agregado**, no global. Y del lado del consumidor, el complemento del outbox es el **inbox**: registrar los IDs de eventos ya procesados para deduplicar (la idempotencia de 3.4 aplicada a la recepción).
 
 ### 3.4 Idempotencia (imprescindible en sistemas distribuidos)
 
@@ -324,6 +340,8 @@ export class PagosModule {}
 
 Usar un `Symbol` como token (en vez de un string) evita colisiones de nombres entre módulos: es la práctica prolija.
 
+> Nota: el ternario por `NODE_ENV` de arriba es un ejemplo simplificado. En producción el binding debería ser **fijo** (`useClass: StripeAdapter`); en los tests se sustituye con `Test.createTestingModule(...).overrideProvider(PAGO_PORT).useClass(PagoFalsoAdapter)`, sin ramificar el módulo de producción por entorno.
+
 ### 5.2 Scopes de DI y por qué importan para performance
 
 Los providers son **singleton por defecto** (una instancia para toda la app), y eso es lo que querés el 99% del tiempo. Nest ofrece otros scopes:
@@ -366,7 +384,7 @@ En Nest, los **interceptors** son el lugar natural para instrumentar (medir tiem
 ### 6.2 Performance: los sospechosos de siempre
 
 - **Problema N+1**: hacés 1 query para traer N pedidos y luego 1 query por cada uno para sus líneas → N+1 queries. Es la causa #1 de lentitud con ORMs. Se resuelve con eager loading / joins / dataloader. Saber detectarlo (mirando los logs de SQL) es básico Senior.
-- **Caché**: la estrategia más común es **cache-aside** (buscás en caché; si no está, vas a la DB y guardás en caché). Con Redis. Lo difícil no es cachear: es **invalidar** (mantener el caché coherente cuando el dato cambia). "Hay solo dos problemas difíciles en computación: invalidación de caché y nombrar cosas".
+- **Caché**: la estrategia más común es **cache-aside** (buscás en caché; si no está, vas a la DB y guardás en caché). Con Redis. Lo difícil no es cachear: es **invalidar** (mantener el caché coherente cuando el dato cambia). Estrategias concretas: **TTL** (expiración como red de seguridad, siempre), **write-through** (escribís en caché y DB juntas) e **invalidación dirigida por eventos de dominio** (cuando el dato cambia, un evento invalida la clave) — esto último engancha con el outbox y se detalla en el módulo de Redis. Relacionado: las **claves de idempotencia** (3.4) también necesitan TTL o limpieza periódica, o la tabla crece sin control. "Hay solo dos problemas difíciles en computación: invalidación de caché y nombrar cosas".
 - **Connection pooling**: la DB tiene un límite de conexiones; reusás un pool en vez de abrir/cerrar por request. Dimensionar el pool (ni muy chico = cuello de botella, ni muy grande = saturás la DB) es ajuste fino Senior.
 - **Índices**: la diferencia entre una query de 5ms y una de 5s suele ser un índice. Pertenece tanto a backend como a DB.
 
@@ -389,6 +407,10 @@ Qué mockear y qué no (criterio Senior): mockeá lo que está **fuera de tu con
 ### 7.3 Contract testing
 
 Entre microservicios, los tests e2e de todo junto son frágiles. El **contract testing** verifica que cada servicio respeta el "contrato" (el formato de mensajes) que los otros esperan, probando cada servicio por separado contra ese contrato. Te da confianza de que la integración funciona sin levantar todo el sistema.
+
+### 7.4 Más allá de la cobertura: mutation y carga
+
+La cobertura dice qué líneas se ejecutan, no si tus aserciones valen. El **mutation testing** (ej. Stryker) introduce cambios pequeños en el código ("mutantes") y verifica que algún test falle; si ninguno se rompe, esa aserción no estaba probando nada. Es la forma concreta de medir la *calidad* de la suite, no su tamaño. Aparte, los **tests de carga/performance** (k6, Artillery) validan latencia p95/p99 y throughput bajo presión — criterio Senior que la pirámide funcional no cubre.
 
 ---
 
