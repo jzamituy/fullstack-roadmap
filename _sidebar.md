@@ -29,5 +29,8 @@
 - **DevOps**
   - [🐳 Docker, deploy y CI/CD](docker-deploy.md)
 
+- **Caché y colas**
+  - [⚡ Redis: caché, colas y jobs](redis.md)
+
 - **Enlaces**
   - [Repositorio en GitHub](https://github.com/jzamituy/fullstack-roadmap)
