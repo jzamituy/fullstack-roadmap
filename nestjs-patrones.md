@@ -2,7 +2,7 @@
 
 **De los que el framework te impone a los que aplicás por criterio · orientado a lo laboral**
 
-> Cómo usar esta página: leé la teoría de cada módulo, intentá los ejercicios **sin mirar las soluciones**, y contrastá al final. Los ejemplos asumen que ya configuraste un proyecto Nest (`nest new`) con `tsconfig` estricto y `experimentalDecorators` activado (viene por defecto). No hace falta correr todo: el objetivo es entender el *porqué* de cada patrón.
+> Cómo usar esta página: leé la teoría de cada módulo, intentá los ejercicios **sin mirar las soluciones**, y contrastá al final. Los ejemplos asumen que ya configuraste un proyecto Nest (`nest new`) con `tsconfig` estricto y `experimentalDecorators` activado (viene por defecto). No hace falta correr todo: el objetivo es entender el *porqué* de cada patrón. Los snippets **omiten los imports** por brevedad (`@nestjs/common`, `class-validator`, `class-transformer`, `rxjs`, `@nestjs/cqrs`); en un proyecto real los traés de esos paquetes.
 
 **Índice**
 1. Inversión de Control e Inyección de Dependencias (DI)
@@ -13,6 +13,7 @@
 6. Provider patterns (useClass / useValue / useFactory) y Strategy
 7. CQRS + Mediator (introducción)
 8. Ports & Adapters (Hexagonal)
+9. Custom decorators (parameter decorators)
 
 Las soluciones de todos los ejercicios están al final.
 
@@ -41,7 +42,7 @@ class UsuarioService {
 
 ¿Por qué importa? Porque `UsuarioService` no depende de *cómo* se construye `EmailService`. En un test podés inyectar un mock. Ese desacople es lo que habilita todo lo demás (Repository, Hexagonal, etc.).
 
-Los providers son **singleton por defecto** (una sola instancia para toda la app). Existen otros scopes (`REQUEST`, `TRANSIENT`) para casos puntuales, pero el default es lo normal.
+Los providers son **singleton por defecto** (una sola instancia para toda la app). Existen otros scopes para casos puntuales: **`REQUEST`** crea una instancia por request (útil para datos del request actual, p. ej. multi-tenant o el usuario autenticado), y **`TRANSIENT`** entrega una instancia nueva a cada consumidor (cuando cada uno necesita su propio estado). Ambos tienen costo de performance, así que el default singleton es lo normal.
 
 **Ejercicios 1**
 1.1 Explicá en una o dos frases la diferencia entre "crear" una dependencia con `new` dentro de una clase y "inyectarla" por constructor. ¿Qué problema de testeo resuelve la inyección?
@@ -81,7 +82,7 @@ Los **módulos dinámicos** (`forRoot`/`forFeature`) permiten configurar un mód
 
 `Middleware → Guard → Interceptor (antes) → Pipe → Handler → Interceptor (después) → Exception Filter (si hay error)`
 
-- **Guard** — decide si el request sigue (autorización). Devuelve `boolean`. Implementa `CanActivate`.
+- **Guard** — decide si el request sigue (autorización). Devuelve `boolean | Promise<boolean> | Observable<boolean>` (puede ser async). Implementa `CanActivate`.
 - **Pipe** — transforma/valida el input antes de llegar al handler (ej. `ValidationPipe` con DTOs).
 - **Interceptor** — envuelve el handler: podés transformar la respuesta, medir tiempo, cachear. Patrón decorador/proxy.
 - **Exception Filter** — captura excepciones y arma la respuesta de error centralizada.
@@ -97,6 +98,8 @@ class RolesGuard implements CanActivate {
 ```
 
 La gracia: estos se aplican con decoradores (`@UseGuards`, `@UsePipes`, `@UseInterceptors`) a nivel método, controller o global, sin ensuciar la lógica.
+
+Un detalle fino del orden: como el **guard corre antes que los pipes**, dentro de un guard el body **todavía no está validado ni transformado** por el `ValidationPipe`. Si tu guard necesitara datos del body ya validados, repensá el diseño (eso va en un interceptor o en el handler, no en el guard).
 
 **Ejercicios 3**
 3.1 Para cada necesidad, indicá cuál de los cuatro (guard / pipe / interceptor / filter) corresponde:
@@ -131,7 +134,23 @@ class UsuarioService {
 }
 ```
 
-Como TypeScript borra las interfaces en runtime, en Nest se inyecta usando un **token** (string o symbol) y un provider que mapea ese token a la implementación concreta. Ese registro vive en el módulo.
+Como TypeScript borra las interfaces en runtime, en Nest se inyecta usando un **token** (string o symbol) y un provider que mapea ese token a la implementación concreta. Ese registro vive en el módulo, y el token del `@Inject` **debe coincidir exactamente** con el `provide`:
+
+```ts
+export const USUARIO_REPO = Symbol("UsuarioRepository"); // token centralizado
+
+@Module({
+  providers: [
+    { provide: USUARIO_REPO, useClass: UsuarioRepositoryPostgres },
+  ],
+})
+export class UsuarioModule {}
+
+// en el service:
+// constructor(@Inject(USUARIO_REPO) private readonly repo: UsuarioRepository) {}
+```
+
+Usá un **`Symbol` en una constante** (no un string mágico repetido): evita colisiones y errores de tipeo entre el `provide` y el `@Inject`.
 
 **Ejercicios 4**
 4.1 ¿Por qué tipar el service contra `UsuarioRepository` (interfaz) y no contra `UsuarioRepositoryPostgres` (clase concreta) facilita los tests?
@@ -159,6 +178,21 @@ class UsuarioPublicoDTO {
 ```
 
 El **Mapper** es la función/clase que convierte entidad ↔ DTO. Mantener ese mapeo en un solo lugar evita que datos sensibles se filtren por accidente.
+
+La forma idiomática de Nest para no exponer campos sensibles, además del mapper manual, es **`class-transformer` + `ClassSerializerInterceptor`**: marcás los campos a ocultar con `@Exclude()` en la entidad y Nest los filtra al serializar la respuesta:
+
+```ts
+import { Exclude } from "class-transformer";
+
+class Usuario {
+  id!: number;
+  email!: string;
+  @Exclude() password!: string; // nunca sale en la respuesta
+}
+// se activa global con: app.useGlobalInterceptors(new ClassSerializerInterceptor(reflector))
+```
+
+El mapper manual da más control (DTOs distintos por endpoint y por versión de API); el `ClassSerializerInterceptor` es más rápido de aplicar. Las dos vías se usan en producción, y conocer la segunda es lo que se espera en entrevistas.
 
 **Ejercicios 5**
 5.1 Nombrá dos riesgos concretos de devolver directamente la entidad de la base de datos en la respuesta HTTP en vez de un DTO de salida.
@@ -191,10 +225,11 @@ const repo = {
 El **patrón Strategy** aparece de forma natural en auth: cada estrategia de Passport (JWT, local, Google) es una implementación intercambiable de "cómo autenticar". Elegís la estrategia sin cambiar el resto.
 
 **Ejercicios 6**
-6.1 Para cada caso elegí `useClass`, `useValue` o `useFactory`:
+6.1 Para cada caso elegí `useClass`, `useValue`, `useFactory` o `useExisting`:
   (a) Inyectar un objeto de configuración fijo leído de variables de entorno.
   (b) Decidir en runtime, según config, qué implementación de repositorio usar.
   (c) Registrar un service normal.
+  (d) Exponer un provider ya existente bajo un segundo token (alias).
 6.2 Escribí un provider con `useValue` que registre bajo el token `"MAILER"` un mock con un método `enviar` que no haga nada (para tests).
 6.3 Explicá con tus palabras por qué Passport + estrategias es un ejemplo del patrón Strategy. ¿Qué es lo "intercambiable"?
 
@@ -253,9 +288,38 @@ En Nest esto se logra: definís interfaces (puertos), inyectás contra ellas con
 
 ---
 
+## Módulo 9 — Custom decorators (parameter decorators)
+
+**Teoría.** Además de los decoradores que trae Nest, podés crear los tuyos con `createParamDecorator` para extraer datos del request de forma declarativa y reutilizable. El caso típico es `@CurrentUser()`: saca el usuario que un guard de auth dejó en `request.user`, evitando repetir `req.user` (y su casteo) en cada handler.
+
+```ts
+import { createParamDecorator, ExecutionContext } from "@nestjs/common";
+
+export const CurrentUser = createParamDecorator(
+  (_data: unknown, ctx: ExecutionContext) => {
+    const req = ctx.switchToHttp().getRequest<{ user?: unknown }>();
+    return req.user;
+  },
+);
+
+// uso en el handler:
+@Get("perfil")
+perfil(@CurrentUser() user: Usuario) {
+  return user;
+}
+```
+
+Es uno de los patrones más usados y preguntados en NestJS real: encapsula el acceso al request, mantiene los handlers limpios y es trivialmente testeable. Combinado con un guard de auth, `@CurrentUser()` es el estándar de facto. El parámetro `data` del decorador permite parametrizarlo (ej. `@CurrentUser("email")` para extraer solo un campo).
+
+**Ejercicios 9**
+9.1 ¿Qué ventaja da `@CurrentUser()` frente a leer `req.user` con `@Req()` en cada handler?
+9.2 Escribí un decorator `@HeaderValue(nombre)` con `createParamDecorator` que extraiga un header arbitrario del request por su nombre (usá el parámetro `data`).
+
+---
+
 # Soluciones
 
-> Mirá esto solo después de intentarlo.
+> Mirá esto solo después de intentarlo. Los snippets omiten imports por brevedad y asumen los tipos de dominio `Usuario` y `Producto`.
 
 ### Módulo 1
 ```
@@ -267,6 +331,7 @@ En Nest esto se logra: definís interfaces (puertos), inyectás contra ellas con
 // 1.2
 @Injectable()
 class LoggerService { log(msg: string) { console.log(msg); } }
+// (En producción se usa el Logger de @nestjs/common en vez de console.log directo.)
 
 @Injectable()
 class PagoService {
@@ -376,7 +441,7 @@ class CrearProductoDTO {
 
 ### Módulo 6
 ```
-6.1 (a) useValue   (b) useFactory   (c) useClass
+6.1 (a) useValue   (b) useFactory   (c) useClass   (d) useExisting
 6.3 Es Strategy porque "cómo autenticar" es un algoritmo intercambiable: JWT,
     local, Google son estrategias distintas con la misma interfaz. El resto de
     la app pide "autenticar" sin saber cuál se usa; cambiar de estrategia no
@@ -416,8 +481,8 @@ interface PagoPort {
 
 @Injectable()
 class StripeAdapter implements PagoPort {
-  async cobrar(monto: number, token: string): Promise<boolean> {
-    // llamada real a Stripe...
+  async cobrar(_monto: number, _token: string): Promise<boolean> {
+    // acá iría la llamada real a Stripe usando monto y token
     return true;
   }
 }
@@ -434,6 +499,25 @@ class PagoFalsoAdapter implements PagoPort {
     En tests inyectás PagoFalsoAdapter y probás la lógica sin red ni claves; en
     producción cambiás de proveedor de pago implementando otro adaptador, sin
     tocar el dominio.
+```
+
+### Módulo 9
+```
+9.1 Encapsula y nombra la intención (`user`), evita repetir el acceso crudo a
+    `req.user` y su casteo en cada handler, y centraliza el cambio si la forma del
+    request cambia. Deja los handlers más limpios y declarativos.
+```
+```ts
+// 9.2
+export const HeaderValue = createParamDecorator(
+  (nombre: string, ctx: ExecutionContext) => {
+    const req = ctx
+      .switchToHttp()
+      .getRequest<{ headers: Record<string, string | undefined> }>();
+    return req.headers[nombre.toLowerCase()];
+  },
+);
+// uso: perfil(@HeaderValue("x-tenant-id") tenant?: string) { ... }
 ```
 
 ---
