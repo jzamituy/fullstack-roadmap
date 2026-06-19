@@ -61,6 +61,8 @@ El criterio de elección:
 
 La regla práctica: tu **API NestJS** de tráfico sostenido vive cómoda en **Fargate** (es tu imagen Docker corriendo gestionada); los **trabajos event-driven** (procesar lo que cae en una cola, reaccionar a un evento) son el caso ideal de **Lambda**. Muchas arquitecturas usan **ambos**: Fargate para la API, Lambda para el procesamiento asíncrono.
 
+Hay opciones intermedias que conviene tener en el radar: **AWS App Runner** es un "Fargate simplificado" — le das tu imagen (o tu repo) y AWS levanta la API con balanceo, HTTPS y autoescalado sin que configures ALB, cluster ni red a mano; ideal para una API contenedorizada cuando no necesitás el control fino de ECS. También existen **Lambda con contenedores** (empaquetar la función como imagen, hasta 10 GB) y **ECS sobre EC2** (vos administrás las máquinas, para cargas grandes y estables donde el costo importa). Para el criterio de este módulo, el eje sigue siendo **Lambda (event-driven/esporádico) vs. Fargate (siempre encendido)**; App Runner es el atajo cuando solo querés "subí mi contenedor y andá".
+
 **Ejercicios 2**
 2.1 Nombrá dos limitaciones de Lambda que lo hacen inadecuado para una API web de tráfico constante.
 2.2 ¿Qué es Fargate y qué te ahorra respecto de correr contenedores sobre EC2 vos mismo?
@@ -139,7 +141,7 @@ El error de criterio: meter una API web entera de alto tráfico constante en Lam
 Dos tipos:
 
 - **Standard**: throughput casi ilimitado, entrega **al menos una vez** (puede duplicar) y orden **best-effort** (no garantizado). Para la mayoría de los casos.
-- **FIFO**: orden estricto y procesamiento **exactly-once** (deduplicación), a cambio de menor throughput. Cuando el orden importa (procesar eventos de una misma cuenta en secuencia).
+- **FIFO**: orden estricto y **deduplicación en la entrega** (exactly-once *delivery* dentro de una ventana de 5 minutos), a cambio de menor throughput. Cuando el orden importa (procesar eventos de una misma cuenta en secuencia). Ojo: ese "exactly-once" es *de entrega y acotado a 5 minutos*, no una garantía absoluta de procesamiento único en tu lógica — ante reprocesos o ventanas más largas, la **idempotencia del consumidor sigue siendo la red de seguridad**.
 
 Conceptos clave (varios ya los conocés del módulo de Redis):
 
@@ -151,9 +153,13 @@ Conceptos clave (varios ya los conocés del módulo de Redis):
 import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 
 const sqs = new SQSClient({});
+// validá la env var al arrancar: process.env.X es string | undefined,
+// y QueueUrl exige string (en --strict, pasarla directo no compila)
+const QueueUrl = process.env.EMAIL_QUEUE_URL;
+if (!QueueUrl) throw new Error("Falta EMAIL_QUEUE_URL");
 // productor: encolar un trabajo (tu API lo hace y responde rápido)
 await sqs.send(new SendMessageCommand({
-  QueueUrl: process.env.EMAIL_QUEUE_URL,
+  QueueUrl,
   MessageBody: JSON.stringify({ to: "ana@test.com", tipo: "bienvenida" }),
 }));
 // el consumidor suele ser una Lambda (módulo 4) disparada por la cola
@@ -212,6 +218,7 @@ La diferencia con EventBridge —una pregunta clásica de arquitectura— está 
 |---|---|---|
 | Modelo | Enrutar/filtrar eventos a destinos | Stream ordenado de registros |
 | Volumen | Moderado, eventos de negocio discretos | Altísimo (miles/seg), telemetría/analytics |
+| Tamaño máx | 256 KB por evento | 1 MB por registro |
 | Orden | No garantizado | Ordenado **por shard** (partition key) |
 | Reproceso | Archive & replay | Retención (hasta 365 días), re-leer desde un punto |
 | Consumidores | Reglas → targets | Múltiples consumidores leen el mismo stream a su ritmo |
@@ -246,7 +253,10 @@ Conceptos núcleo:
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, QueryCommand } from "@aws-sdk/lib-dynamodb";
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+// removeUndefinedValues evita el error típico al guardar ítems con campos undefined
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
+  marshallOptions: { removeUndefinedValues: true },
+});
 // traer todas las tareas de un proyecto: PK = PROYECTO#1, SK empieza con TAREA#
 const res = await ddb.send(new QueryCommand({
   TableName: "app",
@@ -298,6 +308,8 @@ Para **secretos** (el `JWT_SECRET`, la `DATABASE_URL`):
 
 Tu app los lee en runtime (la Task Definition de Fargate o la Lambda los inyecta como variables de entorno o los pide al arrancar) — exactamente el principio del módulo de Docker: **secretos fuera del código y de la imagen, inyectados desde afuera**, ahora con el gestor de AWS. Combinado con el rol que da acceso solo a *esos* secretos, tenés defensa en profundidad.
 
+**Mínimo privilegio también a nivel de red.** El mismo criterio de "solo lo necesario" aplica a la **VPC**: el **ALB** va en **subnets públicas** (es lo único expuesto a internet), mientras tu **cómputo (Fargate/Lambda) y tu base (RDS) viven en subnets privadas**, sin IP pública. El acceso entre piezas se abre con **security groups** puntuales: el SG de la DB solo acepta tráfico desde el SG de la app en el puerto de Postgres, no desde cualquier lado. Así, aunque alguien llegue al ALB, no toca la base directo. La práctica detallada (cómo se arma esa red con CDK) vive en el módulo siguiente, pero el **criterio** —exponer lo mínimo, todo lo demás privado— es parte del diseño senior.
+
 **Ejercicios 10**
 10.1 ¿Por qué tu Lambda/Fargate debe usar un **rol IAM** en vez de access keys hardcodeadas? ¿Qué riesgo evita?
 10.2 ¿Cómo se aplica el principio de mínimo privilegio (del senior) al definir los permisos de un servicio en AWS?
@@ -318,17 +330,19 @@ Cliente
                 │ publica "PedidoConfirmado"
                 ▼
          [EventBridge: app-bus]
-            │         │          │
-   regla ───┘   regla─┘    regla─┘
-      ▼            ▼            ▼
-[Lambda Envíos] [SQS→Lambda   [Kinesis →
-                 Facturación]   Analytics/ML]
-      │
-      ▼
- [DynamoDB: estado de envíos]
+            │           │             │
+        regla 1     regla 2       regla 3
+            ▼           ▼             ▼
+      (1) Envíos   (2) Facturación  (3) Analytics
+
+Leyenda de targets (cada regla enruta el evento a un destino independiente):
+  (1) Envíos      → [Lambda Envíos] → [DynamoDB: estado de envíos]
+  (2) Facturación → [SQS (buffer + DLQ)] → [Lambda Facturación]
+  (3) Analytics   → [Kinesis] → pipeline de datos / ML
 
 Observabilidad transversal: CloudWatch (logs/métricas/alarmas) + X-Ray/OTel (trazas)
 Seguridad: cada componente con su rol IAM (mínimo privilegio), secretos en Secrets Manager
+Red: ALB en subnet pública; Fargate, Lambda y RDS en subnets privadas (security groups)
 ```
 
 Cómo se conecta con todo lo que estudiaste:
@@ -410,9 +424,11 @@ El criterio que demuestra seniority (el hilo de todo el archivo senior): **no me
 ### Módulo 5
 ```
 5.1 Standard: throughput casi ilimitado, entrega al menos una vez (puede duplicar) y
-    orden no garantizado. FIFO: orden estricto y procesamiento exactly-once, con menor
-    throughput. Necesitás FIFO cuando el orden de los mensajes importa (ej. procesar en
-    secuencia eventos de una misma entidad).
+    orden no garantizado. FIFO: orden estricto y deduplicación en la entrega (exactly-once
+    delivery dentro de una ventana de 5 min), con menor throughput. Necesitás FIFO cuando
+    el orden de los mensajes importa (ej. procesar en secuencia eventos de una misma
+    entidad). Aun con FIFO, el consumidor debería ser idempotente para reprocesos o
+    ventanas mayores a 5 min.
 5.2 Deben ser idempotentes: como un mensaje puede entregarse más de una vez, procesarlo
     dos veces tiene que dar el mismo resultado que una (si no, duplicás cobros/emails).
     Es el mismo requisito del módulo de Redis y del archivo senior.
