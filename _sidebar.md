@@ -9,19 +9,19 @@
 - **TypeScript**
   - [📘 Teoría + ejercicios](typescript.md)
 
-- **Backend / NestJS**
-  - [🦅 NestJS](nestjs.md)
-  - [🧩 Patrones de diseño en NestJS](nestjs-patrones.md)
-  - [🎯 NestJS nivel Senior](nestjs-senior.md)
+- **Backend**
+  - **NestJS**
+    - [🦅 NestJS](nestjs.md)
+    - [🧩 Patrones de diseño en NestJS](nestjs-patrones.md)
+    - [🎯 NestJS nivel Senior](nestjs-senior.md)
+  - **Node.js**
+    - [⚙️ Node.js por dentro](nodejs.md)
 
 - **Bases de datos**
   - [🐘 PostgreSQL + ORM](postgresql.md)
 
 - **Seguridad**
   - [🔐 Autenticación y autorización](autenticacion.md)
-
-- **Node.js**
-  - [⚙️ Node.js por dentro](nodejs.md)
 
 - **Enlaces**
   - [Repositorio en GitHub](https://github.com/jzamituy/fullstack-roadmap)
