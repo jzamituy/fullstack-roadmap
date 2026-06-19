@@ -21,6 +21,29 @@ Las soluciones de **todos** los ejercicios están al final, en la sección "Solu
 
 ---
 
+## Antes de empezar: el `tsconfig` estricto
+
+Todo este módulo asume `"strict": true`. Ese único flag enciende un grupo de chequeos; estos son los que más vas a notar:
+
+```jsonc
+// tsconfig.json
+{
+  "compilerOptions": {
+    "strict": true,                    // enciende el grupo de abajo:
+    //   "strictNullChecks": true,     // null/undefined no son asignables a cualquier cosa
+    //   "noImplicitAny": true,        // prohíbe el `any` implícito
+    //   "strictFunctionTypes": true,
+    //   "strictPropertyInitialization": true, // las props de clase deben inicializarse
+    // Recomendado sumar (NO viene incluido en `strict`):
+    "noUncheckedIndexedAccess": true   // `arr[i]` y `obj[k]` pasan a ser `T | undefined`
+  }
+}
+```
+
+`noUncheckedIndexedAccess` no es parte de `strict`, pero es la diferencia entre *creer* que `arr[0]` es `T` y *saber* que puede ser `undefined`. Por eso varias soluciones (5.3, 6.1) devuelven `T | undefined`: es lo correcto incluso sin esa flag, y obligatorio con ella.
+
+---
+
 ## Módulo 1 — Tipos básicos e inferencia
 
 **Teoría.** TypeScript es JavaScript + un sistema de tipos que se chequea en tiempo de compilación. Los tipos primitivos son `string`, `number`, `boolean`, `null`, `undefined`, `symbol`, `bigint`. TS **infiere** el tipo cuando inicializás una variable, así que no hace falta anotar todo:
@@ -125,7 +148,7 @@ Los literales evitan los "stringly-typed bugs": el compilador te frena si escrib
 
 ## Módulo 5 — Arrays, tuplas y enums
 
-**Teoría.** Arrays se tipan `number[]` o `Array<number>`. Las *tuplas* son arrays de longitud y tipos fijos por posición: `[string, number]`. Los `enum` agrupan constantes con nombre, aunque en 2026 muchos prefieren *uniones de literales* o `as const` por ser más livianos y sin código generado.
+**Teoría.** Arrays se tipan `number[]` o `Array<number>`. Las *tuplas* son arrays de longitud y tipos fijos por posición: `[string, number]`. Los `enum` agrupan constantes con nombre, aunque en 2026 muchos prefieren *uniones de literales* o `as const`: los `enum` numéricos permiten asignaciones inválidas (`let r: Rol = 99` **no da error**), y todo `enum` no-`const` **emite un objeto JS en runtime**. El `const enum` no emite código, pero falla con `isolatedModules` y con transpiladores como esbuild/swc (habituales en backend Node). Por eso las uniones `as const` son la opción por defecto hoy.
 
 ```ts
 const ids: number[] = [1, 2, 3];
@@ -246,10 +269,38 @@ async function obtenerUsuario(id: number): Promise<Usuario | null> {
 
 Cuidado: `await res.json()` devuelve `any` (o `unknown` en libs modernas); en producción validás con algo como Zod, pero para practicar alcanza con un cast consciente.
 
+**Errores en `catch` (clave en backend).** En modo `--strict`, el parámetro de un `catch` es de tipo `unknown`, no `Error` ni `any`: no podés tocar `e.message` sin estrechar primero. El patrón seguro:
+
+```ts
+try {
+  await obtenerUsuario(1);
+} catch (e: unknown) {
+  const mensaje = e instanceof Error ? e.message : String(e);
+  console.error(mensaje);
+}
+```
+
+**Del tipo al runtime con Zod.** El `as Usuario` de arriba es una promesa que TS no puede verificar: si la API devuelve otra cosa, explota en runtime. La forma profesional de cerrar ese hueco (el mismo `any` de `JSON.parse`/`res.json()`) es validar con un *schema* y **derivar el tipo de él**, así tipo y validación nunca se desincronizan:
+
+```ts
+import { z } from "zod";
+
+const UsuarioSchema = z.object({ id: z.number(), email: z.string().email() });
+type Usuario = z.infer<typeof UsuarioSchema>; // el tipo SALE del schema
+
+async function obtenerUsuarioSeguro(id: number): Promise<Usuario> {
+  const res = await fetch(`/api/users/${id}`);
+  return UsuarioSchema.parse(await res.json()); // valida en runtime y tipa
+}
+```
+
+Lo profundizás en el módulo de validación, pero internalizá el principio: **los datos que entran desde afuera (request, env vars, API de terceros) se validan en runtime, y el tipo se deriva del validador, no al revés.**
+
 **Ejercicios 9**
 9.1 Tipá `esperar(ms: number): Promise<void>` que resuelva tras un `setTimeout`.
 9.2 Escribí `obtenerProducto(id: number): Promise<Resultado<Producto>>` (usando el `Resultado<T>` del módulo 8) que simule una búsqueda: si `id <= 0`, resuelve con error; si no, con un producto de ejemplo.
 9.3 Tipá una función `reintentar<T>(fn: () => Promise<T>, intentos: number): Promise<T>` que reintente `fn` hasta `intentos` veces antes de propagar el error.
+9.4 Escribí `mensajeDeError(e: unknown): string` que devuelva `e.message` si `e` es un `Error`, y `String(e)` en cualquier otro caso. (Es el patrón de `catch` de arriba.)
 
 ---
 
@@ -322,8 +373,12 @@ let publicado = false;
 let borradaEl: Date | undefined; // declarada sin inicializar → conviene anotar
 
 // 1.2
-// config.puerto se infiere como `number`. Con `const config = {...}` las props
-// internas siguen siendo `number`/`string` (no literales), igual que con `let`.
+// config.puerto se infiere como `number` (igual con const que con let en el objeto).
+// La regla de `const` para inferir LITERAL aplica solo a primitivos asignados
+// directamente: `const activo = true` infiere `true`, no `boolean`. Pero las
+// PROPIEDADES de un objeto son mutables aunque el binding sea `const`, así que
+// `config.puerto` se ensancha a `number` (no a `3000`). Para fijar literales en un
+// objeto se usa `as const` (módulo 5).
 // any: desactiva el chequeo de tipos (peligroso). unknown: acepta cualquier valor
 // pero te obliga a estrechar el tipo antes de usarlo (seguro).
 
@@ -341,6 +396,9 @@ function crearUsuario(nombre: string, rol: string = "user") {
 }
 
 // 2.2
+// Nota: este regex es solo para practicar el tipado de funciones. Para validar
+// emails de verdad en producción usá una librería (p. ej. Zod: z.string().email()),
+// no un regex casero.
 type Validador = (valor: string) => boolean;
 const esEmail: Validador = (v) => /\S+@\S+\.\S+/.test(v);
 const noVacio: Validador = (v) => v.trim().length > 0;
@@ -404,6 +462,9 @@ type EstadoPedido = typeof ESTADOS_PEDIDO[number];
 // "pendiente" | "pagado" | "enviado" | "entregado"
 
 // 5.3
+// El `| undefined` del retorno es lo correcto: el array puede estar vacío. Con la
+// flag `noUncheckedIndexedAccess`, `arr[0]` YA tiene tipo `T | undefined` (TS te
+// obliga a contemplarlo); sin ella, lo documentás vos en la firma, como acá.
 function primero<T>(arr: T[]): T | undefined {
   return arr[0];
 }
@@ -429,6 +490,9 @@ const unProducto: ApiResponse<Producto> = {
 };
 
 // 6.3
+// `acc[k] ??= []` compila en --strict. Si activás `noUncheckedIndexedAccess`,
+// `acc[k]` pasa a ser `T[] | undefined`; el `??=` igual lo cubre, pero si TS se
+// queja, la forma explícita es: `const arr = acc[k] ?? (acc[k] = []); arr.push(item);`
 function agruparPor<T, K extends keyof T>(items: T[], clave: K): Record<string, T[]> {
   return items.reduce((acc, item) => {
     const k = String(item[clave]);
@@ -481,11 +545,9 @@ function describir<T>(estado: EstadoCarga<T>): string {
 
 // 8.3
 function esUsuario(x: unknown): x is Usuario {
-  return (
-    typeof x === "object" && x !== null &&
-    "id" in x && typeof (x as any).id === "number" &&
-    "email" in x && typeof (x as any).email === "string"
-  );
+  if (typeof x !== "object" || x === null) return false;
+  const o = x as Record<string, unknown>; // estrechamos sin recurrir a `any`
+  return typeof o.id === "number" && typeof o.email === "string";
 }
 ```
 
@@ -504,15 +566,23 @@ async function obtenerProducto(id: number): Promise<Resultado<Producto>> {
 
 // 9.3
 async function reintentar<T>(fn: () => Promise<T>, intentos: number): Promise<T> {
+  if (intentos < 1) throw new Error("intentos debe ser >= 1");
   let ultimoError: unknown;
   for (let i = 0; i < intentos; i++) {
     try {
       return await fn();
     } catch (e) {
-      ultimoError = e;
+      ultimoError = e; // `e` es `unknown` en --strict (ver teoría del módulo)
     }
   }
   throw ultimoError;
+}
+// En producción se agrega espera exponencial entre intentos (backoff), como en el
+// módulo de Redis/colas: `await esperar(2 ** i * 100)` antes de reintentar.
+
+// 9.4
+function mensajeDeError(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
 ```
 
