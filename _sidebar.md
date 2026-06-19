@@ -20,5 +20,8 @@
 - **Seguridad**
   - [🔐 Autenticación y autorización](autenticacion.md)
 
+- **Node.js**
+  - [⚙️ Node.js por dentro](nodejs.md)
+
 - **Enlaces**
   - [Repositorio en GitHub](https://github.com/jzamituy/fullstack-roadmap)
