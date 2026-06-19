@@ -23,5 +23,8 @@
 - **Seguridad**
   - [🔐 Autenticación y autorización](autenticacion.md)
 
+- **Testing**
+  - [🧪 Testing práctico](testing.md)
+
 - **Enlaces**
   - [Repositorio en GitHub](https://github.com/jzamituy/fullstack-roadmap)
