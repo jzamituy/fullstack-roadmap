@@ -32,5 +32,8 @@
 - **Caché y colas**
   - [⚡ Redis: caché, colas y jobs](redis.md)
 
+- **Tiempo real y API**
+  - [📡 Tiempo real (WebSockets) y Swagger](tiempo-real.md)
+
 - **Enlaces**
   - [Repositorio en GitHub](https://github.com/jzamituy/fullstack-roadmap)
