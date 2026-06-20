@@ -108,12 +108,16 @@ RUN npm run build
 FROM node:22-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
+RUN apk add --no-cache tini    # init mínimo: reenvía señales y cosecha zombies (módulo 7)
 COPY package*.json ./
 RUN npm ci --omit=dev          # solo dependencies, sin devDependencies
 COPY --from=build /app/dist ./dist   # traemos SOLO el compilado de la etapa build
 USER node                      # no corras como root: principio de mínimo privilegio
 EXPOSE 3000
-CMD ["node", "dist/main.js"]
+HEALTHCHECK --interval=30s --timeout=3s \
+  CMD wget -qO- http://localhost:3000/health || exit 1
+ENTRYPOINT ["/sbin/tini", "--"]   # tini queda como PID 1 y delega en node
+CMD ["node", "dist/main.js"]      # forma "exec" (array): node recibe las señales directo
 ```
 
 Lo que ganás:
@@ -121,7 +125,15 @@ Lo que ganás:
 - **Imagen más chica**: la final no tiene el código fuente, ni el compilador, ni las devDependencies (Jest, ESLint, etc.). Menos peso = deploys más rápidos.
 - **Más segura**: menos cosas instaladas = menos vulnerabilidades posibles. Y `USER node` evita correr como `root` (si comprometen el contenedor, el atacante no es superusuario) — el **mínimo privilegio** del archivo senior, aplicado al contenedor.
 
-Este es el patrón estándar para Node en producción. Si en una entrevista te preguntan por tu Dockerfile, "multi-stage, corro como usuario no-root, imagen alpine" es la respuesta que demuestra criterio.
+**Elegir la imagen base.** `alpine` es chiquísima pero usa **musl libc** (no glibc), lo que a veces rompe dependencias nativas o da sorpresas con DNS/compilaciones. Las alternativas:
+
+- **`node:lts-alpine`** — mínima; ideal si no tenés dependencias nativas problemáticas.
+- **`node:lts-slim`** — Debian recortado (glibc); un poco más grande, pero **máxima compatibilidad** con módulos nativos.
+- **`gcr.io/distroless/nodejs`** — sin shell ni gestor de paquetes (superficie de ataque mínima), no-root por defecto; la más segura, pero difícil de debuggear (no hay shell adentro).
+
+Y **fijá la versión**: `node:22-alpine` pinea el *major* (mejor que `node:latest`, que es un blanco móvil); `node:lts-alpine` sigue la LTS vigente; y para reproducibilidad total se pinea por **digest** (`node:22-alpine@sha256:...`). Revisá que el major que elijas sea una **LTS vigente** en 2026.
+
+Este es el patrón estándar para Node en producción. Si en una entrevista te preguntan por tu Dockerfile, "multi-stage, usuario no-root, imagen liviana pinada y un init (`tini`) para las señales" es la respuesta que demuestra criterio.
 
 **Ejercicios 3**
 3.1 ¿Qué problema del Dockerfile de una sola etapa resuelve el multi-stage?
@@ -179,6 +191,8 @@ La misma imagen corre en dev, staging y producción **cambiando solo las variabl
 
 En producción, las plataformas (Railway, Render, ECS) tienen su propio **gestor de secretos**: cargás las variables en su panel y la plataforma las inyecta en el contenedor. Nunca viajan por el repo. Y, como viste en el módulo de config, **validá las variables al arrancar** (schema con Zod/Joi) para que la app falle rápido si falta una, en vez de explotar en runtime cuando un usuario pega a la ruta que la usa.
 
+**No metas secretos en `ARG`/`--build-arg`.** Los build args quedan en la **metadata e historial** de la imagen: cualquiera con la imagen los ve con `docker history`. Un secreto pasado así está filtrado, igual que si lo hardcodearas. Si el *build* necesita un secreto (ej. un token para un registry npm privado), usá **BuildKit secrets**: `RUN --mount=type=secret,id=npmtoken ...` monta el secreto **solo** durante ese `RUN` y no queda en ninguna capa. La regla general sigue valiendo: los secretos de **runtime** se inyectan al correr, no al construir.
+
 **Ejercicios 5**
 5.1 ¿Por qué está mal poner `JWT_SECRET` directamente en el Dockerfile o en la imagen?
 5.2 ¿Cómo corre la **misma** imagen en dev y en producción con configuraciones distintas, sin reconstruirla?
@@ -194,6 +208,8 @@ En producción, las plataformas (Railway, Render, ECS) tienen su propio **gestor
 services:
   app:
     build: .
+    restart: unless-stopped          # se reinicia solo si el contenedor se cae
+    init: true                       # PID 1 con init (reenvía señales) — ver módulo 7
     ports:
       - "3000:3000"
     environment:
@@ -206,7 +222,7 @@ services:
   db:
     image: postgres:16
     environment:
-      POSTGRES_PASSWORD: secret
+      POSTGRES_PASSWORD: secret      # SOLO para dev; en prod va en el gestor de secretos
       POSTGRES_DB: taskapi
     volumes:
       - pgdata:/var/lib/postgresql/data   # persiste los datos entre reinicios
@@ -232,6 +248,7 @@ Dos detalles que evitan dolores de cabeza:
 - **Red interna por nombre**: dentro de Compose, los servicios se ven por su nombre. La app conecta a `db:5432`, no a `localhost` — `db` es el hostname del servicio Postgres en la red de Compose.
 - **`depends_on` con `condition: service_healthy`**: arrancar Postgres no es lo mismo que estar **listo** para aceptar conexiones. Sin el healthcheck, tu app intenta conectarse antes de tiempo y falla. El healthcheck (con `pg_isready`) hace que la app espere a que la base esté realmente operativa.
 - **Volumen**: sin el `volumes`, los datos de Postgres se borran al bajar el contenedor. El volumen `pgdata` los persiste.
+- **Hot reload en dev**: en desarrollo conviene montar el código como *bind mount* (`volumes: - ./src:/app/src`) y correr en modo watch, para no reconstruir la imagen en cada cambio. En **producción** es al revés: imagen inmutable, sin bind mounts (lo que probaste es lo que corre).
 
 **Ejercicios 6**
 6.1 ¿Qué hace `docker compose up` y qué ventaja tiene sobre levantar Postgres, Redis y la app por separado?
@@ -266,6 +283,18 @@ app.enableShutdownHooks(); // Nest escucha SIGTERM y dispara OnApplicationShutdo
 ```
 
 Por qué juntos importan: en un deploy, el orquestador arranca el contenedor nuevo, espera a que su `/health` dé verde, le manda tráfico, y recién entonces manda `SIGTERM` al viejo, que termina ordenadamente lo que tenía. Resultado: **deploy sin downtime**. Sin healthcheck, el orquestador manda tráfico a una app que todavía no arrancó; sin graceful shutdown, corta requests a la mitad. Los dos son marca de que operaste algo real.
+
+**El eslabón que falta: PID 1 y la propagación de SIGTERM.** El graceful shutdown solo funciona si la señal **llega** a Node. En un contenedor, el proceso que arranca es **PID 1**, que en Linux tiene semántica especial (no hay handlers de señal por defecto y debe cosechar procesos huérfanos). Dos consecuencias prácticas:
+
+- **Nunca uses `CMD ["npm", "start"]` en producción.** `npm` corre como PID 1 y **no reenvía SIGTERM** al proceso `node` hijo: el orquestador manda la señal, npm la ignora, y tu app muere de golpe al vencer el timeout (~10s) **sin** graceful shutdown. Es un bug silencioso clásico.
+- Usá la forma **exec** de `CMD` (array, como en el módulo 3) para correr `node` directo, y mejor aún un **init liviano** como PID 1 (`tini`, o `docker run --init` / `init: true` en compose): reenvía las señales a tu app y cosecha zombies. La cadena queda: `tini → SIGTERM → node → enableShutdownHooks() → cierre ordenado`.
+
+**`HEALTHCHECK` de Docker vs. el del orquestador.** Hay dos niveles que conviene no confundir:
+
+- La instrucción **`HEALTHCHECK`** del Dockerfile (la del módulo 3) la usa el **runtime local** (Docker/Compose) para marcar el contenedor `healthy`/`unhealthy`.
+- En producción, el **orquestador** (Kubernetes, ECS, la PaaS) usa **su propia** configuración apuntando a tu endpoint HTTP y a menudo **ignora** el `HEALTHCHECK` del Dockerfile.
+
+Y distinguen dos sondas: **liveness** ("¿está vivo? si no, reiniciá el contenedor") y **readiness** ("¿está listo para recibir tráfico? si no, sacalo del balanceador, pero **no** lo mates"). Un endpoint que responde *not ready* mientras la app calienta (carga config, conecta a la DB) y pasa a *ready* recién cuando puede atender es justo lo que hace que el deploy sin downtime funcione de verdad.
 
 **Ejercicios 7**
 7.1 ¿Para qué usa el orquestador un endpoint `/health`? ¿Qué hace si empieza a fallar?
@@ -334,7 +363,40 @@ Cómo leerlo:
 - **`on`**: cuándo corre. Acá, en cada push a `main` y en **cada pull request** — esto último es lo importante: el PR muestra el check en verde/rojo y podés configurar el repo para **no permitir mergear** si la CI falla (branch protection).
 - **`jobs` / `steps`**: las tareas. `checkout` trae el código, `setup-node` instala Node (con caché de dependencias), y después tus comandos: `npm ci`, lint, test, build, en orden. Si uno falla, el job se corta ahí.
 
-Para los tests de **integración** (testcontainers del módulo anterior), Actions ya tiene Docker disponible en `ubuntu-latest`, así que tus contenedores de Postgres efímeros levantan sin config extra. Y para CD, agregás un job que, si `test` pasó, construye la imagen y la empuja a la plataforma de deploy (o usás la integración nativa de la plataforma con GitHub).
+Para los tests de **integración** (testcontainers del módulo anterior), Actions ya tiene Docker disponible en `ubuntu-latest`, así que tus contenedores de Postgres efímeros levantan sin config extra.
+
+**De CI a CD: construir y publicar la imagen.** La CI valida; el **CD** construye la imagen y la **publica en un registry** (GitHub Container Registry, Docker Hub) para que la plataforma la despliegue. Dos cosas clave acá: **cachear las capas de Docker** (no solo `node_modules`) y **taggear bien** la imagen.
+
+```yaml
+  build-push:
+    needs: test                      # solo si la CI pasó
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write                # para pushear a GHCR
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+            ghcr.io/${{ github.repository }}:latest
+          cache-from: type=gha        # reusa las CAPAS cacheadas entre corridas
+          cache-to: type=gha,mode=max
+      # escaneo de vulnerabilidades de la imagen antes de confiar en ella:
+      - run: docker scout cves ghcr.io/${{ github.repository }}:${{ github.sha }} || true
+```
+
+Por qué **taggear por SHA del commit** (`${{ github.sha }}`) y no solo `latest`: `latest` es un blanco móvil — no sabés qué versión corre ni podés hacer **rollback** a una imagen concreta. El tag por SHA (o por semver) es **inmutable y trazable**: cada deploy apunta a una imagen exacta. Y `cache-from/to: type=gha` cachea las **capas de la imagen** en el almacenamiento de Actions, que es lo más caro del build — distinto del `cache: npm`, que solo cachea las dependencias. El paso final escanea la imagen (`docker scout`, o **Trivy**) en busca de CVEs.
+
+Como alternativa, muchas PaaS tienen **integración nativa con GitHub** y construyen/despliegan ellas mismas en cada push, sin que vos manejes el registry (módulo 10).
 
 **Ejercicios 9**
 9.1 ¿Qué dispara el workflow de ejemplo (el `on`) y por qué incluir `pull_request` es clave?
@@ -354,6 +416,14 @@ Tres cosas que un deploy real necesita y que los tutoriales suelen omitir:
 - **Variables de entorno**: las cargás en el panel de la plataforma (módulo 5), nunca en el repo.
 
 El flujo completo que demuestra que cerraste el círculo full stack: **push a `main` → CI corre lint/test/build → si pasa, la plataforma construye la imagen y la despliega → corre las migraciones → la nueva versión queda viva en la URL, con la vieja apagándose ordenadamente (graceful shutdown).** Eso es lo que el roadmap pide: "dejá un proyecto corriendo en la nube con URL pública y CI verde".
+
+**Estrategias de deploy (reconocé los nombres, se preguntan).** El "deploy sin downtime" del módulo 7 tiene variantes con nombre propio:
+
+- **Rolling update**: reemplazás las instancias **de a poco** (levantás una nueva, la verificás con el healthcheck, bajás una vieja, repetís). Es el **default** de la mayoría de orquestadores y PaaS. Simple, pero conviven las dos versiones un rato (tu esquema de DB debe ser compatible con ambas).
+- **Blue-green**: mantenés **dos entornos completos** (azul = actual, verde = nuevo); cuando el verde está sano, **switcheás todo el tráfico** de golpe. Rollback instantáneo (volvés al azul), a costa del doble de infraestructura.
+- **Canary**: mandás un **porcentaje chico** de tráfico a la versión nueva (5%, luego 25%…), observás métricas y errores, y si va bien escalás. Detecta problemas con impacto mínimo; requiere buen monitoreo.
+
+Las tres se apoyan en el **healthcheck** (módulo 7): sin una señal confiable de "esta versión está sana", ninguna estrategia sirve. Y las migraciones de DB deben ser **compatibles hacia atrás** durante la transición (que las dos versiones convivan), un detalle que separa un deploy real de uno de juguete.
 
 **Ejercicios 10**
 10.1 ¿Por qué para un proyecto de portfolio conviene una PaaS (Railway/Render/Fly) antes que AWS ECS?
