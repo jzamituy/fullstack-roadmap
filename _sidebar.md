@@ -57,6 +57,7 @@
 
 - **Track Python AI**
   - [🐍 Python para quien viene de TS/Node](python.md)
+  - [⚡ FastAPI: APIs en Python](fastapi.md)
 
 - **Enlaces**
   - [Repositorio en GitHub](https://github.com/jzamituy/fullstack-roadmap)
