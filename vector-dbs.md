@@ -27,7 +27,8 @@ uv add faiss-cpu numpy voyageai anthropic
 8. El panorama: FAISS vs pgvector vs Pinecone vs Qdrant/Weaviate
 9. Metadata filtering y multi-tenant en bases dedicadas
 10. RAG en Python end-to-end: ingest + query con Voyage y Claude
-11. El criterio de cierre: elegir la herramienta y el puente a agentes
+11. El framework layer: LangChain y LlamaIndex (cuándo sí y cuándo no)
+12. El criterio de cierre: elegir la herramienta y el puente a agentes
 
 Las soluciones de **todos** los ejercicios están al final, en la sección "Soluciones".
 
@@ -437,7 +438,84 @@ Para producción, este mismo flujo se expone como endpoint con [FastAPI](fastapi
 
 ---
 
-## Módulo 11 — El criterio de cierre: elegir la herramienta y el puente a agentes
+## Módulo 11 — El framework layer: LangChain y LlamaIndex (cuándo sí y cuándo no)
+
+**Teoría.** Hasta acá armaste el RAG **a mano**: Voyage para embeddear, FAISS/pgvector para buscar, Claude para generar, y vos cableaste cada paso (módulo 10). En el ecosistema Python hay una **capa de frameworks** que automatiza ese cableado, y son las dos piezas que más aparecen en los avisos de Python/AI Engineer: **LangChain** y **LlamaIndex**. Entenderlas —y, sobre todo, saber **cuándo NO usarlas**— es parte del perfil.
+
+**Qué son.** Frameworks de **orquestación**: capas de abstracción sobre el pipeline LLM + retrieval. Te dan, listas para usar, las piezas que en el módulo 10 escribiste vos:
+
+- **Document loaders**: leer PDFs, Markdown, Notion, webs, SQL… a un formato común.
+- **Text splitters**: chunking por estructura/tamaño/tokens (la teoría de [RAG](rag.md) módulo 3, implementada).
+- **Embeddings + vector store adapters**: una **interfaz uniforme** sobre FAISS, pgvector, Pinecone, Qdrant, Weaviate. Este es el valor más concreto para *este* módulo: **cambiás de vector store tocando casi una línea**.
+- **Retrievers, rerankers, query engines**: el retrieval (y el híbrido/rerank del módulo 6 de RAG) empaquetado.
+- **Chains / pipelines**: el pegamento que conecta todo en un flujo.
+
+**La diferencia de carácter entre las dos:**
+
+- **LlamaIndex** es **RAG/indexing-first**. Su mundo es: documentos → *nodes* (chunks) → *index* → *query engine*. Si lo tuyo es "ingestar datos y responder preguntas sobre ellos", LlamaIndex es el que está pensado exactamente para eso y te lo deja en pocas líneas.
+- **LangChain** es **orquestación general** de apps LLM: componer pasos con **LCEL** (LangChain Expression Language), muchísimas integraciones, y —clave para el próximo módulo— **LangGraph** para flujos con estado y agentes (eso lo vemos en [AI Agents](ai-agents-python.md), no acá). LangChain también hace RAG, pero su ambición es más amplia que el retrieval.
+
+Un RAG con LlamaIndex, para que veas la **densidad** (forma de la API a 2026 — estos paquetes cambian seguido, verificá versiones):
+
+```python
+from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, Settings
+from llama_index.embeddings.voyageai import VoyageEmbedding
+from llama_index.llms.anthropic import Anthropic
+
+Settings.embed_model = VoyageEmbedding(model_name="voyage-3.5")   # mismo modelo en ingest y query (lo maneja él)
+Settings.llm = Anthropic(model="claude-opus-4-8")
+
+docs = SimpleDirectoryReader("apuntes/").load_data()    # loaders
+index = VectorStoreIndex.from_documents(docs)           # chunk + embed + index, con DEFAULTS ocultos
+qe = index.as_query_engine(similarity_top_k=5)          # retriever + prompt grounded + LLM, todo junto
+print(qe.query("¿Qué es IVFPQ y cuándo se usa?"))
+```
+
+Y el adapter uniforme de vector store en LangChain, que es el superpoder de portabilidad (forma de la API; los nombres de paquete cambian):
+
+```python
+from langchain_community.vectorstores import FAISS   # cambiar por Qdrant/PGVector/Pinecone = ~una línea
+from langchain_voyageai import VoyageAIEmbeddings
+
+vs = FAISS.from_texts(textos, VoyageAIEmbeddings(model="voyage-3.5"))
+retriever = vs.as_retriever(search_kwargs={"k": 5})
+docs = retriever.invoke("¿Qué es HNSW?")
+```
+
+**El criterio —que es lo que separa al senior—.** Estos frameworks son **leverage cuando entendés lo que automatizan, y un pasivo cuando son lo único que sabés**. Lo bueno y lo malo:
+
+*A favor:* prototipás un RAG en minutos; cambiás de vector store o de modelo sin reescribir; tenés loaders/splitters/rerankers/query engines probados; te subís a un ecosistema enorme de integraciones.
+
+*En contra (y por qué a veces preferís el módulo 10 a mano):*
+- **Abstracción que esconde lo que más te importa.** `from_documents` elige por vos el tamaño de chunk, la métrica, el overlap, el prompt. Justo las perillas que este módulo te enseñó a controlar quedan en *defaults ocultos* — y un default malo de chunking es el error #1 de RAG ([RAG](rag.md) módulo 3).
+- **Indirección al debuggear.** Cuando la respuesta sale mal, *¿qué query corrió realmente? ¿qué prompt se armó?* En código a mano lo ves; detrás de tres capas de chains, lo perseguís.
+- **Superficie de dependencias y churn.** Son librerías grandes y de **API que rompe seguido** (LangChain reorganizó sus paquetes varias veces). Más deps = más a mantener y más a romperse.
+- **Overhead y lock-in al modelo mental del framework.**
+
+**Cuándo sí / cuándo no:**
+
+| Situación | Elección |
+|---|---|
+| Prototipar rápido, explorar, demo | **Framework** (LlamaIndex para RAG puro) |
+| Necesitás muchos loaders/integraciones o swappear vector stores | **Framework** |
+| RAG/ingestión es el corazón del producto | **LlamaIndex** |
+| Orquestar flujos multi-paso / agentes con estado | **LangChain + LangGraph** (ver [AI Agents](ai-agents-python.md)) |
+| Pipeline simple, estable, en producción, que querés entender y controlar | **SDKs nativos** (módulo 10) |
+| Te importa minimizar deps y latencia, y el flujo no cambia | **SDKs nativos** |
+
+El orden de aprendizaje correcto es el que seguiste: **primero las internas y el RAG a mano (módulos 1–10), después el framework.** Así, cuando uses LlamaIndex, vas a saber qué `chunk_size` ponerle, por qué la métrica importa, y cómo bajar a la capa de abajo cuando el default no alcanza —que es exactamente lo que un framework bien usado te permite—. Al revés (empezar por el framework sin entender qué hace) es como saber `git push` sin entender qué es un commit: andás hasta que algo se rompe y no tenés con qué razonarlo.
+
+La frase mental: **LangChain/LlamaIndex automatizan el cableado del RAG y te dan portabilidad de vector store gratis —geniales para prototipar y para casos con muchas integraciones—, pero esconden las perillas que aprendiste a controlar; usalos sabiendo qué automatizan, y elegí los SDKs nativos cuando el control, las pocas deps y un flujo estable pesan más que la velocidad de armado.**
+
+**Ejercicios 11**
+11.1 ¿Qué automatiza la capa de frameworks respecto al RAG a mano del módulo 10? Nombrá cuatro piezas que te dan listas.
+11.2 Diferenciá LangChain de LlamaIndex en una frase cada uno. ¿Cuál elegirías si "ingestar datos y responder sobre ellos" es el corazón del producto, y dónde encaja LangGraph?
+11.3 ¿Por qué `VectorStoreIndex.from_documents(...)` es a la vez la comodidad y el riesgo del framework? (pensá en los *defaults ocultos* y en el módulo 3 de RAG)
+11.4 Dá dos situaciones donde elegirías el framework y dos donde preferís los SDKs nativos. ¿Por qué "primero las internas, después el framework" y no al revés?
+
+---
+
+## Módulo 12 — El criterio de cierre: elegir la herramienta y el puente a agentes
 
 **Teoría.** El cierre, que ata las internas con la decisión de arquitectura. La pregunta de entrevista no es "¿sabés usar Pinecone?" sino "**¿por qué esta vector DB, este índice y estos parámetros para este caso?**". El árbol de decisión completo:
 
@@ -463,11 +541,11 @@ Y el principio que es el alma de todo el temario, una vez más: **escalá la her
 
 La frase mental: **elegí la vector DB y el índice justificando escala, filtros, operación y métrica —no por moda—, medí la decisión con recall y latencia, y recordá que la base vectorial es un componente: en un agente, buscar es solo una herramienta más en el loop.**
 
-**Ejercicios 11**
-11.1 Recorré el árbol de decisión para: (a) 30.000 chunks de apuntes, ya usás Postgres, multi-tenant; (b) 80 millones de vectores de imágenes, RAM acotada, sin filtros; (c) corpus mediano estático, read-heavy, sin servidor, sin filtros.
-11.2 ¿Por qué "elegir mal la base óptima" no es el error caro, y cuál sí lo es? Dá los dos extremos.
-11.3 ¿Cómo se "mide" una decisión de vector DB en vez de adivinarla? (qué métricas, contra qué)
-11.4 ¿Qué rol cumple la búsqueda vectorial dentro de un agente, y cómo cambia respecto a un RAG clásico quién dispara el retrieval?
+**Ejercicios 12**
+12.1 Recorré el árbol de decisión para: (a) 30.000 chunks de apuntes, ya usás Postgres, multi-tenant; (b) 80 millones de vectores de imágenes, RAM acotada, sin filtros; (c) corpus mediano estático, read-heavy, sin servidor, sin filtros.
+12.2 ¿Por qué "elegir mal la base óptima" no es el error caro, y cuál sí lo es? Dá los dos extremos.
+12.3 ¿Cómo se "mide" una decisión de vector DB en vez de adivinarla? (qué métricas, contra qué)
+12.4 ¿Qué rol cumple la búsqueda vectorial dentro de un agente, y cómo cambia respecto a un RAG clásico quién dispara el retrieval?
 
 ---
 
@@ -492,6 +570,7 @@ El ejercicio que cierra el módulo y que mostrás en una entrevista de AI/ML Eng
 - Reemplazá FAISS por **Qdrant** (local con `:memory:` o Docker) y movés el filtro de `tenant_id` a un **payload filter integrado a la búsqueda** (módulo 9) — y notá la diferencia con el post-filtering manual de FAISS.
 - Medí **recall@k**: armá un mini golden set de 10 consultas con el chunk esperado y compará HNSW (`efSearch` bajo vs alto) contra Flat (verdad exacta) — vas a *ver* el trade-off recall↔latencia del módulo 5.
 - Cronometrá la **latencia por etapa** (embedding / búsqueda / generación) y mostrá el p95.
+- Reescribí el RAG con **LlamaIndex** (módulo 11) en ~15 líneas y compará: ¿qué `chunk_size`/métrica/prompt eligió por defecto? Bajá a configurarlos y mirá cómo cambia el recall — así *sentís* qué automatiza el framework y qué te esconde.
 
 ---
 
@@ -678,19 +757,41 @@ El ejercicio que cierra el módulo y que mostrás en una entrevista de AI/ML Eng
 
 ### Módulo 11
 ```
-11.1 (a) 30k chunks + Postgres + multi-tenant → pgvector: la escala es chica y el filtro por
+11.1 (Cuatro de) document loaders (leer PDFs/MD/webs/SQL a un formato común), text splitters
+     (chunking por estructura/tamaño/tokens), embeddings + vector store adapters (interfaz
+     uniforme sobre FAISS/pgvector/Pinecone/Qdrant → swappear con ~una línea), retrievers/
+     rerankers/query engines, y chains/pipelines que pegan todo el flujo.
+11.2 LlamaIndex: framework RAG/indexing-first (documentos → nodes → index → query engine).
+     LangChain: orquestación general de apps LLM (componer pasos con LCEL, muchas integraciones,
+     y LangGraph para agentes con estado). Si el corazón es ingestar y responder, elegís
+     LlamaIndex. LangGraph encaja cuando hay flujos multi-paso/agénticos con estado (módulo de
+     AI Agents), no en un RAG simple.
+11.3 Comodidad: en una línea hace chunk + embed + index sin que escribas loaders ni splitters.
+     Riesgo: elige por vos el chunk_size, el overlap, la métrica y el prompt (defaults ocultos),
+     y justo el chunking malo es el error #1 de RAG (módulo 3). El control que aprendiste a
+     ejercer queda escondido salvo que bajes a configurarlo.
+11.4 Framework: prototipar/explorar rápido, o necesitar muchos loaders/integraciones o swappear
+     vector stores. Nativos: pipeline simple/estable en producción que querés entender y controlar,
+     o cuando minimizar deps y latencia importa. Primero las internas porque así sabés qué
+     configurarle al framework (chunk_size, métrica) y cómo bajar de capa cuando el default no
+     alcanza; al revés, andás hasta que algo se rompe y no tenés con qué razonarlo.
+```
+
+### Módulo 12
+```
+12.1 (a) 30k chunks + Postgres + multi-tenant → pgvector: la escala es chica y el filtro por
      permisos en la misma query es la ventaja decisiva. (b) 80M vectores, RAM acotada, sin filtros
      → dedicada con IVFPQ: la cuantización hace entrar los vectores en RAM; sin filtros, no perdés
      nada por no tener filtered search rico. (c) corpus mediano estático read-heavy sin servidor ni
      filtros → FAISS (HNSW o Flat): máximo control y velocidad in-process.
-11.2 No es caro porque varias opciones sirven y la diferencia de rendimiento entre dos razonables
+12.2 No es caro porque varias opciones sirven y la diferencia de rendimiento entre dos razonables
      suele ser chica. El error caro es de escala de herramienta: montar infraestructura
      innecesaria (Pinecone para 20k chunks que pgvector servía) o quedarse en fuerza bruta con 50M
      de vectores y la latencia por las nubes.
-11.3 Se mide corriendo un set de prueba (golden set) y calculando recall@k (contra la verdad
+12.3 Se mide corriendo un set de prueba (golden set) y calculando recall@k (contra la verdad
      exacta de un índice Flat) y latencia p95 end-to-end, comparando índices/parámetros. La
      decisión sale del número, no de la moda (es eval-driven, como el resto del temario).
-11.4 En un agente, la búsqueda vectorial es UNA herramienta más que el modelo decide invocar dentro
+12.4 En un agente, la búsqueda vectorial es UNA herramienta más que el modelo decide invocar dentro
      de su loop de razonamiento/acción, según la necesite. En un RAG clásico el retrieval lo
      disparás vos siempre, antes de generar; en el agente lo dispara el modelo cuando lo juzga
      necesario.
@@ -700,4 +801,4 @@ El ejercicio que cierra el módulo y que mostrás en una entrevista de AI/ML Eng
 
 ## Siguientes pasos
 
-Con este módulo entendés qué hay **debajo** de la búsqueda semántica: por qué la fuerza bruta no escala y aparece ANN, las métricas de distancia y la normalización, los dos grandes algoritmos (IVF y HNSW) con sus perillas y trade-offs, la cuantización (PQ/IVFPQ) que hace viable la escala masiva, FAISS al desnudo en Python, el panorama de bases (FAISS / pgvector / Pinecone / Qdrant) con su criterio de elección, el filtrado por metadata y multi-tenant en bases dedicadas, y un RAG end-to-end en Python con Voyage y Claude. Todo con la regla que recorre el temario: **escalá la herramienta al problema y medí la decisión, no la adivines.** Lo que sigue en el track Python AI: [AI Agents](ai-agents-python.md) —donde la búsqueda vectorial pasa a ser una herramienta más en el loop del modelo—, [Voice AI](voice-ai.md), y [Deploy de aplicaciones de IA](deploy-ai.md). Y atravesando todo, [evals](evals.md), que es lo que convierte cada una de estas decisiones en un número que podés defender.
+Con este módulo entendés qué hay **debajo** de la búsqueda semántica: por qué la fuerza bruta no escala y aparece ANN, las métricas de distancia y la normalización, los dos grandes algoritmos (IVF y HNSW) con sus perillas y trade-offs, la cuantización (PQ/IVFPQ) que hace viable la escala masiva, FAISS al desnudo en Python, el panorama de bases (FAISS / pgvector / Pinecone / Qdrant) con su criterio de elección, el filtrado por metadata y multi-tenant en bases dedicadas, un RAG end-to-end en Python con Voyage y Claude, y la capa de frameworks ([LangChain y LlamaIndex](#)) con el criterio de cuándo usarla y cuándo quedarte con los SDKs nativos. Todo con la regla que recorre el temario: **escalá la herramienta al problema y medí la decisión, no la adivines.** Lo que sigue en el track Python AI: [AI Agents](ai-agents-python.md) —donde la búsqueda vectorial pasa a ser una herramienta más en el loop del modelo—, [Voice AI](voice-ai.md), y [Deploy de aplicaciones de IA](deploy-ai.md). Y atravesando todo, [evals](evals.md), que es lo que convierte cada una de estas decisiones en un número que podés defender.
