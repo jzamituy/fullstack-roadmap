@@ -15,7 +15,7 @@ docker compose exec redis redis-cli
 Y las librerías para Node/Nest:
 
 ```bash
-npm i bullmq @nestjs/bullmq ioredis @nestjs/cache-manager cache-manager
+npm i bullmq @nestjs/bullmq ioredis @nestjs/cache-manager cache-manager @keyv/redis
 ```
 
 **Índice de módulos**
@@ -50,10 +50,24 @@ Redis guarda valores bajo **claves** (strings) y soporta varias estructuras: str
 
 La regla mental: **si lo perdés y no pasa nada grave, puede ir en Redis** (un caché se reconstruye desde Postgres). Si perderlo es perder datos del negocio, va en Postgres. Redis, por defecto, no es para tu fuente de verdad.
 
+**Por dentro: single-thread.** Acá viene la pregunta de entrevista que separa al que "usó Redis" del que lo entiende: Redis procesa los comandos en **un solo hilo**. Por eso un `INCR` no necesita locks (no hay dos comandos ejecutándose a la vez) y la atomicidad por comando sale gratis. Pero tiene una contracara filosa: **un comando lento bloquea a todos los demás**. Si corrés `KEYS *` (que recorre todo el keyspace, O(n)) en una base con millones de claves, congelás Redis para todos los clientes durante ese tiempo. Por eso en producción se usa `SCAN` (itera de a cursores, no bloquea) y se evitan comandos O(n) sobre estructuras grandes. Regla: en Redis, "lento para uno" es "lento para todos".
+
+**Persistencia: ¿qué pasa si Redis se reinicia?** "En memoria" no significa "se pierde todo siempre": Redis puede persistir a disco de dos formas.
+
+- **RDB** (snapshots): cada cierto tiempo vuelca toda la memoria a un archivo. Rápido y compacto, pero si crashea entre snapshots **perdés los últimos segundos/minutos** de escrituras.
+- **AOF** (append-only file): registra cada escritura en un log. Más durable (con `appendfsync everysec` perdés como mucho ~1s), a costa de archivos más grandes y algo más lento.
+
+Para un caché esto casi no importa (se reconstruye desde Postgres). Pero el punto operativo es: tras un restart o un failover, **el caché puede aparecer vacío de golpe** — y eso conecta con un problema serio que vemos en el módulo 4 (cache stampede).
+
+**Evicción: ¿qué pasa cuando Redis se llena?** La RAM es finita. Con `maxmemory` configurás un tope; con `maxmemory-policy` decidís qué hace al alcanzarlo. Para un caché, la política típica es **`allkeys-lru`**: descarta las claves menos usadas recientemente para hacer lugar. Sin una política de evicción adecuada, Redis empieza a rechazar escrituras (o mata el proceso por OOM) cuando se llena. Es la respuesta a la pregunta clásica: *"¿qué pasa cuando tu Redis de caché se queda sin memoria?"* → evicta las claves frías, no explota.
+
 **Ejercicios 1**
 1.1 ¿Por qué Redis es mucho más rápido que Postgres para leer un valor? ¿Qué resignás a cambio?
 1.2 ¿Redis reemplaza a tu base de datos relacional? Explicá la relación entre ambos.
 1.3 Dá un ejemplo de dato que pondrías en Redis y uno que jamás pondrías solo en Redis. Justificá.
+1.4 Redis es single-thread. Explicá por qué eso hace peligroso correr `KEYS *` en producción y qué usarías en su lugar.
+1.5 Diferenciá RDB de AOF: ¿qué se pierde con cada uno tras un crash? Para un caché, ¿importa mucho? ¿Por qué?
+1.6 ¿Qué hace `maxmemory-policy allkeys-lru` y por qué es la política típica cuando usás Redis como caché?
 
 ---
 
@@ -77,10 +91,13 @@ Dos conceptos importantes:
 
 `INCR` merece una mención: incrementa un número de forma **atómica** (sin condiciones de carrera aunque mil requests lo toquen a la vez). Es lo que hace que Redis sea perfecto para contadores y rate limiting (módulo 6).
 
+**Ojo con el alcance de la atomicidad:** es **por comando individual**, no por secuencias. Un `INCR` es atómico; pero `INCR` *seguido de* `EXPIRE` son **dos comandos separados** y entre uno y otro puede pasar cualquier cosa (incluso que el proceso muera). Esa distinción es la que rompe el rate limiting ingenuo del módulo 6 — y la solución (scripts Lua / `MULTI`) es justamente cómo volver atómica una secuencia. Tenelo presente desde ya.
+
 **Ejercicios 2**
 2.1 ¿Qué hace `SET clave valor EX 60` que un `SET clave valor` no hace? ¿Por qué es la base del caché?
 2.2 ¿Para qué sirve la convención de prefijos con `:` en las claves (ej. `producto:7`)?
 2.3 ¿Por qué `INCR` es mejor que leer un contador, sumarle 1 en tu código y volver a escribirlo?
+2.4 (teclado) Abrí `redis-cli` y probá: `SET demo:contador 0`, `INCR demo:contador` (varias veces), `EXPIRE demo:contador 10`, `TTL demo:contador`, y observá cómo desaparece la clave al pasar los 10s (`GET demo:contador` → `(nil)`). ¿Qué devuelve `TTL` de una clave sin expiración?
 
 ---
 
@@ -112,10 +129,28 @@ Lo que ganás: las primeras peticiones pagan el costo de Postgres; las siguiente
 
 El criterio (que conecta con "medí antes de optimizar" del senior): cacheá lo que es **caro de obtener** y se lee **mucho más de lo que cambia** (un catálogo de productos, la config). No caches lo que cambia constantemente o se lee una vez: ahí el caché agrega complejidad (e inconsistencia, módulo 4) sin beneficio.
 
+> **Detalle que rompe en producción: ¿dónde guarda el `CacheModule`?** Por defecto, `@nestjs/cache-manager` usa un store **en memoria del proceso**. Eso significa que cada instancia de tu API tiene **su propio caché** — y tirás abajo todo lo que vas a ver en el módulo 5 (stateless): 10 instancias = 10 cachés distintos, hits inconsistentes, e invalidar en una no invalida en las otras. Para que el caché sea **compartido** tenés que registrar un **store de Redis**:
+>
+> ```ts
+> import { CacheModule } from "@nestjs/cache-manager";
+> import { createKeyv } from "@keyv/redis";
+>
+> CacheModule.registerAsync({
+>   isGlobal: true,
+>   useFactory: () => ({
+>     stores: [createKeyv("redis://redis:6379")], // store compartido, no memoria del proceso
+>   }),
+> });
+> ```
+>
+> Además, **cuidado con la versión y la unidad del TTL**: en `cache-manager` v5/v6 (el moderno) la firma es `set(key, value, ttl)` con el **TTL en milisegundos** (`60_000` = 60s, como arriba). En v4 el TTL iba en **segundos**. Pineá la versión en tu `package.json` para no comerte un caché que dura 1000× más o menos de lo que creés.
+
 **Ejercicios 3**
 3.1 Describí los tres pasos del patrón cache-aside ante un cache miss.
 3.2 ¿Qué tipo de dato es buen candidato para cachear y cuál no? Dá un ejemplo de cada uno.
 3.3 ¿Qué pasaría en la primera petición a un producto que no está cacheado vs. en la segunda (dentro del TTL)?
+3.4 Si registrás el `CacheModule` sin un store de Redis y corrés 3 instancias de tu API, ¿qué problema aparece? ¿Por qué contradice el "stateless" del módulo 5?
+3.5 (teclado) Agregá un `console.time`/`console.timeEnd` (o un log de duración) alrededor de la query a Postgres y de la lectura de caché en `obtenerProducto`. Pegale dos veces al endpoint y compará la latencia del miss (1ra) contra el hit (2da).
 
 ---
 
@@ -138,10 +173,22 @@ async actualizarProducto(id: number, datos: Partial<Producto>): Promise<Producto
 
 El criterio: **TTL para tolerancia a desactualización** (la mayoría de los casos); **invalidación explícita cuando la frescura importa** (un saldo, un stock). Lo difícil aparece con datos cacheados en varios lugares o de forma derivada (cacheaste "lista de productos" y editás uno: ¿invalidás la lista entera?). No hay bala de plata; por eso es "difícil". Para empezar, **TTL corto + invalidar la clave puntual al escribir** cubre casi todo sin meterte en complejidad accidental.
 
+**El problema senior: cache stampede (thundering herd).** Hay un segundo problema, menos obvio que la frescura, y es la pregunta de entrevista que casi nadie ve venir. Imaginá una clave **caliente** (un producto popular, la home) con TTL de 60s, recibiendo 5.000 req/s. En el instante exacto en que esa clave **expira**, las 5.000 peticiones del siguiente segundo encuentran **miss a la vez** y **todas pegan a Postgres simultáneamente** para reconstruir el mismo valor. Postgres recibe un pico brutal de queries idénticas y puede caerse — justo lo que el caché venía evitando. El mismo efecto, multiplicado, ocurre tras un restart o failover de Redis: el caché aparece vacío de golpe (recordá la persistencia del módulo 1) y *todo* es miss al mismo tiempo.
+
+Mitigaciones (de la más simple a la más robusta):
+
+- **TTL con jitter**: en vez de `EX 60` fijo, usá `60 + random(0..15)`. Así las claves no expiran todas en el mismo segundo y los misses se reparten en el tiempo.
+- **Single-flight / lock de recálculo**: ante un miss, solo **un** request toma un lock (`SET NX`, módulo 10) y recalcula; los demás esperan o sirven el valor viejo un instante. Evita que mil hilos hagan la misma query.
+- **Early recompute**: refrescás la clave *antes* de que expire (cuando le queda poco TTL), de fondo, sin esperar al miss.
+
+Para tu Task API, con empezar por **jitter en el TTL** ya cubrís el 90% del riesgo sin complejidad. Pero saber nombrar "cache stampede" y proponer single-flight es lo que se espera en una entrevista mid/senior.
+
 **Ejercicios 4**
 4.1 ¿Qué es "stale data" y por qué el caché lo provoca?
 4.2 ¿Cuándo alcanza con TTL y cuándo necesitás invalidación explícita? Dá un ejemplo de cada uno.
 4.3 Escribí el patrón: al actualizar un producto en la base, ¿qué hacés con su clave en el caché y por qué?
+4.4 ¿Qué es un "cache stampede" y en qué dos momentos típicos ocurre? Nombrá al menos dos mitigaciones.
+4.5 ¿Por qué agregarle un jitter aleatorio al TTL ayuda contra el stampede? ¿Qué problema NO resuelve (pista: un restart de Redis que vacía todo)?
 
 ---
 
@@ -168,10 +215,13 @@ await this.redis.del(`refresh:${usuarioId}:${jti}`);
 
 El TTL de Redis hace el trabajo sucio: el refresh token se borra solo cuando expira, sin un cron de limpieza. Y como vive afuera del proceso, podés correr 10 instancias de tu API y el login funciona igual caigas donde caigas. Esta es la pieza concreta que faltaba para que el "escalado horizontal + stateless" del módulo de Node sea real.
 
+**El matiz que diferencia esto de un JWT stateless: la revocación.** Un access token JWT puro es **stateless** y no se puede invalidar antes de que expire — por eso se le pone una vida corta (minutos). El refresh token, en cambio, vive en Redis: para **revocarlo al instante** (logout, sospecha de robo) basta con `DEL` de su clave, y la próxima renovación falla. Eso es exactamente lo que el JWT stateless no te da. Fijate además que guardamos el **hash** del token, no el token: si en la rotación de refresh tokens detectás que llega un token cuyo hash no coincide con el guardado (o que ya fue usado), tenés señal de **reuso/robo** y podés revocar toda la familia de tokens del usuario. La presencia de la clave (con `jti` único) es la validación; el hash guardado habilita la detección de reuso.
+
 **Ejercicios 5**
 5.1 ¿Por qué guardar sesiones en la memoria del proceso rompe el escalado horizontal?
 5.2 ¿Por qué Redis (y no Postgres) es el lugar típico para sesiones y refresh tokens? Mencioná el TTL.
 5.3 Conectá con auth: ¿qué ventaja da que el store de refresh tokens esté en Redis y no en memoria, para el logout y para escalar?
+5.4 Un access token JWT stateless no se puede revocar antes de expirar. ¿Cómo logra Redis la revocación inmediata del refresh token, y para qué sirve guardar su hash y no el token en claro?
 
 ---
 
@@ -179,27 +229,57 @@ El TTL de Redis hace el trabajo sucio: el refresh token se borra solo cuando exp
 
 **Teoría.** El **rate limiting** (limitar cuántos requests puede hacer un cliente en una ventana de tiempo) protege de abuso y de fuerza bruta — lo viste como medida de seguridad en el módulo de auth. La implementación natural usa Redis porque necesita un **contador compartido entre instancias** (si cada instancia cuenta por su lado, el límite real es N veces mayor) y con **expiración automática**.
 
-La idea base, con `INCR` + `EXPIRE`:
+La idea base es un contador con `INCR` y una ventana con `EXPIRE`. **Pero acá hay una trampa de producción** que es pregunta clásica de entrevista senior. La versión ingenua:
 
 ```ts
+// ❌ NO en producción: tiene una race condition
 async permitir(ip: string, limite = 10, ventanaSeg = 60): Promise<boolean> {
   const clave = `rate:${ip}`;
-  const actual = await this.redis.incr(clave);  // suma 1 atómicamente
+  const actual = await this.redis.incr(clave);   // comando 1
   if (actual === 1) {
-    await this.redis.expire(clave, ventanaSeg);  // primera vez: arranca la ventana
+    await this.redis.expire(clave, ventanaSeg);   // comando 2 (¡separado!)
   }
-  return actual <= limite;                        // ¿superó el límite?
+  return actual <= limite;
 }
 ```
 
-La primera petición de la ventana crea el contador y le pone un TTL; las siguientes lo incrementan; cuando pasa la ventana, la clave expira y el contador se reinicia solo. Como `INCR` es atómico y la clave es compartida, el límite se respeta aunque tengas muchas instancias.
+El problema: `INCR` y `EXPIRE` son **dos comandos distintos, no atómicos** (recordá el matiz del módulo 2). Si entre el `INCR` que crea la clave y el `EXPIRE` el proceso muere, la conexión se corta o Redis tiene un hipo, la clave queda **sin TTL para siempre**. Resultado: el contador nunca se reinicia y ese cliente queda **bloqueado permanentemente** — el mismo desastre que describe la solución 6.2 para el caso "sin EXPIRE", solo que ahora pasa por accidente. No es teórico: es *el* ejemplo canónico de por qué "atómico por comando" no es lo mismo que "atómico por secuencia".
 
-En NestJS no hace falta escribir esto a mano: el **`ThrottlerModule`** (del módulo de auth) lo hace, y se le puede configurar Redis como almacén para que funcione bien en entornos multi-instancia. Pero entender la mecánica con `INCR`/`EXPIRE` es lo que te deja explicarlo y diagnosticarlo.
+**La solución real: un script Lua**, que Redis ejecuta de forma **atómica** (un solo paso del hilo único, sin nada en el medio):
+
+```ts
+// ✅ INCR + EXPIRE en una sola operación atómica
+const LUA_RATE_LIMIT = `
+  local actual = redis.call('INCR', KEYS[1])
+  if actual == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+  end
+  return actual
+`;
+
+async permitir(ip: string, limite = 10, ventanaSeg = 60): Promise<boolean> {
+  const actual = (await this.redis.eval(
+    LUA_RATE_LIMIT, 1, `rate:${ip}`, String(ventanaSeg),
+  )) as number;
+  return actual <= limite;
+}
+```
+
+Como el script corre entero o no corre, nunca queda una clave sin TTL. (Alternativas equivalentes: `MULTI`/pipeline, o `SET clave 0 EX n NX` para crear la clave con TTL antes de incrementar.)
+
+**Ventana fija vs sliding window.** Lo de arriba es un **rate limiter de ventana fija** (fixed window): cuenta requests en bloques de 60s alineados al reloj. Tiene un defecto conocido: en el **borde de la ventana** un cliente puede hacer el límite completo al final de una ventana y otro límite completo al principio de la siguiente → hasta **2× el límite** en un instante (10 req en el segundo 59 + 10 en el 61 = 20 req en 2 segundos). Para límites estrictos esto importa. Alternativas que se esperan a nivel senior:
+
+- **Sliding window** (log o counter): cuenta los requests de los *últimos* 60s reales, no del bloque alineado. Se implementa con un **sorted set** (`ZADD` con timestamp, `ZREMRANGEBYSCORE` para purgar lo viejo, `ZCARD` para contar).
+- **Token bucket**: un balde que se rellena a ritmo constante; cada request consume un token. Permite ráfagas controladas. Es lo que usan muchos rate limiters reales (y APIs como las de los cloud providers).
+
+En NestJS no hace falta escribir nada de esto a mano: el **`ThrottlerModule`** (del módulo de auth) lo hace, y con `ThrottlerStorageRedis` usa Redis como almacén para multi-instancia. Y no es casualidad que **ese storage use scripts Lua por dentro**: justamente para evitar la race de INCR+EXPIRE. Entender la mecánica es lo que te deja explicarlo, elegir el algoritmo y diagnosticarlo.
 
 **Ejercicios 6**
 6.1 ¿Por qué el rate limiting necesita un contador en Redis y no en la memoria de cada instancia?
 6.2 ¿Qué rol cumple el `EXPIRE` en la implementación con `INCR`? ¿Qué pasaría sin él?
 6.3 ¿Qué ataque (visto en el módulo de auth) ayuda a frenar el rate limiting en el endpoint de login?
+6.4 Explicá la race condition de `INCR` + `EXPIRE` como dos comandos separados: ¿qué pasa si el proceso muere en el medio, y cómo lo arregla un script Lua?
+6.5 ¿Qué defecto tiene la "ventana fija" en el borde entre dos ventanas? Nombrá un algoritmo alternativo y con qué estructura de Redis lo implementarías.
 
 ---
 
@@ -238,7 +318,12 @@ Lo que ganás: respuestas rápidas (el usuario no espera el email), **resilienci
 ```ts
 import { Queue, Worker } from "bullmq";
 
-const connection = { host: "localhost", port: 6379 };
+// En Docker Compose el host es el NOMBRE DEL SERVICIO (redis), no localhost.
+// localhost solo sirve si corrés Node fuera de Compose contra un Redis local.
+const connection = {
+  host: process.env.REDIS_HOST ?? "redis",
+  port: Number(process.env.REDIS_PORT ?? 6379),
+};
 
 // PRODUCTOR (en tu service, tras crear el usuario)
 const emailQueue = new Queue("emails", { connection });
@@ -275,6 +360,7 @@ Puntos clave: el productor y el consumidor pueden vivir en **procesos distintos*
 8.1 ¿Cuál es el rol del productor (`Queue.add`) y cuál el del consumidor (`Worker`/`@Processor`)?
 8.2 ¿Qué pasa con un job si el método `process` lanza una excepción?
 8.3 ¿Por qué es una ventaja que el worker pueda correr en un proceso separado de la API? Conectá con "stateless" y escalado.
+8.4 (teclado) Levantá una `Queue` y un `Worker` sobre tu Redis del Compose. Encolá un job cuyo `process` haga `console.log(job.data)` tras un `await` de 2s. Verificá que el productor responde al instante y que el log del worker aparece 2s después, en otro proceso/terminal.
 
 ---
 
@@ -295,53 +381,78 @@ await emailQueue.add(
 
 Esto es exactamente el **retry con backoff exponencial** del senior: reintentar esperando cada vez más, para no generar una "tormenta de reintentos" contra un servicio que se está recuperando. La cola te lo da configurado, no lo escribís a mano.
 
-Pero, ¿qué pasa si un trabajo falla **siempre** (un email malformado, un bug)? No puede reintentarse para siempre bloqueando recursos. Tras agotar los `attempts`, el job queda marcado como **failed**, y el patrón es enviarlo a una **dead-letter queue (DLQ)**: un apartado donde queda para inspección manual sin frenar el resto de la cola. Es la "red de seguridad del procesamiento asíncrono" del senior.
+Pero, ¿qué pasa si un trabajo falla **siempre** (un email malformado, un bug)? No puede reintentarse para siempre bloqueando recursos. Tras agotar los `attempts`, el job queda marcado como **failed**.
+
+**Lo primero que hay que saber: BullMQ ya tiene una "DLQ" incorporada.** Los jobs que agotan sus intentos **no se pierden**: BullMQ los retiene en el estado `failed`, y los inspeccionás con `queue.getFailed()`. Podés controlar cuántos retiene con `removeOnFail` (ej. `removeOnFail: 1000` o `{ age: 7 * 24 * 3600 }`). Para la mayoría de los casos, **eso ya es tu dead-letter**: revisás los failed, arreglás la causa y los reintentás con `job.retry()`.
 
 ```ts
-new Worker("emails", procesar, { connection })
-  .on("failed", async (job, err) => {
-    if (job && job.attemptsMade >= (job.opts.attempts ?? 1)) {
-      await deadLetterQueue.add("email-fallido", { original: job.data, error: err.message });
-      // queda para revisión; la cola principal sigue fluida
-    }
-  });
+// Inspeccionar y reintentar trabajos fallidos (en un endpoint de admin o un script)
+const fallidos = await emailQueue.getFailed();
+for (const job of fallidos) {
+  console.log(job.id, job.failedReason, job.data);
+  // await job.retry(); // si arreglaste la causa
+}
 ```
 
-La regla del senior aplicada: reintentá solo fallos **transitorios** (timeouts, 5xx), nunca errores de negocio (un email inválido no mejora reintentando — ese va directo a la DLQ); y asegurá que el trabajo sea **idempotente** (módulo 10), porque los reintentos lo van a ejecutar más de una vez.
+Una **DLQ separada** (una cola aparte adonde mover los muertos) tiene sentido cuando querés un flujo distinto para ellos (alertas, otro worker, retención larga, métricas). Si la implementás con un listener, hacelo con cuidado, porque el patrón ingenuo es frágil:
+
+```ts
+// DLQ explícita opcional. Ojo: el evento 'failed' se emite en cada intento fallido,
+// no solo en el último; y el job puede fallar por 'stalled', no solo porque process() lanzó.
+new Worker("emails", procesar, { connection }).on(
+  "failed",
+  async (job, err) => {
+    if (!job) return; // en algunos fallos (stalled) job puede venir undefined
+    const agotado = job.attemptsMade >= (job.opts.attempts ?? 1);
+    if (!agotado) return; // todavía le quedan reintentos: no es la DLQ aún
+    await deadLetterQueue.add("email-fallido", { original: job.data, error: err.message });
+  },
+);
+```
+
+Aun así, mover a mano desde un listener puede **duplicar o perder** bajo un crash (el listener corre después del fallo, sin garantía transaccional). Para algo serio, preferí apoyarte en la cola `failed` nativa o usar `QueueEvents` para observabilidad. La regla: **empezá usando el `failed` que BullMQ ya te da**; una DLQ separada es una decisión deliberada, no el default.
+
+La regla del senior aplicada: reintentá solo fallos **transitorios** (timeouts, 5xx), nunca errores de negocio (un email inválido no mejora reintentando — ese debería fallar rápido y quedar en `failed`); y asegurá que el trabajo sea **idempotente** (módulo 10), porque los reintentos lo van a ejecutar más de una vez.
 
 **Ejercicios 9**
 9.1 ¿Por qué los reintentos usan backoff exponencial y no reintentan inmediato? (Recordá la "tormenta de reintentos" del senior.)
-9.2 ¿Qué es una dead-letter queue y qué problema resuelve?
+9.2 ¿Qué es una dead-letter queue y qué problema resuelve? ¿Por qué con BullMQ muchas veces no necesitás una cola separada?
 9.3 ¿Por qué tiene sentido reintentar un timeout pero NO un "email con formato inválido"?
+9.4 (teclado) Encolá un job cuyo `process` lance siempre una excepción, con `attempts: 3` y `backoff` exponencial. Observá en los logs cómo reintenta espaciando los intentos, y al final listá los trabajos muertos con `await queue.getFailed()`.
 
 ---
 
 ## Módulo 10 — Idempotencia en los workers
 
-**Teoría.** Como los reintentos (módulo 9) y la entrega "al menos una vez" de las colas hacen que un trabajo se ejecute **más de una vez**, los workers **deben ser idempotentes**: ejecutar el mismo trabajo dos veces produce el mismo resultado que ejecutarlo una. Es el concepto del archivo senior, ahora en el lugar donde más importa. Si "procesar pago" no es idempotente y el job se reintenta, **cobrás dos veces**.
+**Teoría.** Las colas garantizan entrega **"al menos una vez" (at-least-once)**, no "exactamente una vez". ¿Por qué no exactly-once? Porque entre *hacer el efecto* y *avisar que lo hiciste* (el ack) siempre hay un instante en que el proceso puede morir: si el worker cobra y muere **antes** de marcar el job completado, la cola cree que falló y lo reintenta. Garantizar "exactamente una vez" de punta a punta es esencialmente **imposible** en un sistema distribuido (es la forma práctica del problema de los dos generales): no hay forma de que dos máquinas se pongan de acuerdo con certeza sobre si un mensaje llegó cuando la red y los procesos pueden fallar en cualquier momento. Lo que se hace en la realidad es **at-least-once + idempotencia**, que entrega el efecto observable de "exactamente una vez".
 
-El caso peligroso: el worker hace el trabajo, pero **muere antes de marcar el job como completado** → la cola cree que falló → lo reintenta → se ejecuta de nuevo. No podés evitar el reintento; tenés que hacer que **reejecutar sea inofensivo**.
+Por eso los workers **deben ser idempotentes**: ejecutar el mismo trabajo dos veces produce el mismo resultado que ejecutarlo una. Es el concepto del archivo senior, ahora donde más importa. Si "procesar pago" no es idempotente y el job se reintenta, **cobrás dos veces**.
 
-La técnica (la misma del senior): una **clave de idempotencia** que registrás; si el trabajo ya se procesó, no lo repetís.
+La técnica: una **clave de idempotencia** que registrás; si el trabajo ya se procesó, no lo repetís.
 
 ```ts
 async process(job: Job<{ pedidoId: string }>): Promise<void> {
   const clave = `procesado:pago:${job.data.pedidoId}`;
 
-  // SET NX = "set if not exists": pone la clave solo si no estaba. Atómico.
-  const esNuevo = await this.redis.set(clave, "1", "EX", 86400, "NX");
-  if (!esNuevo) return; // ya se procesó este pago: no cobramos de nuevo
+  // SET ... NX = "set if not exists": pone la clave solo si no estaba, de forma atómica.
+  // OJO con ioredis: NO devuelve un booleano. Devuelve "OK" si seteó, o null si ya existía.
+  const resultado = await this.redis.set(clave, "1", "EX", 86400, "NX");
+  if (resultado === null) return; // la clave ya estaba: este pago ya se procesó
 
   await this.gateway.cobrar(job.data.pedidoId);
 }
 ```
 
-El `SET ... NX` de Redis es atómico: garantiza que solo **un** intento "gana" y procesa; los reintentos ven la clave ya puesta y salen sin reejecutar. Para operaciones que ya son naturalmente idempotentes (marcar una tarea como completada: ponerla en `true` dos veces da lo mismo) no hace falta nada extra; el cuidado es para las que tienen efectos acumulativos (cobrar, enviar, incrementar).
+**Cuidado con el orden, que es sutil.** En el código de arriba seteamos la clave *antes* de cobrar. Eso evita el doble cobro, pero abre otra ventana: si el worker setea la clave y **muere justo antes de `cobrar`**, el reintento ve la clave puesta y **no cobra nunca** (pérdida del efecto). Al revés (cobrar primero, setear después) corrés el riesgo opuesto: morir entre el cobro y el set → doble cobro. **No hay orden perfecto con un flag en Redis.** Para efectos críticos como un pago, lo robusto es **empujar la idempotencia al destino (el sink)**: mandar una `idempotency key` al gateway de pago, que es quien garantiza no cobrar dos veces la misma key. El flag en Redis es una buena primera línea para emails/notificaciones; para dinero, la garantía la tiene que dar el sistema que mueve el dinero.
+
+Para operaciones **naturalmente idempotentes** (marcar una tarea como completada: ponerla en `true` dos veces da lo mismo) no hace falta nada extra; el cuidado es para las que tienen efectos acumulativos (cobrar, enviar, incrementar).
 
 **Ejercicios 10**
 10.1 ¿Por qué un worker de cola DEBE ser idempotente? ¿Qué propiedad de las colas lo obliga?
 10.2 Dá un ejemplo de operación que se rompe si no es idempotente y una que ya lo es naturalmente.
-10.3 ¿Cómo usás `SET NX` con TTL en Redis para evitar procesar dos veces el mismo trabajo?
+10.3 ¿Cómo usás `SET NX` con TTL en Redis para evitar procesar dos veces el mismo trabajo? ¿Qué devuelve `SET ... NX` en ioredis cuando la clave ya existía?
+10.4 ¿Por qué "exactamente una vez" es esencialmente imposible end-to-end, y cómo se logra el efecto equivalente en la práctica?
+10.5 Mostrá la ventana de fallo según el orden: ¿qué pasa si seteás la clave de idempotencia antes de cobrar y morís en el medio? ¿Y si cobrás primero? ¿Por qué para un pago conviene una idempotency key en el gateway?
 
 ---
 
@@ -361,14 +472,49 @@ export class LimpiezaService {
 }
 ```
 
-Pero **cuidado con el cron en multi-instancia**: si corrés 3 instancias de tu API, las 3 dispararían el mismo cron a las 3 AM → el trabajo se ejecuta 3 veces. Soluciones: usar **BullMQ con jobs repetibles** (`repeat`), que se coordinan vía Redis y garantizan que solo un worker lo tome; o un **lock distribuido** en Redis (`SET NX`, como la idempotencia del módulo 10) para que solo una instancia ejecute. Este es un error clásico que separa a quien probó algo en local de quien lo operó escalado.
+Pero **cuidado con el cron en multi-instancia**: si corrés 3 instancias de tu API, las 3 dispararían el mismo cron a las 3 AM → el trabajo se ejecuta 3 veces (emails triplicados, estadísticas recalculadas 3 veces). Este es un error clásico que separa a quien probó algo en local de quien lo operó escalado.
 
-Para el caché en Nest, el **`CacheModule`** integra Redis de forma declarativa, e incluso podés cachear endpoints enteros con un interceptor (`@UseInterceptors(CacheInterceptor)`), aunque para invalidación fina (módulo 4) conviene el control manual con el patrón cache-aside.
+**La opción recomendada: BullMQ con jobs repetibles** (`repeat`). En vez de un `@Cron` en cada instancia, encolás un job repetible y BullMQ se coordina vía Redis para que **solo un worker tome cada ejecución**:
+
+```ts
+await tareasQueue.add(
+  "limpieza-nocturna",
+  {},
+  { repeat: { pattern: "0 3 * * *" }, jobId: "limpieza-nocturna" }, // jobId fijo evita duplicar el repeatable
+);
+```
+
+**La otra opción, el lock distribuido, viene con letra chica que se espera que conozcas.** Sí, podés usar `SET NX EX` para que solo la instancia que "gana" el lock ejecute. Pero un lock sobre Redis es **best-effort, no una garantía dura de exclusión mutua**, y tiene dos trampas:
+
+1. **Expiración prematura**: si le ponés `EX 30` al lock pero el trabajo tarda 40s, el lock expira mientras seguís trabajando → otra instancia agarra el lock y ejecuta **en paralelo** (doble ejecución, justo lo que querías evitar).
+2. **Borrado inseguro**: si al terminar hacés `DEL` del lock a ciegas, podés estar **borrando el lock de otra instancia** (la tuya expiró, otra lo tomó, y vos borrás el de ella). Por eso el lock se guarda con un **valor único (token)** y se libera comparando ese token, idealmente con un script Lua atómico:
+
+```ts
+const token = randomUUID();
+const tomado = await this.redis.set("lock:cron", token, "EX", 30, "NX"); // "OK" | null
+if (tomado === null) return; // otra instancia tiene el lock
+try {
+  await this.tarea();
+} finally {
+  // liberar solo si el token sigue siendo el nuestro (atómico, evita borrar el de otro)
+  await this.redis.eval(
+    `if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end`,
+    1, "lock:cron", token,
+  );
+}
+```
+
+Aun así, esto **no garantiza** exclusión bajo pausas de GC o relojes desincronizados: es la crítica de Martin Kleppmann a **Redlock** (el algoritmo de lock distribuido multi-nodo de Redis). Para exclusión *correcta* hacen falta **fencing tokens** (un número creciente que el recurso protegido valida), algo que Redis solo no te da. Conclusión práctica: para un cron, **usá `repeat` de BullMQ**; el lock con token es aceptable para tareas idempotentes donde una doble ejecución ocasional no es catastrófica, pero conocé sus límites.
+
+**Caché declarativo en Nest.** El **`CacheModule`** (con el store Redis del módulo 3) integra Redis de forma declarativa, e incluso podés cachear endpoints enteros con un interceptor (`@UseInterceptors(CacheInterceptor)`), aunque para invalidación fina (módulo 4) conviene el control manual con el patrón cache-aside.
+
+**Lo que queda para el próximo módulo: Pub/Sub.** Redis también tiene **Pub/Sub** (`PUBLISH`/`SUBSCRIBE`): publicás un mensaje en un canal y todos los suscriptores lo reciben. Es **fire-and-forget** — no persiste, no reintenta, si nadie escucha el mensaje se pierde (por eso no sirve como cola de trabajos: para eso está BullMQ). Pero es ideal para propagar eventos en vivo entre instancias, y es exactamente el mecanismo que necesitás para escalar **WebSockets** a varias instancias — el tema del próximo módulo.
 
 **Ejercicios 11**
-11.1 ¿Qué problema aparece si tenés un `@Cron` y escalás tu API a 3 instancias? ¿Cómo lo resolvés?
+11.1 ¿Qué problema aparece si tenés un `@Cron` y escalás tu API a 3 instancias? ¿Cuál es la opción recomendada para resolverlo?
 11.2 ¿Qué herramienta de Nest usarías para una tarea programada simple, y qué para coordinarla en multi-instancia?
-11.3 Conectá con el módulo 10: ¿qué mecanismo de Redis usarías como "lock" para que solo una instancia ejecute el cron?
+11.3 Conectá con el módulo 10: ¿qué mecanismo de Redis usarías como "lock" para que solo una instancia ejecute el cron? Nombrá dos peligros del lock (expiración prematura y borrado inseguro) y cómo se mitigan.
+11.4 ¿En qué se diferencia Pub/Sub de una cola como BullMQ, y por qué Pub/Sub NO sirve para procesar trabajos pero sí para propagar eventos en vivo?
 
 ---
 
@@ -388,6 +534,18 @@ Para el caché en Nest, el **`CacheModule`** integra Redis de forma declarativa,
 1.3 En Redis: un caché del catálogo de productos o un refresh token (si se pierde, se
     reconstruye o se re-loguea). Jamás solo en Redis: los pedidos o los pagos de un
     usuario, porque perderlos es perder datos del negocio sin respaldo.
+1.4 Redis procesa los comandos en un solo hilo, así que un comando lento bloquea a TODOS
+    los clientes mientras corre. KEYS * recorre todo el keyspace (O(n)): en una base
+    grande congela Redis por completo. En su lugar se usa SCAN, que itera de a cursores
+    sin bloquear.
+1.5 RDB son snapshots periódicos: tras un crash perdés lo escrito desde el último
+    snapshot (segundos/minutos). AOF registra cada escritura en un log: con
+    appendfsync everysec perdés como mucho ~1s, a costa de archivos más grandes y algo
+    más lento. Para un caché casi no importa: si Redis se reinicia vacío, se reconstruye
+    desde Postgres (el riesgo real es el cache stampede del módulo 4, no la pérdida).
+1.6 Define qué hace Redis al llegar a maxmemory: allkeys-lru descarta las claves menos
+    usadas recientemente para hacer lugar. Es la típica para caché porque mantiene lo
+    caliente y tira lo frío, en vez de rechazar escrituras o morir por OOM cuando se llena.
 ```
 
 ### Módulo 2
@@ -401,6 +559,9 @@ Para el caché en Nest, el **`CacheModule`** integra Redis de forma declarativa,
 2.3 Porque INCR es atómico: incrementa sin condiciones de carrera. Leer-sumar-escribir
     desde tu código tiene una ventana donde dos requests leen el mismo valor y ambos
     escriben +1, perdiéndose un incremento (race condition).
+2.4 TTL de una clave sin expiración devuelve -1 (y -2 si la clave no existe). El ejercicio
+    muestra que INCR crea/incrementa la clave, EXPIRE le pone la ventana, y al pasar el
+    TTL la clave desaparece sola (GET → (nil)).
 ```
 
 ### Módulo 3
@@ -414,6 +575,13 @@ Para el caché en Nest, el **`CacheModule`** integra Redis de forma declarativa,
 3.3 La primera es un miss: paga el costo de la query a Postgres y guarda el resultado en
     caché. La segunda (dentro del TTL) es un hit: responde desde memoria en microsegundos
     sin tocar Postgres.
+3.4 Sin store de Redis, el CacheModule usa la memoria de cada proceso: con 3 instancias
+    tenés 3 cachés distintos. Los hits son inconsistentes (depende de a qué instancia
+    caés) e invalidar en una no invalida en las otras. Contradice el stateless del
+    módulo 5: el estado compartido (el caché) debe vivir afuera del proceso, en Redis.
+3.5 (teclado) La 1ra petición (miss) muestra la latencia de Postgres (varios ms); la 2da
+    (hit) responde en microsegundos sin tocar la base. Es la evidencia concreta del valor
+    del caché — y conecta con "medí antes de optimizar".
 ```
 
 ### Módulo 4
@@ -427,6 +595,17 @@ Para el caché en Nest, el **`CacheModule`** integra Redis de forma declarativa,
 4.3 Al actualizar en Postgres, borrás (DEL) o actualizás su clave en el caché, para que
     la próxima lectura sea un miss y recachee el valor nuevo. Si no, seguirías sirviendo
     el valor viejo hasta que expire el TTL.
+4.4 Cache stampede: cuando una clave caliente expira (o tras un restart/failover que
+    vacía Redis), muchísimos requests sufren miss A LA VEZ y todos pegan a Postgres
+    simultáneamente para reconstruir el mismo valor, pudiendo tumbarlo. Ocurre típicamente
+    (a) al expirar una clave muy consultada y (b) tras un flush/restart de Redis.
+    Mitigaciones: TTL con jitter, single-flight (un solo request recalcula con lock),
+    early recompute (refrescar antes de que expire).
+4.5 El jitter (TTL = base + random) hace que las claves no expiren todas en el mismo
+    instante, así los misses se reparten en el tiempo en vez de concentrarse en un pico.
+    NO resuelve el caso del restart de Redis que vacía TODO de golpe: ahí todas las claves
+    nacen ausentes a la vez, sin jitter que valga; para eso sirve el single-flight/lock o
+    el warming del caché.
 ```
 
 ### Módulo 5
@@ -441,6 +620,11 @@ Para el caché en Nest, el **`CacheModule`** integra Redis de forma declarativa,
 5.3 Para el logout, permite revocar el token borrándolo del store (un JWT stateless puro
     no se puede invalidar antes de expirar). Para escalar, al estar afuera del proceso,
     todas las instancias ven el mismo store y el login funciona caigas donde caigas.
+5.4 Como el refresh token vive en Redis (no en el JWT), revocarlo es DEL de su clave: la
+    próxima renovación falla al instante, algo que un access token stateless no permite
+    hasta que expira. Se guarda el hash y no el token en claro para no exponer un secreto
+    si Redis se filtra, y para detectar reuso/robo: si llega un refresh cuyo hash no
+    coincide (o ya fue usado en la rotación), se revoca toda la familia de tokens.
 ```
 
 ### Módulo 6
@@ -453,6 +637,17 @@ Para el caché en Nest, el **`CacheModule`** integra Redis de forma declarativa,
     cliente quedaría bloqueado permanentemente.
 6.3 La fuerza bruta / credential stuffing: limitar los intentos de login por IP/usuario
     impide probar miles de contraseñas. (Visto en el módulo de auth.)
+6.4 INCR y EXPIRE son dos comandos separados; no son atómicos juntos. Si el proceso muere
+    (o la conexión se corta) justo después del INCR que crea la clave y antes del EXPIRE,
+    la clave queda SIN TTL para siempre: el contador no se reinicia nunca y ese cliente
+    queda bloqueado de forma permanente. Un script Lua ejecuta INCR+EXPIRE como una sola
+    operación atómica (el hilo único de Redis no intercala nada en el medio), así nunca
+    queda una clave sin expiración.
+6.5 La ventana fija permite hasta el doble del límite en el borde: un cliente puede gastar
+    el límite completo al final de una ventana y otro completo al inicio de la siguiente
+    (ej. 10 en el seg 59 + 10 en el 61 = 20 en ~2s). Alternativas: sliding window con un
+    sorted set (ZADD por timestamp, ZREMRANGEBYSCORE para purgar, ZCARD para contar) o
+    token bucket (un balde que se rellena a ritmo fijo y permite ráfagas controladas).
 ```
 
 ### Módulo 7
@@ -478,6 +673,9 @@ Para el caché en Nest, el **`CacheModule`** integra Redis de forma declarativa,
     mucho trabajo en background, sin tocar la API) y aislar fallos. Es posible porque el
     estado (la cola) vive en Redis, no en el proceso: API y worker son stateless y se
     coordinan vía Redis.
+8.4 (teclado) El productor (Queue.add) retorna casi al instante: no espera a que el job
+    se procese. El log del worker aparece ~2s después y en otro proceso, demostrando que
+    el trabajo corre en background, desacoplado del request y escalable por separado.
 ```
 
 ### Módulo 9
@@ -487,11 +685,18 @@ Para el caché en Nest, el **`CacheModule`** integra Redis de forma declarativa,
     El backoff (1s, 2s, 4s...) con jitter espacia los reintentos y le da aire.
 9.2 Es una cola aparte adonde van los trabajos que fallaron tras agotar los reintentos.
     Resuelve que un trabajo "envenenado" (que falla siempre) no se reintente para siempre
-    bloqueando la cola: queda apartado para inspección manual sin frenar el resto.
+    bloqueando la cola: queda apartado para inspección manual sin frenar el resto. Con
+    BullMQ muchas veces no necesitás una cola separada: los jobs que agotan los intentos
+    quedan retenidos en el estado `failed` (se inspeccionan con queue.getFailed() y se
+    reintentan con job.retry()). Una DLQ separada se justifica si querés un flujo distinto
+    para los muertos (alertas, otro worker, retención larga).
 9.3 Un timeout suele ser transitorio (el servicio estaba lento un instante): reintentar
     puede funcionar. Un email con formato inválido es un error determinista de negocio:
-    va a fallar igual en cada intento, así que reintentar solo gasta recursos; ese va a
-    la DLQ.
+    va a fallar igual en cada intento, así que reintentar solo gasta recursos; ese debe
+    fallar rápido y quedar en `failed`.
+9.4 (teclado) En los logs ves los 3 intentos espaciándose por el backoff exponencial
+    (~1s, 2s, 4s); tras agotarlos el job no se pierde: queda en estado failed y aparece
+    en await queue.getFailed() con su failedReason.
 ```
 
 ### Módulo 10
@@ -504,20 +709,43 @@ Para el caché en Nest, el **`CacheModule`** integra Redis de forma declarativa,
      da el mismo resultado).
 10.3 Con SET clave "1" EX <ttl> NX: el NX hace que la clave se ponga solo si no existía,
      de forma atómica. El primer intento la crea y procesa; los reintentos ven la clave ya
-     puesta y salen sin reejecutar.
+     puesta y salen sin reejecutar. En ioredis ese SET ... NX NO devuelve un booleano:
+     devuelve "OK" si seteó la clave, o null si ya existía. Por eso se chequea
+     `if (resultado === null) return;`.
+10.4 Porque entre hacer el efecto y confirmar (ack) que se hizo siempre hay un instante
+     donde el proceso puede morir, y dos máquinas no pueden acordar con certeza si un
+     mensaje llegó cuando la red/los procesos fallan (problema de los dos generales). En
+     la práctica se usa at-least-once + workers idempotentes, que produce el efecto
+     observable de "exactamente una vez".
+10.5 Si seteás la clave de idempotencia ANTES de cobrar y morís en el medio, el reintento
+     ve la clave puesta y NO cobra nunca (pérdida del efecto). Si cobrás PRIMERO y morís
+     antes de setear, el reintento cobra de nuevo (doble cobro). No hay orden perfecto con
+     un flag en Redis; para un pago lo robusto es mandar una idempotency key al gateway,
+     que garantiza no cobrar dos veces la misma key en el sistema que mueve el dinero.
 ```
 
 ### Módulo 11
 ```
 11.1 Las 3 instancias dispararían el mismo cron a la vez → el trabajo se ejecuta 3 veces
-     (emails triplicados, etc.). Se resuelve con BullMQ jobs repetibles (se coordinan vía
-     Redis y solo un worker toma cada ejecución) o un lock distribuido en Redis.
+     (emails triplicados, etc.). La opción recomendada es BullMQ con jobs repetibles
+     (repeat): se coordinan vía Redis y solo un worker toma cada ejecución.
 11.2 Para una tarea simple, @nestjs/schedule con @Cron. Para coordinarla en
-     multi-instancia, BullMQ con repeat (o un lock en Redis), de modo que solo una
-     instancia ejecute cada disparo.
+     multi-instancia, BullMQ con repeat (recomendado) o, en su defecto, un lock en Redis,
+     de modo que solo una instancia ejecute cada disparo.
 11.3 SET NX con TTL: la instancia que logra poner la clave (gana el lock) ejecuta; las
-     demás ven que ya existe y se abstienen. El TTL evita que el lock quede tomado para
-     siempre si la instancia que lo tiene muere.
+     demás ven que ya existe y se abstienen. Dos peligros: (a) expiración prematura — si
+     el trabajo dura más que el TTL del lock, este expira y otra instancia ejecuta en
+     paralelo (doble ejecución); se mitiga dando margen al TTL o renovándolo. (b) borrado
+     inseguro — un DEL a ciegas puede borrar el lock de otra instancia; se mitiga
+     guardando un token único y liberando solo si el token sigue siendo el nuestro, con un
+     script Lua atómico. Aun así no garantiza exclusión bajo pausas de GC/relojes
+     desfasados (crítica de Kleppmann a Redlock; la exclusión correcta exige fencing
+     tokens). Por eso, para un cron, mejor BullMQ repeat.
+11.4 Pub/Sub es fire-and-forget: publicás en un canal y los suscriptores conectados EN ESE
+     momento lo reciben; no persiste ni reintenta, si nadie escucha se pierde. Una cola
+     (BullMQ) persiste el trabajo, lo entrega al menos una vez, reintenta y un solo worker
+     lo procesa. Por eso Pub/Sub no sirve para trabajos (perderías jobs) pero sí para
+     propagar eventos en vivo entre instancias (ej. broadcast de WebSockets).
 ```
 
 ---
