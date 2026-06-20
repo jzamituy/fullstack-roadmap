@@ -94,7 +94,7 @@ El principio: **el golden set es tu definición operacional de "bueno".** Si est
 - **Exact match / regex**: la salida es una de N categorías (clasificación), o contiene cierto patrón.
 - **Validación de schema**: la salida es JSON válido contra tu schema (el structured output del módulo 6 de LLMs es validable así).
 - **Métricas de retrieval**: recall@k, precision@k (módulo 11 de RAG) — pura comparación de IDs.
-- **Métricas operacionales**: latencia, costo en tokens (módulo de costo de LLMs), tasa de error. Estas siempre se miden por código.
+- **Métricas operacionales**: latencia, costo en tokens (módulo de costo de LLMs), tasa de error. Estas siempre se miden por código. Ojo con la latencia: medila en **percentiles (p95/p99)**, no en promedio —el promedio esconde la cola lenta que el usuario sí siente—, igual que en el módulo de observabilidad.
 
 **2. LLM-as-judge (basadas en modelo).** Cuando la corrección es subjetiva o sobre texto libre —"¿esta respuesta es fiel al contexto?", "¿este resumen es bueno?", "¿el tono es apropiado?"— no hay regex que lo capture. Ahí usás **otro LLM como juez** que puntúa la salida según una rúbrica (módulo 4). Es más caro y menos exacto, pero captura calidad que el código no puede.
 
@@ -117,6 +117,10 @@ En la práctica, un sistema serio combina ambas: las métricas de código corren
 - **Structured output para el score.** Pedile al juez la salida como JSON `{ score, razon }` (el módulo 6 de LLMs): garantiza que recibís un número parseable más la justificación, no texto libre que tenés que parsear. La `razon` además te da trazabilidad de *por qué* puntuó así.
 
 ```ts
+import { z } from "zod";
+import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
+// `client` es el cliente Anthropic del módulo 6 de LLMs
+
 const RubricaSchema = z.object({
   score: z.number().min(1).max(5),
   razon: z.string(),
@@ -124,7 +128,8 @@ const RubricaSchema = z.object({
 
 async function juezFidelidad(contexto: string, respuesta: string) {
   const res = await client.messages.parse({
-    model: "claude-opus-4-8", // un modelo capaz como juez
+    // Idealmente, un modelo DISTINTO al que generó la respuesta (evita self-preference)
+    model: "claude-opus-4-8",
     max_tokens: 1024,
     messages: [{
       role: "user",
@@ -136,9 +141,17 @@ async function juezFidelidad(contexto: string, respuesta: string) {
     }],
     output_config: { format: zodOutputFormat(RubricaSchema) },
   });
+
+  // parsed_output es NULLABLE: null si el parseo falla o el juez rechaza
+  // (stop_reason: "refusal"). Un score ausente NO es 0 — es "re-evaluar/descartar".
+  if (res.parsed_output === null) {
+    throw new Error("El juez no devolvió un score válido (parseo fallido o refusal)");
+  }
   return res.parsed_output; // { score, razon } validado
 }
 ```
+
+Dos detalles que el código deja ver y la teoría no debe omitir: `parsed_output` es **nullable** —el juez también es un LLM y puede fallar el parseo o rechazar la tarea (`stop_reason: "refusal"`)—; tratá el score ausente como un caso a re-evaluar o descartar, nunca como 0. Y el structured output es **incompatible con la feature Citations** (devuelve 400): si querés que el juez señale en qué parte del contexto se apoya, ponelo como un campo más del JSON (`evidencia: string`), no con Citations.
 
 Los **sesgos** del juez que tenés que conocer (un juez es un LLM, con sus debilidades):
 
@@ -146,7 +159,7 @@ Los **sesgos** del juez que tenés que conocer (un juez es un LLM, con sus debil
 - **Sesgo de verbosidad**: tiende a puntuar mejor las respuestas largas aunque no sean mejores. Mitigación: rúbrica explícita que penalice el relleno.
 - **Self-preference**: un modelo tiende a preferir salidas de su misma familia. Mitigación: usá un juez de modelo distinto al evaluado cuando puedas.
 
-Y la regla que cierra el círculo: **al juez también hay que evaluarlo.** ¿Cómo sabés que tu juez puntúa bien? Lo calibrás contra un conjunto de casos puntuados **por humanos**: si el juez coincide con el humano la mayoría de las veces, confiás en él para escalar. Sin esa calibración, estás midiendo con una regla que no verificaste.
+Y la regla que cierra el círculo: **al juez también hay que evaluarlo.** ¿Cómo sabés que tu juez puntúa bien? Lo calibrás contra un conjunto de casos puntuados **por humanos** (unos 20-50 alcanzan para arrancar) y medís el **acuerdo juez↔humano** con una métrica concreta, no "a ojo": el **% de acuerdo** si la rúbrica es categórica, o **Cohen's kappa** / **correlación de Spearman** si es ordinal (1-5). Un juez con kappa bajo no es usable aunque su rúbrica se vea impecable. Sin esa calibración, estás midiendo con una regla que no verificaste.
 
 **Ejercicios 4**
 4.1 ¿Qué dos cosas hacen confiable a un LLM-as-judge? Explicá cada una.
@@ -229,7 +242,7 @@ La distinción: **offline mide antes de soltar (¿es seguro deployar?); online m
 
 **Teoría.** No podés evaluar —ni debuggear— lo que no podés ver. Un sistema de IA, sobre todo un agente, es una **caja negra de muchos pasos**: una pregunta dispara un retrieval, varias llamadas al LLM, varias tool calls, decisiones intermedias. Cuando algo sale mal, "la respuesta fue mala" es inútil sin saber qué pasó adentro. La **observabilidad** es lo que te da esa visibilidad.
 
-La unidad es el **trace** (traza): el registro completo de todo lo que pasó al procesar una request, descompuesto en **spans** (cada paso: cada llamada al LLM con su prompt/respuesta/tokens/latencia, cada retrieval con sus chunks, cada tool call con sus argumentos y resultado). Es el mismo concepto de tracing distribuido que se usa para microservicios (el del track de observabilidad), aplicado a un pipeline de IA. De hecho, el estándar **OpenTelemetry** —el de tracing general— tiene convenciones para LLMs, y herramientas como **Langfuse** (open source) están construidas sobre esa idea: capturan cada llamada, su costo, su latencia y sus inputs/outputs, y te dejan inspeccionar traces individuales y agregar métricas.
+La unidad es el **trace** (traza): el registro completo de todo lo que pasó al procesar una request, descompuesto en **spans** (cada paso: cada llamada al LLM con su prompt/respuesta/tokens/latencia, cada retrieval con sus chunks, cada tool call con sus argumentos y resultado). Es el mismo concepto de tracing distribuido que se usa para microservicios (el del track de observabilidad), aplicado a un pipeline de IA. De hecho, el estándar **OpenTelemetry** —el de tracing general— tiene convenciones semánticas para IA generativa (todavía **experimentales y sujetas a cambio**, así que verificá la versión al implementar), y herramientas como **Langfuse** (open source) están construidas sobre esa idea: capturan cada llamada, su costo, su latencia y sus inputs/outputs, y te dejan inspeccionar traces individuales y agregar métricas.
 
 Para qué sirve concretamente:
 
@@ -258,7 +271,7 @@ Tipos típicos:
 - **De output**: validar que la salida no contenga PII, secretos, ni afirmaciones sin grounding (en RAG: ¿la respuesta cita fuentes reales del contexto, o inventó?). Acá rinde el structured output (validar la forma) más una validación de dominio del contenido (módulo 10 de LLMs).
 - **De acción** (en agentes): el **human-in-the-loop** del módulo de Agentes —antes de una acción irreversible (borrar, cobrar, enviar), un gate que la confirma o un check automático que la valida—.
 
-Cómo se implementan: a veces con código (regex/validación para PII, schema para forma), a veces con un **LLM clasificador** rápido y barato (Haiku) que juzga "¿esta salida es segura?" en línea —un primo en tiempo real del LLM-as-judge, optimizado para latencia, no para profundidad—.
+Cómo se implementan: a veces con código (regex/validación para PII, schema para forma), a veces con un **LLM clasificador** rápido y barato (Haiku) que juzga "¿esta salida es segura?" en línea —un primo en tiempo real del LLM-as-judge, optimizado para latencia, no para profundidad—. Ojo: ese guardarraíl-LLM agrega una llamada extra en el **camino crítico de cada request** (latencia + costo), así que se reserva para los fallos catastróficos, se corre en paralelo cuando se puede, y se prefiere código siempre que el chequeo lo permita (la regla de oro del módulo 3).
 
 El principio integrador, el de siempre: **defensa en profundidad y mínimo privilegio.** Las evals te dicen que el sistema es bueno en general; los guardrails atajan el caso individual catastrófico que el promedio esconde. Ninguna capa sola alcanza: golden set + evals en CI + monitoreo online + guardrails en el request, apilados. Para un AI engineer, saber que **medir (evals) y controlar (guardrails) son cosas distintas y complementarias** es criterio senior.
 
@@ -338,9 +351,11 @@ Y el criterio que atravesó **todo el track de IA**, una última vez, ahora comp
 4.2 (Dos de:) sesgo de posición (prefiere la primera/última en A-vs-B) → aleatorizar orden o
     promediar; sesgo de verbosidad (puntúa mejor lo largo) → rúbrica que penalice el relleno;
     self-preference (prefiere su propia familia de modelo) → usar un juez de modelo distinto.
-4.3 Calibrándolo contra casos puntuados por humanos: si el juez coincide con el humano la
-    mayoría de las veces, confiás en él para escalar. Importa porque sin calibrar estás
-    midiendo con una regla que no verificaste.
+4.3 Calibrándolo contra casos puntuados por humanos (20-50 alcanzan): medís el acuerdo
+    juez↔humano con una métrica concreta —% de acuerdo si es categórica, Cohen's kappa o
+    correlación de Spearman si es ordinal (1-5)— y solo confiás en él para escalar si el
+    acuerdo es alto. Importa porque sin calibrar estás midiendo con una regla que no
+    verificaste; un juez con kappa bajo no sirve aunque su rúbrica se vea impecable.
 ```
 
 ### Módulo 5
