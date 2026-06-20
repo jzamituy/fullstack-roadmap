@@ -6,13 +6,21 @@
 
 **Lo que asumimos.** El módulo de **AWS para backend** (criterio de Lambda/Fargate/SQS/EventBridge/Kinesis/DynamoDB/IAM), tu "Task API" dockerizada, y tus módulos de PostgreSQL y Redis (RDS y ElastiCache son sus versiones gestionadas).
 
+> **Nota sobre versiones.** Los números concretos de este módulo (Postgres 16, Node 22, "HTTP API por defecto", precios de NAT) son los vigentes al escribir, en 2026. AWS se mueve rápido: **verificá la versión y el precio vigentes al desplegar** (consola, `aws ... describe`, pricing calculator). El criterio no cambia; los números sí.
+
 **Para practicar.** AWS CLI configurado (`aws configure`), Node, y CDK:
 
 ```bash
 npm i -g aws-cdk          # la CLI de CDK
 cdk init app --language typescript   # nuevo proyecto de infra
 npm i aws-cdk-lib constructs         # la librería de constructs (v2)
+
+# UNA vez por cuenta+región, antes del primer deploy: crea el "toolkit stack"
+# (bucket de assets, roles) que CDK necesita para subir tus imágenes/plantillas.
+cdk bootstrap aws://<ACCOUNT_ID>/<REGION>
 ```
+
+`cdk bootstrap` es el primer obstáculo real que vas a encontrar: sin él, `cdk deploy` falla. Crea un stack (`CDKToolkit`) con el bucket de assets y los roles que CDK usa para desplegar. Se corre una vez por cada combinación cuenta+región.
 
 **Índice de módulos**
 1. Infraestructura como código con CDK
@@ -73,10 +81,46 @@ cdk destroy   # borra todo lo del stack (clave para no dejar recursos costando)
 
 `cdk diff` antes de `deploy` es tu red de seguridad: ves exactamente qué cambia antes de tocar producción. Esto se integra al **CI/CD** (módulo de Docker): el pipeline corre `cdk deploy` tras los tests.
 
+**Múltiples entornos (dev/staging/prod).** En producción no desplegás "un" stack: desplegás el mismo stack **parametrizado por entorno** (tamaños chicos en dev, Multi-AZ y réplicas en prod), idealmente en **cuentas AWS separadas** (aislamiento de blast radius y de costos). El patrón en CDK: pasarle `props` a tu stack y fijar el `env` (cuenta + región):
+
+```ts
+interface TaskApiProps extends cdk.StackProps {
+  esProd: boolean;
+}
+
+new TaskApiStack(app, "TaskApi-dev", {
+  env: { account: "111111111111", region: "us-east-1" },
+  esProd: false, // instancias chicas, single-AZ, destruible
+});
+new TaskApiStack(app, "TaskApi-prod", {
+  env: { account: "222222222222", region: "us-east-1" },
+  esProd: true, // Multi-AZ, deletionProtection, réplicas
+});
+```
+
+**Testear la infra.** Como CDK es código, lo testeás como código. `aws-cdk-lib/assertions` te deja afirmar sobre el CloudFormation sintetizado, sin desplegar nada:
+
+```ts
+import { Template } from "aws-cdk-lib/assertions";
+
+test("el bucket bloquea acceso público", () => {
+  const app = new cdk.App();
+  const stack = new StorageStack(app, "Test");
+  const template = Template.fromStack(stack);
+  template.hasResourceProperties("AWS::S3::Bucket", {
+    PublicAccessBlockConfiguration: { BlockPublicAcls: true },
+  });
+});
+```
+
+Esto corre en tu CI (módulo de testing) y atrapa regresiones de infra (alguien abre un bucket público, borra un SG) antes del deploy.
+
 **Ejercicios 1**
 1.1 ¿Qué ventajas da definir la infraestructura con CDK en vez de crear los recursos a mano en la consola? Mencioná dos.
 1.2 ¿Qué hacen `cdk synth`, `cdk diff` y `cdk deploy`? ¿Por qué `cdk diff` es importante antes de un deploy a producción?
 1.3 ¿Cuál es la diferencia entre un Stack y un Construct en CDK?
+1.4 ¿Qué hace `cdk bootstrap` y por qué tenés que correrlo antes del primer `cdk deploy` en una cuenta/región?
+1.5 (teclado) Creá un proyecto CDK (`cdk init`), definí un `StorageStack` con un bucket S3 privado, corré `cdk bootstrap`, `cdk diff` (observá qué se va a crear) y `cdk deploy`. Verificá el bucket en la consola y después `cdk destroy`.
 
 ---
 
@@ -101,12 +145,21 @@ const vpc = new ec2.Vpc(this, "Vpc", {
 });
 ```
 
+**El trade-off de `natGateways: 1`.** Un solo NAT abarata, pero tiene dos costos ocultos que un senior nombra: (1) es un **SPOF de egress** — si cae la AZ de ese NAT, tus subnets privadas de las *otras* AZ pierden salida a internet; en prod querés uno por AZ. (2) Todo el tráfico privado→internet de las otras AZ **cruza la AZ** del NAT, y el **tráfico cross-AZ se factura por GB** (costo invisible que aparece en arquitecturas "chatty", módulo 9).
+
+**VPC endpoints: la forma de no pagar NAT para hablar con AWS.** Si tu app en subnet privada solo necesita salir para hablar con **servicios de AWS** (S3, Secrets Manager, etc.), no hace falta NAT: usás un **VPC endpoint**, que da una ruta privada al servicio. Hay dos tipos, y la diferencia es plata:
+
+- **Gateway endpoints** (solo **S3** y **DynamoDB**): **gratis**. Una ruta en la tabla de ruteo. Si tu app pega mucho a S3, este endpoint elimina ese tráfico del NAT sin costo — un ahorro clásico.
+- **Interface endpoints** (PrivateLink, para casi todos los demás servicios): cuestan ~$7/mes cada uno + datos. Convienen cuando el tráfico a ese servicio por NAT saldría más caro que el endpoint, o cuando querés que *nunca* salga a internet (compliance).
+
 La arquitectura típica de un backend: el **ALB** en subnets públicas (recibe el tráfico de internet), tu **app (Fargate)** y tu **base (RDS)** en subnets privadas, y un security group que solo deja a la app hablar con la base. Así, aunque alguien conozca la dirección de tu base, no le llega desde afuera.
 
 **Ejercicios 2**
 2.1 ¿Por qué tu base de datos debe ir en una subnet privada y no en una pública?
 2.2 ¿Qué hace un NAT Gateway y por qué es un costo a vigilar?
 2.3 ¿Cómo aplicarías mínimo privilegio con security groups entre tu app y tu base de datos?
+2.4 ¿Qué dos costos ocultos tiene poner `natGateways: 1` con 2 AZ, y cuándo pasarías a uno por AZ?
+2.5 Tu app pega mucho a S3 desde subnets privadas. ¿Qué tipo de VPC endpoint usás para no pagar ese tráfico por el NAT, y por qué es gratis? ¿En qué se diferencia de un interface endpoint?
 
 ---
 
@@ -142,6 +195,7 @@ Buenas prácticas: **bloquear acceso público** por defecto (un bucket público 
 3.1 ¿Por qué conviene que el cliente suba archivos directo a S3 con una presigned URL en vez de pasarlos por tu backend?
 3.2 Nombrá tres casos de uso de S3 en un backend.
 3.3 ¿Por qué "bloquear acceso público" es una buena práctica por defecto en un bucket?
+3.4 (teclado) Desplegá un bucket privado con CDK. Escribí un endpoint en tu Task API que devuelva una presigned URL de `PutObject`, y desde la terminal subí un archivo real con `curl -X PUT --upload-file foto.jpg "<URL>"`. Verificá en la consola que el objeto quedó en el bucket y que el bucket NO es público.
 
 ---
 
@@ -166,19 +220,55 @@ const db = new rds.DatabaseInstance(this, "Postgres", {
   vpc,
   vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }, // privada (módulo 2)
   instanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.MICRO),
-  multiAz: false, // true en producción para alta disponibilidad
+  multiAz: false,            // true en producción para alta disponibilidad
+  storageEncrypted: true,    // cifrado en reposo (KMS) — siempre
+  // En prod: que cdk destroy NO borre la base, y que tampoco puedas borrarla por error
+  removalPolicy: cdk.RemovalPolicy.RETAIN,
+  deletionProtection: true,
   credentials: rds.Credentials.fromGeneratedSecret("postgres"), // genera y guarda en Secrets Manager
 });
 ```
 
-Fijate la sinergia: `fromGeneratedSecret` crea la contraseña y la guarda en **Secrets Manager** (módulo de IAM/secretos del módulo anterior), y la base va en **subnet privada** (módulo 2). Tu app (Fargate) lee la `DATABASE_URL` desde ese secreto; nada de credenciales en el código. Tus migraciones de Drizzle (módulo de Postgres) corren contra esta base en el paso de release del pipeline.
+> **Peligro real: `cdk destroy` puede borrar tu base de producción.** Por defecto el comportamiento depende del contexto, así que **explicitalo**: en prod, `removalPolicy: RETAIN` (o `SNAPSHOT`) + `deletionProtection: true` evitan que un `cdk destroy` (o un cambio que recree el recurso) se lleve los datos puestos. En dev, al revés: `DESTROY` para no dejar bases costando. Es config distinta por entorno (módulo 1).
 
-**Cuándo RDS y cuándo Aurora**: RDS Postgres para la mayoría de los casos (más barato, suficiente); Aurora cuando necesitás más performance, escala de lecturas, o el autoscaling de Serverless v2. Lo que **no** cambia: tu código sigue hablando Postgres; cambia solo la infraestructura que lo opera.
+**Cómo llega de verdad la credencial a la app (no es un `DATABASE_URL` mágico).** Acá hay un malentendido clásico que cuesta caro: `fromGeneratedSecret` **no** crea una URL de conexión. Crea un secret en Secrets Manager cuyo **valor es un JSON con varios campos**:
+
+```json
+{ "username": "postgres", "password": "xY...", "host": "...rds.amazonaws.com",
+  "port": 5432, "dbname": "postgres", "engine": "postgres" }
+```
+
+Por eso, al inyectarlo a Fargate, hay que apuntar al **campo** que querés, no al secret entero:
+
+```ts
+taskImageOptions: {
+  environment: { DB_HOST: db.dbInstanceEndpointAddress, DB_PORT: "5432" },
+  secrets: {
+    // ✅ el segundo argumento (field selector) inyecta SOLO el password
+    DB_PASSWORD: ecs.Secret.fromSecretsManager(db.secret!, "password"),
+    DB_USER: ecs.Secret.fromSecretsManager(db.secret!, "username"),
+  },
+}
+// ❌ ecs.Secret.fromSecretsManager(db.secret!)  → inyecta el JSON ENTERO como string
+```
+
+En tu app componés la conexión con esos campos (o construís el `DATABASE_URL` vos mismo: `postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}`). Nada de credenciales en el código ni en la imagen; la base sigue en **subnet privada** (módulo 2).
+
+**Cifrado en tránsito (SSL a RDS).** El cifrado en reposo (`storageEncrypted`) no alcanza: la conexión app↔base también debe ir cifrada. RDS soporta TLS; en producción conectás con `sslmode=require` (o `verify-full` validando contra el **CA bundle de RDS**, ej. `rds-ca-rsa2048-g1`). En tu cliente (`pg`/Drizzle): `ssl: { ca: fs.readFileSync("rds-ca.pem"), rejectUnauthorized: true }`.
+
+**Migraciones sin downtime (no las corras en cada task).** "Migraciones Drizzle en release" suena bien pero el cómo importa: si las ponés en el `CMD`/arranque del contenedor, con **N tasks de Fargate** arrancando a la vez, N migraciones compiten (carreras, locks). El patrón de producción:
+
+1. **Expand/contract**: hacé cambios compatibles hacia atrás (agregar columna nullable → backfill → empezar a usarla → recién después borrar la vieja), nunca un cambio destructivo en un solo paso. Así la versión vieja y la nueva conviven durante el rollout.
+2. **Migración como paso separado**: corré `drizzle migrate` **una vez** en un job/`run-task` ECS one-off (o un step del pipeline) **antes** de rotar las tasks, no dentro de cada task.
+
+**Cuándo RDS y cuándo Aurora**: RDS Postgres para la mayoría de los casos (más barato, suficiente); Aurora cuando necesitás más performance, escala de lecturas, o el autoscaling de **Aurora Serverless v2** (escala por **ACU**; ojo: el `minCapacity` histórico era 0.5 ACU, así que "serverless" igual cuesta algo aunque no haya tráfico — verificá si tu versión ya escala a 0 y sus caveats). Lo que **no** cambia: tu código sigue hablando Postgres; cambia solo la infraestructura que lo opera.
 
 **Ejercicios 4**
 4.1 Nombrá tres cosas que RDS/Aurora te da sobre correr Postgres vos mismo en un contenedor.
 4.2 ¿Qué problema de performance (del archivo senior) ayudan a resolver las read replicas?
-4.3 ¿Cómo llega la contraseña de la base a tu app sin hardcodearla? Conectá con Secrets Manager (módulo anterior).
+4.3 ¿Qué forma tiene el secret que genera `fromGeneratedSecret` y por qué `ecs.Secret.fromSecretsManager(db.secret!)` sin field selector inyecta algo incorrecto en `DB_PASSWORD`? ¿Cómo lo arreglás?
+4.4 ¿Qué dos ajustes ponés en una RDS de producción para que `cdk destroy` no se lleve los datos, y qué ponés en dev?
+4.5 ¿Por qué no conviene correr las migraciones en el arranque de cada task de Fargate, y cuál es el patrón correcto (nombralo)?
 
 ---
 
@@ -194,10 +284,34 @@ Lo que ElastiCache agrega sobre "Redis en un contenedor":
 
 El caso de uso que cierra el círculo del escalado horizontal (módulos de Node y Redis): cuando tu API corre en **varias tasks de Fargate**, el caché, las sesiones y el store de refresh tokens **no pueden vivir en la memoria de cada task** (cada request cae en una distinta). Van en **ElastiCache**, compartido por todas. Es la pieza de "estado compartido externo" que hace posible escalar la app a N instancias.
 
+A diferencia de S3 o RDS, ElastiCache **no tiene un construct L2 estable** en CDK v2: se arma con **constructs L1** (`Cfn*`), que mapean 1:1 a CloudFormation. Hay que ensamblar a mano el subnet group, el security group y el replication group:
+
 ```ts
-// ElastiCache se define con constructs L1 (CfnReplicationGroup) o L2 según versión de CDK.
-// La idea: un cluster Redis en subnets privadas, accesible solo desde el SG de la app.
-// Tu app lee REDIS_URL del entorno y usa ioredis/BullMQ igual que en local.
+import * as elasticache from "aws-cdk-lib/aws-elasticache";
+
+// SG: solo la app puede conectarse al Redis
+const redisSg = new ec2.SecurityGroup(this, "RedisSg", { vpc });
+redisSg.addIngressRule(api.connections.securityGroups[0], ec2.Port.tcp(6379));
+
+// subnets privadas donde vive el cluster
+const subnetGroup = new elasticache.CfnSubnetGroup(this, "RedisSubnets", {
+  description: "Redis privado",
+  subnetIds: vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }).subnetIds,
+});
+
+const redis = new elasticache.CfnReplicationGroup(this, "Redis", {
+  replicationGroupDescription: "cache + sesiones + BullMQ",
+  engine: "redis",
+  cacheNodeType: "cache.t4g.micro",
+  numNodeGroups: 1,
+  replicasPerNodeGroup: 1,            // 1 réplica → failover automático (HA)
+  automaticFailoverEnabled: true,
+  atRestEncryptionEnabled: true,
+  transitEncryptionEnabled: true,     // TLS in-transit
+  cacheSubnetGroupName: subnetGroup.ref,
+  securityGroupIds: [redisSg.securityGroupId],
+});
+// tu app lee REDIS_URL del endpoint: redis.attrPrimaryEndPointAddress
 ```
 
 El criterio (igual que con RDS): en local/dev, Redis en Docker; en producción AWS, ElastiCache. Tu código (ioredis, BullMQ, cache-manager) no cambia: cambia el endpoint. Y como con la base, va en **subnet privada** con un security group que solo deja entrar a tu app.
@@ -206,6 +320,7 @@ El criterio (igual que con RDS): en local/dev, Redis en Docker; en producción A
 5.1 ¿Qué te da ElastiCache sobre correr Redis vos mismo en un contenedor?
 5.2 Conectá con el escalado horizontal: ¿por qué el caché y las sesiones deben ir en ElastiCache y no en la memoria de cada task de Fargate?
 5.3 ¿Cambia tu código de aplicación (ioredis/BullMQ) al pasar de Redis en Docker a ElastiCache? ¿Qué cambia?
+5.4 ¿Por qué ElastiCache se define con constructs L1 (`Cfn*`) y no L2 como S3/RDS, y qué tres piezas tenés que ensamblar a mano?
 
 ---
 
@@ -218,17 +333,21 @@ El criterio (igual que con RDS): en local/dev, Redis en Docker; en producción A
 
 Dos sabores: **REST API** (más features: API keys, modelos, etc.) y **HTTP API** (más simple, barata y rápida — la opción por defecto en 2026 salvo que necesites algo de REST API).
 
-¿Y tu NestJS? Podés correr una **app NestJS completa en Lambda** con el **Lambda Web Adapter** (o adaptadores tipo `@codegenie/serverless-express`): tu mismo código de Nest corre detrás de API Gateway, sin reescribir. Mitigás los cold starts con **provisioned concurrency** o **SnapStart**.
+¿Y tu NestJS? Podés correr una **app NestJS completa en Lambda** con el **Lambda Web Adapter** (o adaptadores tipo `@codegenie/serverless-express`): tu mismo código de Nest corre detrás de API Gateway, sin reescribir.
 
 ```ts
+import { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as apigw from "aws-cdk-lib/aws-apigatewayv2";
 import { HttpLambdaIntegration } from "aws-cdk-lib/aws-apigatewayv2-integrations";
 
-const fn = new lambda.Function(this, "ApiFn", {
+// NodejsFunction bundlea con esbuild (tree-shaking, bundle chico = menos cold start).
+// Mejor que lambda.Function + fromAsset("dist") para TypeScript.
+const fn = new NodejsFunction(this, "ApiFn", {
   runtime: lambda.Runtime.NODEJS_22_X,
-  handler: "main.handler",
-  code: lambda.Code.fromAsset("dist"),
+  entry: "src/lambda.ts",
+  handler: "handler",
+  bundling: { minify: true, sourceMap: true },
 });
 
 const api = new apigw.HttpApi(this, "HttpApi");
@@ -239,12 +358,24 @@ api.addRoutes({
 });
 ```
 
+**Cold starts, en serio (no solo "ponele provisioned concurrency").** Un cold start es la primera invocación de una Lambda "fría": AWS levanta el entorno, baja tu código y corre la **fase de init** (imports + bootstrap de tu app) antes de atender la request. Para NestJS duele por dos razones: el **bundle grande** (todo el árbol de DI, decoradores, providers) infla el init, y si la Lambda está **dentro de la VPC** (para hablar con RDS) se suma la penalización de adjuntar la ENI. Mitigaciones reales y sus límites:
+
+- **Bundling agresivo** (esbuild/`NodejsFunction`, minify, tree-shaking): la palanca más barata; bundle chico = init más rápido.
+- **Provisioned concurrency**: mantenés N entornos "calientes" — elimina el cold start pero **pagás por tenerlos prendidos** (contradice el "pagás por uso").
+- **SnapStart para Node.js**: snapshot del entorno ya inicializado. Salió recién y tiene **caveats** (no aplica a todo, cuidado con estado/conexiones cacheadas en el snapshot) — no es bala de plata.
+
+Conclusión de criterio: si los cold starts de tu NestJS te obligan a provisioned concurrency 24/7, probablemente **Fargate sale más barato y simple** — la señal de que esa API no era buena candidata a serverless.
+
+**RDS Proxy: el problema de Lambda + base relacional.** Pregunta de entrevista casi garantizada: Lambda escala a **miles de ejecuciones concurrentes**, y cada una abre su **propia conexión** a Postgres → agotás el límite de conexiones de la base (que es chico) y la tumbás. Las bases relacionales no fueron pensadas para miles de conexiones efímeras. La solución es **RDS Proxy**: un pool de conexiones gestionado que se sienta entre tus Lambdas y RDS, multiplexando muchas conexiones de cliente sobre pocas conexiones reales a la base. Si vas serverless + relacional, RDS Proxy casi siempre va.
+
 El criterio de elección (del módulo anterior, ahora concreto): **API Gateway + Lambda** para APIs internas, de bajo/intermitente tráfico, MVPs, o partes event-driven; **ALB + Fargate** para tu API principal de tráfico sostenido donde los cold starts y el costo por request a escala no convienen. Muchas arquitecturas combinan ambos.
 
 **Ejercicios 6**
 6.1 ¿Qué responsabilidades (que en NestJS hacías con guards/throttler) puede manejar API Gateway a nivel de infraestructura?
 6.2 ¿Cómo correrías tu app NestJS completa detrás de API Gateway sin reescribirla?
 6.3 ¿Cuándo elegirías API Gateway + Lambda y cuándo ALB + Fargate para una API?
+6.4 ¿Por qué un NestJS en Lambda tiene cold starts grandes, y por qué `provisioned concurrency` 24/7 puede ser la señal de que mejor usás Fargate?
+6.5 ¿Por qué Lambda + RDS puede agotar las conexiones de la base, y qué servicio lo resuelve?
 
 ---
 
@@ -277,10 +408,13 @@ topic.addSubscription(new subs.SqsSubscription(colaEnvios));
 
 El criterio: **SNS→SQS** cuando querés fan-out durable y de alto volumen con consumidores desacoplados (cada uno con su buffer y reintentos); **EventBridge** cuando necesitás enrutamiento por contenido, integración con muchos servicios y replay. Para eventos de dominio de tu app, EventBridge suele ganar por features; SNS→SQS gana en throughput puro y simplicidad de fan-out.
 
+> **No te saltees esto: la entrega es "al menos una vez".** SNS y SQS (estándar) garantizan **at-least-once**, no exactly-once: el mismo mensaje puede llegar **duplicado** (reintentos, redelivery si no borraste el mensaje a tiempo). Por eso, igual que con BullMQ en el módulo de Redis, tus **consumidores deben ser idempotentes**: procesar el mismo evento dos veces tiene que dar el mismo resultado (clave de idempotencia, `SET NX`, upsert por id). Es el mismo principio del **outbox/idempotencia** del archivo senior, ahora en la mensajería de AWS. (Existe **SQS FIFO** con deduplicación y orden, a menor throughput, cuando lo necesitás.)
+
 **Ejercicios 7**
 7.1 ¿Qué es el patrón fan-out SNS → SQS y qué ventaja combina?
 7.2 ¿Por qué darle a cada servicio consumidor su propia cola SQS en vez de que todos lean del topic directamente?
 7.3 ¿Cuándo elegirías SNS y cuándo EventBridge para distribuir un evento?
+7.4 SQS estándar entrega "al menos una vez". ¿Qué implica eso para tus consumidores y cómo lo resolvés (conectá con el módulo de Redis/senior)?
 
 ---
 
@@ -313,7 +447,7 @@ El criterio que cierra el tema del senior: **coreografía** (EventBridge) para d
 
 **Teoría.** Un Tech Lead no decide solo por lo técnico: decide por **costo**. AWS cobra por casi todo, y las arquitecturas "elegantes" pueden salir carísimas si no medís. **FinOps** es la disciplina de hacer el costo visible y optimizarlo como parte del diseño. Los **sospechosos de siempre** (fugas de costo clásicas):
 
-- **NAT Gateways**: ~$32/mes cada uno + tarifa por GB procesado. Tener uno por AZ "por las dudas" en dev es plata tirada. Alternativas: VPC endpoints para hablar con servicios AWS sin pasar por NAT.
+- **NAT Gateways**: ~$32/mes cada uno + tarifa por GB procesado. Tener uno por AZ "por las dudas" en dev es plata tirada. Alternativa clave (módulo 2): un **gateway endpoint de S3/DynamoDB es gratis** y saca ese tráfico del NAT; un **interface endpoint** (~$7/mes) conviene cuando el tráfico por NAT a ese servicio costaría más.
 - **Egress (transferencia de salida)**: mandar datos **fuera** de AWS (o entre regiones/AZ) se paga. Arquitecturas "chatty" (servicios que se mandan mucho tráfico entre sí cruzando AZ) acumulan costo invisible.
 - **On-demand mal dimensionado**: instancias RDS/ECS sobredimensionadas corriendo 24/7. Right-sizing + **Savings Plans / Reserved Instances** para cargas estables bajan el costo fuerte.
 - **Recursos olvidados**: un entorno de pruebas que quedó prendido, volúmenes EBS huérfanos, snapshots viejos. El `cdk destroy` es tu amigo.
@@ -328,6 +462,7 @@ El criterio senior: **estimá el costo en la fase de diseño**, no cuando llega 
 9.1 Nombrá tres fugas de costo clásicas en AWS y cómo las mitigarías.
 9.2 ¿Por qué una arquitectura "chatty" entre servicios en distintas AZ puede generar costo invisible?
 9.3 ¿Qué herramienta usarías para que te avise antes de pasarte del presupuesto, y cómo sabés qué proyecto gasta qué?
+9.4 (estimación) Con el pricing calculator, estimá el costo mensual del stack del módulo 11 (1 NAT, 1 RDS t3.micro, 1 ElastiCache t4g.micro, 2 tasks Fargate 256/512, ALB). Identificá cuál es el rubro más caro y una palanca concreta para bajarlo.
 
 ---
 
@@ -385,25 +520,49 @@ export class TaskApiStack extends cdk.Stack {
     const db = new rds.DatabaseInstance(this, "Db", {
       engine: rds.DatabaseInstanceEngine.postgres({ version: rds.PostgresEngineVersion.VER_16 }),
       vpc, vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      storageEncrypted: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,   // prod: no borrar la base con cdk destroy
+      deletionProtection: true,                   // (en dev, lo contrario)
       credentials: rds.Credentials.fromGeneratedSecret("postgres"),
     });
 
     const bucket = new s3.Bucket(this, "Uploads", {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
     });
+
+    // Certificado TLS gestionado por ACM (validado por DNS) para servir HTTPS en el ALB
+    const certificate = acm.Certificate.fromCertificateArn(this, "Cert", process.env.ACM_CERT_ARN!);
 
     // API NestJS en Fargate detrás de un ALB, con la imagen Docker del repo
     const api = new ecsPatterns.ApplicationLoadBalancedFargateService(this, "Api", {
       vpc, cpu: 256, memoryLimitMiB: 512, desiredCount: 2,
+      certificate,                 // TLS en el ALB (ACM) — HTTPS, no HTTP plano
+      redirectHTTP: true,          // 80 → 443
       taskImageOptions: {
-        image: ecs.ContainerImage.fromAsset("."), // tu Dockerfile multi-stage
-        environment: { DATABASE_HOST: db.dbInstanceEndpointAddress },
-        secrets: { DB_PASSWORD: ecs.Secret.fromSecretsManager(db.secret!) },
+        image: ecs.ContainerImage.fromAsset("."), // tu Dockerfile multi-stage (requiere Docker en el CI)
+        environment: {
+          DB_HOST: db.dbInstanceEndpointAddress,
+          DB_PORT: "5432",
+        },
+        secrets: {
+          // ✅ field selector: SOLO el password / username, no el JSON entero (módulo 4)
+          DB_PASSWORD: ecs.Secret.fromSecretsManager(db.secret!, "password"),
+          DB_USER: ecs.Secret.fromSecretsManager(db.secret!, "username"),
+        },
       },
     });
 
     db.connections.allowDefaultPortFrom(api.service); // SG: solo la app habla con la base
-    bucket.grantReadWrite(api.taskDefinition.taskRole); // IAM: la app accede al bucket
+    // IAM acotado: en vez de grantReadWrite (s3:* sobre todo el bucket), dar lo justo
+    bucket.grantPut(api.taskDefinition.taskRole, "avatares/*"); // solo PutObject, solo ese prefijo
+
+    // Healthcheck del ALB + alarma de CPU (observabilidad mínima para operar)
+    api.targetGroup.configureHealthCheck({ path: "/health" });
+    api.service.metricCpuUtilization().createAlarm(this, "CpuAlta", {
+      threshold: 80, evaluationPeriods: 3,
+    });
+
     api.service.autoScaleTaskCount({ maxCapacity: 6 }).scaleOnCpuUtilization("Cpu", {
       targetUtilizationPercent: 70,
     });
@@ -411,12 +570,19 @@ export class TaskApiStack extends cdk.Stack {
 }
 ```
 
-Mirá cuánto del temario se condensa acá: tu **imagen Docker** (`fromAsset`), la **base privada** con contraseña en **Secrets Manager**, el **security group** de mínimo privilegio (`allowDefaultPortFrom`), el **IAM** acotado (`grantReadWrite`), el **autoscaling** (escalado horizontal del módulo de Node), todo como **IaC** versionado. Y, fiel al criterio del senior: **este stack es para cuando lo necesitás**. Un MVP arranca con tu monolito en Fargate + RDS; sumás EventBridge/SQS/Lambda/Step Functions cuando el dominio lo pida. Saber escribir esto **y** saber cuándo todavía no hace falta es lo que define a un Tech Lead.
+Mirá cuánto del temario se condensa acá: tu **imagen Docker** (`fromAsset`), la **base privada cifrada** con contraseña en **Secrets Manager** (inyectada por campo), el **security group** de mínimo privilegio (`allowDefaultPortFrom`), el **IAM acotado** (`grantPut` a un prefijo, no `s3:*`), **TLS en el borde** (ACM), un **healthcheck** y una **alarma**, y el **autoscaling** (escalado horizontal del módulo de Node), todo como **IaC** versionado.
+
+> **El borde que falta nombrar.** Delante del ALB, en producción real suele ir **CloudFront** (CDN + TLS + cache de estáticos) y **AWS WAF** (reglas contra inyección, rate limiting de borde, bots). No los desarrollamos acá, pero un Tech Lead los menciona como capa de borde: certificado **ACM** en el ALB/CloudFront, WAF para protección L7.
+
+> **IAM de verdad es mínimo privilegio.** `grantReadWrite` es cómodo pero amplio (lectura + escritura + delete sobre *todo* el bucket). Cuando importa, acotá: la acción exacta (`s3:PutObject`), el recurso exacto (un prefijo/ARN), y condiciones si hace falta. `grantPut(role, "avatares/*")` es bastante más cerrado que `grantReadWrite(role)`.
+
+Y, fiel al criterio del senior: **este stack es para cuando lo necesitás**. Un MVP arranca con tu monolito en Fargate + RDS; sumás EventBridge/SQS/Lambda/Step Functions cuando el dominio lo pida. Saber escribir esto **y** saber cuándo todavía no hace falta es lo que define a un Tech Lead.
 
 **Ejercicios 11**
-11.1 En el stack de ejemplo, ¿qué hacen `db.connections.allowDefaultPortFrom(api.service)` y `bucket.grantReadWrite(...)`, y qué principio aplican?
-11.2 ¿Cómo llega tu imagen Docker (la del módulo de Docker) a correr en Fargate dentro de este stack?
+11.1 En el stack de ejemplo, ¿qué hacen `db.connections.allowDefaultPortFrom(api.service)` y `bucket.grantPut(...)`, y qué principio aplican? ¿Por qué `grantPut` con prefijo es mejor que `grantReadWrite`?
+11.2 ¿Cómo llega tu imagen Docker (la del módulo de Docker) a correr en Fargate dentro de este stack? ¿Qué requisito tiene `fromAsset` en el pipeline?
 11.3 Sos Tech Lead de un MVP. ¿Desplegarías este stack completo desde el día uno? Justificá con el criterio del archivo senior.
+11.4 (teclado) Desplegá el stack integrador (versión dev). Conectate a la RDS privada vía SSM/bastion, verificá que la app responde por el ALB (HTTPS), revisá los logs en CloudWatch, y al final `cdk destroy`: confirmá que no quedan recursos costando (ojo con `RETAIN` en dev).
 
 ---
 
@@ -436,6 +602,12 @@ Mirá cuánto del temario se condensa acá: tu **imagen Docker** (`fromAsset`), 
 1.3 Un Stack es una unidad de despliegue que agrupa recursos relacionados (≈ un
     CloudFormation stack). Un Construct es la pieza reutilizable que representa uno o
     varios recursos; los componés dentro de los stacks.
+1.4 cdk bootstrap crea, una vez por cuenta+región, el stack CDKToolkit con el bucket de
+    assets y los roles que CDK usa para subir plantillas/imágenes y desplegar. Sin él, el
+    primer cdk deploy falla.
+1.5 (teclado) Criterio de aceptación: el bucket aparece en la consola tras el deploy, el
+    cdk diff mostró "create" antes de aplicar, y tras cdk destroy no queda el bucket
+    (ni costos asociados).
 ```
 
 ### Módulo 2
@@ -449,6 +621,15 @@ Mirá cuánto del temario se condensa acá: tu **imagen Docker** (`fromAsset`), 
 2.3 Dándole a la base un security group que solo acepte conexiones DESDE el security group
     de la app, en el puerto de Postgres (5432), y nada más. Así, aunque se conozca la
     dirección de la base, solo la app puede conectarse.
+2.4 (1) SPOF de egress: si cae la AZ del único NAT, las subnets privadas de las otras AZ
+    pierden salida a internet. (2) Tráfico cross-AZ facturado: el tráfico de las otras AZ
+    cruza la AZ del NAT y se cobra por GB. Pasás a uno por AZ en producción, donde la
+    disponibilidad de egress importa.
+2.5 Un gateway endpoint de S3 (gratis): es una ruta en la tabla de ruteo hacia S3 por la
+    red de AWS, así ese tráfico no pasa por el NAT (ni paga su procesamiento). Se diferencia
+    del interface endpoint (PrivateLink), que sirve para casi todos los demás servicios,
+    cuesta ~$7/mes + datos y crea una ENI en tu subnet. Gateway endpoints solo existen para
+    S3 y DynamoDB.
 ```
 
 ### Módulo 3
@@ -463,6 +644,9 @@ Mirá cuánto del temario se condensa acá: tu **imagen Docker** (`fromAsset`), 
     filtración de datos: cualquiera en internet podría listar/leer los objetos. Por
     defecto se bloquea el acceso público y se expone solo lo necesario (vía presigned URLs
     o CloudFront).
+3.4 (teclado) Criterio de aceptación: el `curl -X PUT --upload-file` con la presigned URL
+    sube el objeto y devuelve 200; el objeto aparece en el bucket en la consola; el bucket
+    sigue con Block Public Access activo (no es accesible por URL pública directa).
 ```
 
 ### Módulo 4
@@ -473,9 +657,18 @@ Mirá cuánto del temario se condensa acá: tu **imagen Docker** (`fromAsset`), 
 4.2 El problema de las lecturas pesadas que sobrecargan la base: las read replicas
     reparten esa carga (las queries de solo lectura van a réplicas), aliviando la primaria
     que atiende las escrituras.
-4.3 RDS genera la contraseña y la guarda en Secrets Manager (fromGeneratedSecret); la
-    Task Definition de Fargate la inyecta a la app como variable/secret en runtime. La app
-    nunca tiene la contraseña en el código ni en la imagen.
+4.3 El secret es un JSON con varios campos (username, password, host, port, dbname,
+    engine), NO una URL. fromSecretsManager(db.secret!) sin field selector inyecta ese JSON
+    entero como string en DB_PASSWORD (mal). Se arregla con el segundo argumento:
+    fromSecretsManager(db.secret!, "password") inyecta solo el campo password; la URL de
+    conexión la componés vos con los campos.
+4.4 En prod: removalPolicy: RETAIN (o SNAPSHOT) + deletionProtection: true, para que cdk
+    destroy / una recreación no borren los datos. En dev: removalPolicy: DESTROY (y sin
+    deletionProtection) para no dejar bases costando al limpiar.
+4.5 Porque con N tasks arrancando a la vez, N migraciones competirían (carreras, locks). El
+    patrón: expand/contract (cambios compatibles hacia atrás, en pasos) + correr la
+    migración UNA vez como job/run-task separado ANTES de rotar las tasks, no en el arranque
+    de cada contenedor.
 ```
 
 ### Módulo 5
@@ -489,6 +682,10 @@ Mirá cuánto del temario se condensa acá: tu **imagen Docker** (`fromAsset`), 
     mismo estado: eso hace posible escalar a N instancias.
 5.3 No cambia el código de aplicación: ioredis/BullMQ/cache-manager funcionan igual.
     Cambia solo el endpoint (REDIS_URL apunta a ElastiCache en vez de al contenedor local).
+5.4 Porque CDK v2 no tiene un L2 estable para ElastiCache, así que se usan constructs L1
+    (Cfn*, mapeo directo a CloudFormation). A mano armás: el subnet group privado
+    (CfnSubnetGroup), el security group que solo deja entrar a la app, y el cluster/replica
+    group (CfnReplicationGroup) con cifrado y failover.
 ```
 
 ### Módulo 6
@@ -502,6 +699,15 @@ Mirá cuánto del temario se condensa acá: tu **imagen Docker** (`fromAsset`), 
 6.3 API Gateway + Lambda para APIs internas, de tráfico bajo/intermitente, MVPs o partes
     event-driven (pagás por uso, escala a cero). ALB + Fargate para la API principal de
     tráfico sostenido, donde cold starts y costo por request a escala no convienen.
+6.4 Porque la fase de init carga todo el árbol de DI/decoradores/providers de Nest (bundle
+    grande) y, si la Lambda está en la VPC, suma la penalización de adjuntar la ENI. Si para
+    tolerar eso necesitás provisioned concurrency prendida 24/7, ya pagás como si fuera
+    siempre-on: ahí Fargate suele ser más barato y simple, señal de que esa API no era buena
+    candidata a serverless.
+6.5 Porque Lambda escala a miles de ejecuciones concurrentes y cada una abriría su propia
+    conexión a Postgres, agotando el límite (chico) de conexiones de la base. Lo resuelve
+    RDS Proxy: un pool gestionado que multiplexa muchas conexiones de cliente sobre pocas
+    conexiones reales a la base.
 ```
 
 ### Módulo 7
@@ -515,6 +721,10 @@ Mirá cuánto del temario se condensa acá: tu **imagen Docker** (`fromAsset`), 
 7.3 SNS (o SNS→SQS) para fan-out durable de alto throughput con consumidores desacoplados.
     EventBridge cuando necesitás enrutamiento por contenido, integración con servicios
     AWS/SaaS, schema registry y replay (EDA de negocio).
+7.4 Que un mismo mensaje puede llegar más de una vez (duplicados): los consumidores DEBEN
+    ser idempotentes (clave de idempotencia, SET NX, upsert por id), igual que los workers
+    de BullMQ (módulo de Redis) y el outbox/idempotencia del senior. Si necesitás orden y
+    dedup nativos, SQS FIFO (a menor throughput).
 ```
 
 ### Módulo 8
@@ -542,6 +752,10 @@ Mirá cuánto del temario se condensa acá: tu **imagen Docker** (`fromAsset`), 
 9.3 AWS Budgets, que alerta cuando el gasto proyectado supera un umbral. Para saber qué
     proyecto/equipo gasta qué, se etiquetan los recursos con tags de costo y se analiza en
     Cost Explorer por tag.
+9.4 (estimación) Criterio: los rubros más caros suelen ser el NAT Gateway (~$32/mes + GB) y
+    RDS si no es la free tier; el ALB tiene un fijo + LCU. Palancas: para dev, 0 NAT (o
+    endpoints) y apagar/destruir fuera de horario; right-sizing de RDS; Fargate Spot para
+    tareas tolerantes. Lo importante es haber estimado ANTES de desplegar.
 ```
 
 ### Módulo 10
@@ -561,17 +775,23 @@ Mirá cuánto del temario se condensa acá: tu **imagen Docker** (`fromAsset`), 
 
 ### Módulo 11
 ```
-11.1 allowDefaultPortFrom abre el security group de la base SOLO para el security group de
-     la app (mínimo privilegio de red); grantReadWrite le da al rol IAM de la task permiso
-     de leer/escribir SOLO ese bucket (mínimo privilegio de IAM). Ambos aplican defensa en
-     profundidad: red + permisos acotados.
+11.1 allowDefaultPortFrom abre el security group de la base SOLO para el SG de la app
+     (mínimo privilegio de red). grantPut(role, "avatares/*") le da al rol IAM de la task
+     SOLO la acción s3:PutObject y SOLO sobre ese prefijo: más cerrado que grantReadWrite,
+     que daría lectura+escritura+delete sobre todo el bucket. Ambos aplican mínimo
+     privilegio / defensa en profundidad (red + permisos acotados).
 11.2 ContainerImage.fromAsset(".") construye la imagen desde tu Dockerfile (el multi-stage
      del módulo de Docker), la sube a ECR y la usa en la Task Definition de Fargate. La
-     misma imagen que probaste en local corre en producción.
+     misma imagen que probaste en local corre en producción. Requisito: Docker disponible
+     en el entorno que corre cdk deploy (tu máquina o el runner del CI).
 11.3 No. Para un MVP, este stack completo es complejidad accidental (operación, costo,
      consistencia distribuida). Arrancaría con Fargate + RDS (+ ElastiCache si hace falta
      caché) y sumaría EventBridge/SQS/Lambda/Step Functions cuando un dolor concreto lo
      justifique. Saber cuándo NO desplegar todo es criterio de Tech Lead.
+11.4 (teclado) Criterio de aceptación: la app responde por HTTPS detrás del ALB, podés
+     conectarte a la RDS privada solo vía SSM/bastion (no desde internet), los logs salen
+     en CloudWatch, y tras cdk destroy no queda nada costando (recordá que con RETAIN la
+     base no se borra: en dev usá DESTROY o borrala a mano).
 ```
 
 ---
