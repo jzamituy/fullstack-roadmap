@@ -44,6 +44,7 @@
 
 - **Inteligencia Artificial**
   - [🤖 IA Generativa y LLMs](ia-llms.md)
+  - [📚 RAG: responder con tu data](rag.md)
 
 - **Enlaces**
   - [Repositorio en GitHub](https://github.com/jzamituy/fullstack-roadmap)
