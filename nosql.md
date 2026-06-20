@@ -114,13 +114,48 @@ Lo que cambia de cabeza respecto a SQL:
 En NestJS, Mongoose te da el patrón de siempre (un schema + un model inyectable como provider), igual que un repositorio:
 
 ```ts
+// el enum tipado da type-safety: estado no es "cualquier string", es uno de estos
+export enum EstadoTarea {
+  Pendiente = "pendiente",
+  EnProgreso = "en_progreso",
+  Hecha = "hecha",
+}
+
 @Schema()
 export class Tarea {
-  @Prop({ required: true }) titulo: string;
-  @Prop({ enum: ["pendiente", "en_progreso", "hecha"], default: "pendiente" }) estado: string;
-  @Prop([String]) etiquetas: string[];
+  // El `!` (definite assignment assertion) es OBLIGATORIO en --strict: con
+  // strictPropertyInitialization, una prop sin inicializador da TS2564. El
+  // decorador no exime la verificación; Mongoose asigna el valor en runtime.
+  @Prop({ required: true }) titulo!: string;
+  @Prop({ type: String, enum: EstadoTarea, default: EstadoTarea.Pendiente }) estado!: EstadoTarea;
+  @Prop([String]) etiquetas!: string[];
 }
 export const TareaSchema = SchemaFactory.createForClass(Tarea);
+```
+
+Y el modelo se registra en el módulo y se inyecta en el service como un provider más —el mismo patrón de repositorio que ya conocés—:
+
+```ts
+// tareas.module.ts
+@Module({
+  imports: [MongooseModule.forFeature([{ name: Tarea.name, schema: TareaSchema }])],
+  providers: [TareasService],
+})
+export class TareasModule {}
+
+// tareas.service.ts
+@Injectable()
+export class TareasService {
+  constructor(@InjectModel(Tarea.name) private readonly tareaModel: Model<Tarea>) {}
+
+  crear(dto: Partial<Tarea>): Promise<Tarea> {
+    return this.tareaModel.create(dto);
+  }
+
+  porEstado(estado: EstadoTarea): Promise<Tarea[]> {
+    return this.tareaModel.find({ estado }).sort({ creada: -1 }).exec();
+  }
+}
 ```
 
 La flexibilidad no te exime de pensar el modelo: te lo *permite posponer*, lo cual es bueno para prototipar y peligroso para mantener. El modelado serio viene en el módulo siguiente.
@@ -129,6 +164,7 @@ La flexibilidad no te exime de pensar el modelo: te lo *permite posponer*, lo cu
 3.1 Traducí el vocabulario: ¿qué es en MongoDB una tabla, una fila, una columna y la PK?
 3.2 ¿Qué significa "esquema flexible" y por qué es un arma de doble filo? ¿Cómo se le pone disciplina en producción?
 3.3 La tarea de ejemplo en Postgres normalizado serían varias tablas; en Mongo es un documento. ¿Qué ganás y qué resignás con eso? (lo profundiza el módulo 4)
+3.4 **Implementá.** Escribí el `@Schema` de Mongoose de un `Post` con un array de comentarios embebidos `{ autor, texto }`, y un service (`@InjectModel`) con un método que cree un post y otro que traiga los posts de un autor ordenados por fecha descendente. Que compile en `--strict`.
 
 ---
 
@@ -195,6 +231,15 @@ db.tareas.aggregate([
 ```
 
 El insight: el pipeline es **composición de transformaciones**, el mismo paradigma de los streams de Node y de `.map().filter().reduce()`. Cada etapa hace una cosa y pasa el resultado. Y el principio de rendimiento es idéntico al de SQL: **filtrá lo antes posible** (`$match` temprano, idealmente sobre un campo indexado) para no arrastrar documentos de más por el pipeline — el primo de "el `WHERE` antes que el `JOIN`".
+
+**Paginar.** Evitá `.skip(n).limit(k)` para paginar (el `OFFSET` de Mongo): `skip` recorre y descarta los primeros `n` documentos, así que se vuelve más lento cuanto más avanzás — el mismo problema del `OFFSET` grande en Postgres. Preferí **paginación por cursor**: ordenás por un campo estable (típicamente `_id`) y traés "lo que sigue después del último que viste":
+
+```js
+// página siguiente: lo que viene después del último _id de la página anterior
+db.tareas.find({ _id: { $gt: ultimoId } }).sort({ _id: 1 }).limit(20)
+```
+
+Es O(página) en vez de O(offset), el primo directo de la paginación keyset del módulo de PostgreSQL.
 
 **Ejercicios 5**
 5.1 Escribí (en pseudo-Mongo) el equivalente a `SELECT titulo FROM tareas WHERE estado='hecha' ORDER BY creada DESC LIMIT 5`.
@@ -278,10 +323,43 @@ Las operaciones, y la distinción que tenés que clavar:
 
 ¿Y si necesitás buscar por un campo que no es la clave (ej. "todas las tareas asignadas a Jorge")? Para eso están los **índices secundarios**: un **GSI (Global Secondary Index)** te da una partition/sort key **alternativa** sobre los mismos datos, habilitando otro patrón de acceso. Cada patrón de acceso que tu app necesita = una clave o un GSI que lo soporte. Por eso el diseño **empieza listando los access patterns** ("buscar tareas por proyecto", "buscar tareas por asignado", "buscar el proyecto por id") y *después* se diseñan las claves y GSIs para cubrirlos. Es ingeniería al revés de SQL: las consultas primero, el esquema después.
 
+En código, con el AWS SDK v3 y `lib-dynamodb` (que mapea tipos JS ↔ los tipos nativos de Dynamo por vos):
+
+```ts
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient, PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
+
+const doc = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+
+// escribir un ítem
+await doc.send(new PutCommand({
+  TableName: "app",
+  Item: { PK: "PROYECTO#42", SK: "TAREA#001", titulo: "...", estado: "pendiente" },
+}));
+
+// traer todas las tareas del proyecto 42 (Query, NO Scan), ordenadas por SK
+const { Items } = await doc.send(new QueryCommand({
+  TableName: "app",
+  KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
+  ExpressionAttributeValues: { ":pk": "PROYECTO#42", ":sk": "TAREA#" },
+}));
+```
+
+`KeyConditionExpression` solo opera sobre las claves (PK obligatoria; SK opcional con `begins_with`/`>`/`between`): eso es lo que hace barata a la `Query`. Filtrar por un atributo que **no** es clave necesita un `FilterExpression` —que se aplica *después* de leer, así que pagás por lo leído aunque lo descartes— o un GSI.
+
+**Cuidado con las hot partitions.** La partition key tiene que tener **alta cardinalidad** y repartir el tráfico parejo. Una PK de pocos valores (ej. `STATUS#activo`) concentra todas las lecturas/escrituras en una partición → **throttling**, aunque la tabla tenga capacidad de sobra. Es el error de diseño #1 en Dynamo: la clave se elige para **distribuir**, no solo para identificar.
+
+**GSI vs LSI, en detalle** (pregunta de entrevista típica): un **GSI** tiene su **propia capacidad** (RCU/WCU) separada de la tabla y sus lecturas son **siempre eventualmente consistentes** —no podés pedir *strong read* sobre un GSI—. El **LSI (Local Secondary Index)** comparte la PK de la tabla (solo cambia la SK), comparte capacidad, **sí** permite lecturas fuertes, pero se define al **crear** la tabla y no después. Regla: GSI para un patrón de acceso nuevo (otra PK); LSI para otra forma de ordenar dentro de la misma partición.
+
+**Paginar.** Dynamo no tiene `OFFSET`: una `Query`/`Scan` devuelve hasta **1 MB** y, si hay más, un `LastEvaluatedKey`. Para la página siguiente se lo pasás como `ExclusiveStartKey`. Es paginación por cursor obligatoria (el primo de la keyset de Postgres y el cursor de Mongo del módulo 5).
+
+**Dos capacidades operativas** que vas a querer: **TTL** (marcás un atributo con un timestamp de expiración y Dynamo borra el ítem solo — ideal para las sesiones/carritos del módulo 7) y **DynamoDB Streams** (un log de cambios de la tabla que dispara una Lambda — el CDC de Dynamo, para proyecciones, búsquedas o eventos derivados).
+
 **Ejercicios 8**
 8.1 ¿Qué hacen la partition key y la sort key, y qué patrón habilita tenerlas juntas?
 8.2 ¿Qué es el single-table design y en qué se opone al modelado relacional?
 8.3 ¿Cuál es la diferencia entre `Query` y `Scan`, y cuál evitás en producción? ¿Para qué sirve un GSI?
+8.4 **Implementá.** Escribí el `QueryCommand` (con `lib-dynamodb`) que traiga todas las `TAREA#` del `PROYECTO#42`, ordenadas por sort key.
 
 ---
 
@@ -296,7 +374,9 @@ No podés tener las dos durante una partición: o respondés con data posiblemen
 
 **Consistencia eventual** (eventual consistency): después de una escritura, las lecturas pueden devolver el valor **viejo** por un ratito, hasta que el cambio se propaga a todas las réplicas. "Eventualmente" todos convergen al valor nuevo, pero no instantáneamente. Ejemplo concreto: escribís un ítem en Dynamo y lo leés 10 ms después desde otra réplica — podés recibir la versión anterior. Para un contador de "me gusta" o un feed, da igual (nadie nota 50 ms de retraso). Para el **saldo de una cuenta bancaria**, es inaceptable.
 
-La contracara es la **consistencia fuerte** (strong consistency): toda lectura refleja la última escritura, siempre. Es lo que tu Postgres te da por defecto (ACID, módulo de PostgreSQL). DynamoDB **te deja elegir por lectura**: lecturas eventualmente consistentes (más baratas y rápidas, el default) o fuertemente consistentes (más caras, pero ves siempre lo último). Mongo, según la config de réplicas y *read/write concern*, te da un espectro parecido.
+La contracara es la **consistencia fuerte** (strong consistency): toda lectura refleja la última escritura, siempre. Es lo que tu Postgres te da por defecto (ACID, módulo de PostgreSQL). DynamoDB **te deja elegir por lectura**: lecturas eventualmente consistentes (más baratas y rápidas, el default) o fuertemente consistentes (más caras, pero ves siempre lo último — y **solo sobre la tabla base, no sobre un GSI**, módulo 8). Mongo, según la config de réplicas y *read/write concern*, te da un espectro parecido.
+
+**Más allá de CAP: PACELC.** CAP solo describe qué pasa *durante* una partición. El refinamiento moderno es **PACELC**: si hay **P**artición → elegís **A** vs **C** (lo de arriba); **E**lse (operación normal, sin partición) → elegís **L**atencia vs **C**onsistencia. Esa segunda rama explica el día a día de Dynamo: ofrecer lecturas eventuales *más rápidas y baratas* vs. fuertes *más lentas y caras* es exactamente el trade-off Latencia↔Consistencia, sin ninguna partición de por medio. CAP es el caso extremo; PACELC es el que vivís todos los días.
 
 El criterio senior: **la consistencia es una decisión de negocio, no técnica.** No preguntes "¿quiero consistencia fuerte?" (todos dirían que sí); preguntá "¿qué pasa si un usuario ve data desactualizada por 100 ms en *este* dato?". Para un like, nada → eventual (más rápido y barato). Para un saldo o un stock que no podés sobrevender → fuerte. Saber que **podés elegir, y que la elección tiene costo**, es lo que distingue al que entiende sistemas distribuidos del que pide "máxima consistencia" en todo y paga de más (o ni eso, porque a veces ni está disponible).
 
@@ -313,7 +393,7 @@ El criterio senior: **la consistencia es una decisión de negocio, no técnica.*
 
 **MongoDB:**
 - **Operaciones sobre un solo documento son atómicas**, siempre. Si actualizás varios campos de un documento (o un sub-documento embebido), o se aplican todos o ninguno. **Esto es un argumento fuerte a favor de embeber** (módulo 4): si la data que cambia junta vive en un solo documento, tu actualización es atómica gratis, sin transacciones.
-- **Transacciones multi-documento existen** (desde la versión 4.0) y dan garantías ACID a través de varios documentos/colecciones, pero tienen **costo de performance** y van contra la filosofía documental. La señal: si necesitás transacciones multi-documento seguido, probablemente deberías haber embebido esa data (o quizá tu caso quería un relacional).
+- **Transacciones multi-documento existen** (en *replica sets* desde la 4.0; en clústeres *sharded* desde la 4.2) y dan garantías ACID a través de varios documentos/colecciones, pero tienen **costo de performance** y van contra la filosofía documental. La señal: si necesitás transacciones multi-documento seguido, probablemente deberías haber embebido esa data (o quizá tu caso quería un relacional).
 
 **DynamoDB:**
 - Operaciones sobre un solo ítem son atómicas, y tiene **escrituras condicionales** (`condition expressions`): "escribí esto **solo si** se cumple X" — atómico, perfecto para evitar sobrescrituras y para el patrón optimista (no actualices si la versión cambió). Es la herramienta clave para concurrencia sin locks.
@@ -321,7 +401,7 @@ El criterio senior: **la consistencia es una decisión de negocio, no técnica.*
 
 El patrón que reemplaza muchas transacciones en NoSQL: **escrituras condicionales / optimistic concurrency.** En vez de bloquear (lock pesimista, lo de Postgres), guardás un número de versión y escribís "solo si la versión sigue siendo N"; si otro escribió primero, tu condición falla y reintentás. Es la misma idea del *optimistic locking* que puede aparecer en SQL, pero acá es **el** mecanismo, no una opción.
 
-El criterio: **diseñá para minimizar la necesidad de transacciones multi-documento/multi-ítem.** En SQL las transacciones son baratas y las usás libremente; en NoSQL son caras o limitadas, así que el buen modelado (embeber lo que cambia junto, claves bien diseñadas) hace que la atomicidad de un solo documento/ítem te alcance para casi todo. Si te encontrás peleando con transacciones distribuidas en NoSQL, muchas veces la respuesta correcta es **reconsiderar el modelo** —o reconocer que el caso pedía un relacional**.
+El criterio: **diseñá para minimizar la necesidad de transacciones multi-documento/multi-ítem.** En SQL las transacciones son baratas y las usás libremente; en NoSQL son caras o limitadas, así que el buen modelado (embeber lo que cambia junto, claves bien diseñadas) hace que la atomicidad de un solo documento/ítem te alcance para casi todo. Si te encontrás peleando con transacciones distribuidas en NoSQL, muchas veces la respuesta correcta es **reconsiderar el modelo** —o reconocer que el caso pedía un relacional—.
 
 **Ejercicios 10**
 10.1 ¿Qué garantía de atomicidad te da Mongo siempre, y cómo se relaciona eso con la decisión de embeber?
@@ -411,6 +491,37 @@ Y dos verdades senior que cierran el módulo y el criterio del temario:
     saque). Resignás: duplicación de data y el riesgo de inflar el documento si la data anidada
     crece sin límite — el modelado del módulo 4.
 ```
+```ts
+// 3.4
+@Schema({ _id: false }) // sub-documento embebido: no necesita _id propio
+class Comentario {
+  @Prop({ required: true }) autor!: string;
+  @Prop({ required: true }) texto!: string;
+}
+const ComentarioSchema = SchemaFactory.createForClass(Comentario);
+
+@Schema()
+export class Post {
+  @Prop({ required: true }) autor!: string;
+  @Prop({ required: true }) titulo!: string;
+  @Prop({ type: [ComentarioSchema], default: [] }) comentarios!: Comentario[];
+  @Prop({ default: () => new Date() }) creado!: Date;
+}
+export const PostSchema = SchemaFactory.createForClass(Post);
+
+@Injectable()
+export class PostsService {
+  constructor(@InjectModel(Post.name) private readonly postModel: Model<Post>) {}
+
+  crear(dto: Partial<Post>): Promise<Post> {
+    return this.postModel.create(dto);
+  }
+
+  porAutor(autor: string): Promise<Post[]> {
+    return this.postModel.find({ autor }).sort({ creado: -1 }).exec();
+  }
+}
+```
 
 ### Módulo 4
 ```
@@ -427,7 +538,8 @@ Y dos verdades senior que cierran el módulo y el criterio del temario:
 
 ### Módulo 5
 ```
-5.1 db.tareas.find({ estado: "hecha" }, { titulo: 1 }).sort({ creada: -1 }).limit(5)
+5.1 db.tareas.find({ estado: "hecha" }, { titulo: 1, _id: 0 }).sort({ creada: -1 }).limit(5)
+    (en Mongo el _id viene en la proyección por defecto; si querés SOLO titulo, excluilo con _id: 0)
 5.2 Es una secuencia de etapas donde cada una transforma los documentos y se los pasa a la
     siguiente. Se relaciona con los streams / .map().filter().reduce() de Node (composición de
     transformaciones) y con GROUP BY/JOIN/agregaciones de SQL.
@@ -475,6 +587,16 @@ Y dos verdades senior que cierran el módulo y el criterio del temario:
     toda la tabla (carísimo, el SELECT * sin WHERE) — lo evitás en producción. Un GSI da una
     partition/sort key alternativa sobre los mismos datos, para habilitar otro patrón de acceso
     (ej. buscar por asignado además de por proyecto).
+```
+```ts
+// 8.4
+const { Items } = await doc.send(new QueryCommand({
+  TableName: "app",
+  KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
+  ExpressionAttributeValues: { ":pk": "PROYECTO#42", ":sk": "TAREA#" },
+}));
+// Items: las tareas del proyecto 42, ya ordenadas por SK ascendente.
+// (ScanIndexForward: false en el QueryCommand las daría en orden descendente)
 ```
 
 ### Módulo 9
@@ -526,4 +648,4 @@ Y dos verdades senior que cierran el módulo y el criterio del temario:
 
 ## Siguientes pasos
 
-Con este módulo tenés NoSQL con criterio: las cuatro familias, MongoDB hands-on (documentos, embeber vs referenciar, aggregation pipeline, índices), DynamoDB hands-on (serverless, partition/sort key, single-table design, query vs scan, GSI), los conceptos transversales (CAP y consistencia eventual vs fuerte, atomicidad sin ACID completo, escrituras condicionales) y —lo más importante— **el criterio de cuándo SQL y cuándo cada NoSQL**, con el default puesto en Postgres y la honestidad de que JSONB y polyglot persistence resuelven más de lo que parece. Este es el primer módulo del **track Tech Lead**. Lo que sigue en ese track, en orden sugerido: **Kubernetes** (fundamentos de orquestación de contenedores, sobre lo que ya viste de Docker), **observabilidad práctica** (OpenTelemetry y tracing distribuido — que engancha directo con el tracing del módulo 8 de Evals y el de microservicios), **TDD como disciplina** (red-green-refactor, profundizando el módulo de Testing) y **liderazgo técnico** (ADRs, métricas DORA, Team Topologies). Juntos completan la otra mitad del perfil senior contratable, la que ya no es solo "saber construir" sino "saber decidir y conducir".
+Con este módulo tenés NoSQL con criterio: las cuatro familias, MongoDB hands-on (documentos, embeber vs referenciar, aggregation pipeline, índices), DynamoDB hands-on (serverless, partition/sort key, single-table design, query vs scan, GSI), los conceptos transversales (CAP y consistencia eventual vs fuerte, atomicidad sin ACID completo, escrituras condicionales) y —lo más importante— **el criterio de cuándo SQL y cuándo cada NoSQL**, con el default puesto en Postgres y la honestidad de que JSONB y polyglot persistence resuelven más de lo que parece. Para llevarlo a la práctica con tests, `mongodb-memory-server` (Mongo efímero en memoria) y el `dynamodb-local` que ya levantaste son la vía de integración —engancha directo con el track de **TDD** que viene más adelante—. Más que un módulo de sintaxis, este **cierra el bloque de bases de datos y abre el track Tech Lead por su ángulo de fondo**: elegir consistencia es una decisión de negocio/SLA, y elegir Dynamo on-demand vs provisioned (o NoSQL vs Postgres) es una decisión de costo y arquitectura — criterio de Tech Lead, no de tutorial. Lo que sigue en ese track, en orden sugerido: **Kubernetes** (fundamentos de orquestación de contenedores, sobre lo que ya viste de Docker), **observabilidad práctica** (OpenTelemetry y tracing distribuido — que engancha directo con el tracing del módulo 8 de Evals y el de microservicios), **TDD como disciplina** (red-green-refactor, profundizando el módulo de Testing) y **liderazgo técnico** (ADRs, métricas DORA, Team Topologies). Juntos completan la otra mitad del perfil senior contratable, la que ya no es solo "saber construir" sino "saber decidir y conducir".
