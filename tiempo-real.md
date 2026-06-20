@@ -10,7 +10,8 @@
 
 ```bash
 npm i @nestjs/websockets @nestjs/platform-socket.io socket.io
-npm i @nestjs/swagger          # documentación OpenAPI
+npm i @socket.io/redis-adapter redis   # escalar WebSockets entre instancias (módulo 6)
+npm i @nestjs/swagger                   # documentación OpenAPI
 ```
 
 **Índice de módulos**
@@ -61,6 +62,10 @@ HTTP (request/response):           WebSocket (persistente, bidireccional):
 
 **Socket.IO** (lo que usa Nest por defecto) es una librería sobre WebSockets que agrega comodidades de producción: **reconexión automática** si se cae la red (clave en mobile, donde la conexión es inestable), *fallback* a otras técnicas si WebSocket no está disponible, **rooms** (agrupar conexiones, módulo 4) y un modelo de **eventos con nombre** (`emit("mensaje", data)` / `on("mensaje", ...)`) en vez de mensajes crudos. Del lado del cliente usás `socket.io-client`, tanto en React como en React Native.
 
+> **Pregunta de entrevista: ¿Socket.IO es WebSocket?** No exactamente. Socket.IO implementa un **protocolo propio sobre Engine.IO** (con su handshake, sus reconexiones y su empaquetado de eventos), que *usa* WebSocket como transporte cuando puede y cae a HTTP long-polling cuando no. Consecuencia práctica: un cliente `socket.io-client` **no** puede hablar con un servidor WebSocket nativo (`ws`/la API `WebSocket` del navegador) ni al revés — son protocolos distintos. Si necesitás interoperar con clientes WS estándar, usás `ws` o WebSockets nativos; si querés las comodidades (rooms, reconexión, fallback), Socket.IO de punta a punta.
+
+**Seguridad de transporte.** Igual que tu API va sobre HTTPS, los WebSockets en producción van sobre **WSS** (`wss://`, WebSocket sobre TLS): sin cifrar, el token del handshake y los mensajes viajan en claro. Y el `Origin` del handshake hay que validarlo del lado del servidor (lo vemos en el módulo 5) — conecta con el HTTPS del módulo de deploy.
+
 El modelo mental: en vez de "endpoints" (rutas), pensás en **eventos** que viajan en ambos sentidos. El cliente `emit`e eventos y el servidor `on`-los escucha, y viceversa.
 
 **Ejercicios 2**
@@ -77,11 +82,23 @@ El modelo mental: en vez de "endpoints" (rutas), pensás en **eventos** que viaj
 ```ts
 import {
   WebSocketGateway, WebSocketServer, SubscribeMessage,
-  MessageBody, ConnectedSocket, OnGatewayConnection,
+  MessageBody, ConnectedSocket, OnGatewayConnection, WsException,
 } from "@nestjs/websockets";
+import { UsePipes, ValidationPipe } from "@nestjs/common";
+import { IsString, MaxLength } from "class-validator";
 import { Server, Socket } from "socket.io";
 
-@WebSocketGateway({ cors: { origin: "*" } }) // cors para que el front pueda conectarse
+// DTO validado, igual que en HTTP — pero ojo, ver la nota de abajo
+class MensajeDto {
+  @IsString()
+  @MaxLength(2000)
+  texto!: string;
+}
+
+@WebSocketGateway({
+  // allowlist por entorno, NUNCA "*" en una app autenticada (ver módulo 5)
+  cors: { origin: process.env.ALLOWED_ORIGINS?.split(",") ?? false },
+})
 export class ChatGateway implements OnGatewayConnection {
   @WebSocketServer() private server!: Server; // referencia al servidor, para emitir
 
@@ -92,10 +109,12 @@ export class ChatGateway implements OnGatewayConnection {
   }
 
   @SubscribeMessage("mensaje") // escucha el evento "mensaje" que emite el cliente
+  @UsePipes(new ValidationPipe({ transform: true })) // ¡necesario! no corre solo en WS
   async onMensaje(
-    @MessageBody() data: { texto: string },
+    @MessageBody() data: MensajeDto,
     @ConnectedSocket() client: Socket,
   ): Promise<void> {
+    if (!data.texto.trim()) throw new WsException("Mensaje vacío");
     const guardado = await this.chatService.guardar(data.texto);
     this.server.emit("mensaje", guardado); // reenvía a TODOS los conectados
   }
@@ -109,12 +128,19 @@ Las piezas:
 - `@MessageBody()` y `@ConnectedSocket()` son los decoradores de parámetro (análogos a `@Body()` y `@Req()`).
 - Los **lifecycle hooks** `OnGatewayConnection` / `OnGatewayDisconnect` te avisan cuando un cliente se conecta o desconecta — útil para presencia ("quién está online") y limpieza.
 
+**Trampa de producción #1 — la validación NO es automática.** En HTTP, si registrás un `ValidationPipe` global (módulo de Nest), tus DTOs se validan solos. **En gateways WebSocket eso no pasa por defecto**: tenés que aplicar el pipe explícitamente con `@UsePipes(new ValidationPipe())` en el handler o el gateway. Si te olvidás, el `@MessageBody() data: MensajeDto` es una **mentira de tipos**: en runtime entra cualquier cosa que el cliente mande, sin validar — puerta abierta a payloads maliciosos o malformados. Es exactamente el tipo de detalle que un entrevistador senior pregunta.
+
+**Trampa de producción #2 — los errores no se manejan como en HTTP.** Lanzar una `HttpException` en un gateway no sirve. El equivalente es **`WsException`**, y para darle forma a los errores que llegan al cliente se usa un **exception filter de WS** (`@Catch(WsException)` con `BaseWsExceptionFilter`). Sin esto, un throw no controlado puede tumbar el handler sin avisarle nada útil al cliente.
+
 Como es un provider con DI, el gateway inyecta tus services (la lógica de negocio sigue en el service, no en el gateway: la misma separación de capas de siempre).
 
 **Ejercicios 3**
 3.1 ¿Cuál es el equivalente WebSocket de un `@Controller` y de un `@Get`/`@Post` en NestJS?
 3.2 ¿Para qué sirve `@WebSocketServer()` y para qué `@SubscribeMessage()`?
 3.3 ¿Dónde debería vivir la lógica de negocio: en el gateway o en un service inyectado? ¿Por qué?
+3.4 ¿Por qué un `@MessageBody() data: MiDto` sin `@UsePipes(ValidationPipe)` es una "mentira de tipos" en un gateway, y qué riesgo abre?
+3.5 ¿Qué excepción se lanza en un gateway para reportar un error al cliente, y por qué no sirve `HttpException`?
+3.6 (teclado) Implementá el `ChatGateway` con el DTO validado. Desde un cliente (o Postman/wscat) emití un `"mensaje"` con `texto` ausente o de 5000 caracteres y verificá que la validación lo rechaza.
 
 ---
 
@@ -137,13 +163,23 @@ El concepto clave es el de **rooms** (salas): agrupaciones lógicas de conexione
 
 ```ts
 @SubscribeMessage("ver-proyecto")
-onVerProyecto(@MessageBody() id: number, @ConnectedSocket() client: Socket): void {
-  client.join(`proyecto:${id}`); // este cliente ahora escucha eventos de ese proyecto
+async onVerProyecto(
+  @MessageBody() id: number,
+  @ConnectedSocket() client: Socket,
+): Promise<void> {
+  // ⚠️ AUTORIZAR antes de unir: nada impide que un cliente pida una sala ajena.
+  const usuarioId = client.data.user.sub; // viene del handshake autenticado (módulo 5)
+  const esMiembro = await this.proyectosService.esMiembro(id, usuarioId);
+  if (!esMiembro) throw new WsException("Sin acceso a este proyecto");
+
+  client.join(`proyecto:${id}`); // recién ahora escucha eventos de ese proyecto
 }
 
 // cuando alguien actualiza una tarea de ese proyecto:
 this.server.to(`proyecto:${id}`).emit("tarea-actualizada", tarea);
 ```
+
+> **Trampa de producción #3 — autenticar no es autorizar.** Que el socket esté autenticado (módulo 5) dice *quién* es, pero **nada impide** que un cliente emita `ver-proyecto` con el id de un proyecto que no es suyo y se cuele en su sala, recibiendo datos ajenos. Por eso, antes de `client.join("proyecto:X")` (o de procesar cualquier evento sobre un recurso) hay que **chequear pertenencia** contra el service, igual que un guard de autorización en HTTP. Podés encapsularlo en un `WsGuard` por evento, pero el chequeo explícito ya cubre lo esencial.
 
 Las rooms resuelven el problema de **a quién le importa cada evento**. Sin ellas, o le mandás todo a todos (ruido, fugas de datos entre usuarios) o tenés que llevar a mano la lista de a quién notificar. Con rooms, Socket.IO mantiene esa membresía por vos. Casos típicos: una sala por proyecto, por conversación de chat, o por usuario (`usuario:42`) para notificaciones personales.
 
@@ -151,6 +187,7 @@ Las rooms resuelven el problema de **a quién le importa cada evento**. Sin ella
 4.1 ¿Cuál es la diferencia entre `server.emit(...)`, `client.emit(...)` y `server.to(room).emit(...)`?
 4.2 ¿Qué problema resuelven las rooms? ¿Qué pasaría si emitieras todos los eventos a todos los conectados?
 4.3 Querés que las notificaciones de un usuario le lleguen solo a él (en todos sus dispositivos). ¿Cómo lo modelarías con rooms?
+4.4 Un cliente autenticado emite `ver-proyecto` con el id de un proyecto ajeno. ¿Qué pasa si solo hacés `client.join` sin chequear nada, y cómo lo prevenís?
 
 ---
 
@@ -168,13 +205,14 @@ export class ChatGateway implements OnGatewayConnection {
   async handleConnection(client: Socket): Promise<void> {
     try {
       const token = client.handshake.auth?.token; // el cliente lo manda al conectar
+      if (typeof token !== "string") return client.disconnect(); // sin token → fuera
       const payload = await this.jwt.verifyAsync(token, {
         secret: this.config.getOrThrow("JWT_ACCESS_SECRET"),
       });
       client.data.user = payload;               // guardamos el usuario en el socket
       client.join(`usuario:${payload.sub}`);    // sala personal para notificaciones
     } catch {
-      client.disconnect();                       // token inválido → fuera
+      client.disconnect();                       // token inválido/expirado → fuera
     }
   }
 }
@@ -186,12 +224,22 @@ Del lado del cliente (React / React Native):
 const socket = io(URL, { auth: { token: accessToken } });
 ```
 
-A partir de ahí, `client.data.user` te dice quién es en cada evento, igual que `request.user` en HTTP. También existen **guards de WebSocket** (`@UseGuards` con un guard que implemente la lógica para el contexto WS) para proteger eventos específicos, pero validar en `handleConnection` y guardar el usuario en el socket cubre la mayoría de los casos. La regla del módulo de auth sigue: autenticá primero (quién sos), después autorizá (si podés unirte a *esta* sala / disparar *este* evento).
+A partir de ahí, `client.data.user` te dice quién es en cada evento, igual que `request.user` en HTTP. También existen **guards de WebSocket** (`@UseGuards` con un guard que implemente la lógica para el contexto WS) para proteger eventos específicos, pero validar en `handleConnection` y guardar el usuario en el socket cubre la mayoría de los casos. La regla del módulo de auth sigue: autenticá primero (quién sos), después autorizá (si podés unirte a *esta* sala / disparar *este* evento — módulo 4).
+
+**El problema que casi nadie ve: el token vence con el socket abierto.** Validás el JWT *una vez*, al conectar. Pero la conexión es persistente y puede durar horas, mientras que el access token dura minutos (módulo de auth). ¿Qué pasa cuando expira? Si solo validás en el handshake, **el socket queda autenticado para siempre** aunque el token ya venció o la sesión fue revocada — un agujero de seguridad clásico que un entrevistador senior va a buscar. Estrategias reales:
+
+- **Reconexión con token fresco**: como el access token es de vida corta, cerrá el socket al vencer (un timer en el server con `setTimeout(() => client.disconnect(), msHastaExpirar)` calculado desde el `exp` del payload) y dejá que el cliente reconecte con un token renovado (Socket.IO reconecta solo; del lado del cliente actualizás `socket.auth.token` antes de reconectar).
+- **Re-auth por evento**: el cliente emite un evento `"reauth"` con el nuevo token antes de que expire; el server re-verifica y actualiza `client.data.user`.
+- **Revocación**: para cortar una sesión robada *ya* (no esperar a que expire), chequeá contra la **lista de sesiones/refresh tokens en Redis** (módulo de Redis) — si la sesión fue revocada, desconectás.
+
+Para tu Task API, lo más simple y correcto es la **reconexión con token fresco**: aprovecha que el token ya es de vida corta y que Socket.IO reconecta automáticamente.
 
 **Ejercicios 5**
 5.1 ¿Por qué el token JWT se valida al conectar (handshake) y no en cada mensaje, como sí pasa en HTTP?
-5.2 ¿Qué hacés con un socket cuyo token es inválido? ¿Dónde guardás el usuario una vez validado?
+5.2 ¿Qué hacés con un socket cuyo token es inválido o ausente? ¿Dónde guardás el usuario una vez validado?
 5.3 Conectá con el módulo de auth: una vez autenticado el socket, ¿qué falta chequear antes de dejar que un cliente se una a la sala de un proyecto ajeno?
+5.4 El access token dura 15 min pero el socket queda abierto 3 horas. ¿Qué problema de seguridad aparece si solo validás en el handshake, y cómo lo resolverías?
+5.5 ¿Cómo cortarías *inmediatamente* una sesión robada que ya tiene un socket abierto, sin esperar a que el token expire? (Pista: módulo de Redis.)
 
 ---
 
@@ -201,18 +249,48 @@ A partir de ahí, `client.data.user` te dice quién es en cada evento, igual que
 
 El problema: si Ana (en A) manda un mensaje y hacés `server.emit(...)`, **solo llega a los clientes conectados a la instancia A**. Luis, en B, nunca lo recibe — porque cada instancia solo conoce sus propias conexiones. El tiempo real se rompe al escalar.
 
-La solución es el **adapter de Redis** (`@socket.io/redis-adapter`): usa el **pub/sub de Redis** (otra capacidad de Redis que no vimos) para que las instancias se **reenvíen los eventos entre sí**. Cuando A emite, publica el evento en Redis; B y C están suscriptas y lo reemiten a *sus* clientes. Resultado: un `emit` llega a todos los clientes, sin importar a qué instancia estén conectados.
+La solución es el **adapter de Redis** (`@socket.io/redis-adapter`): usa el **pub/sub de Redis** (el que viste en el módulo de Redis) para que las instancias se **reenvíen los eventos entre sí**. Cuando A emite, publica el evento en Redis; B y C están suscriptas y lo reemiten a *sus* clientes. Resultado: un `emit` llega a todos los clientes, sin importar a qué instancia estén conectados.
+
+En NestJS esto se implementa con un **adapter custom** que extiende `IoAdapter`. El patrón real (no alcanza con crear clientes sueltos: hay que aplicar `createAdapter()` al server de Socket.IO en `createIOServer`):
 
 ```ts
-// main.ts: configurar el adapter de Redis para Socket.IO
-const pubClient = createClient({ url: process.env.REDIS_URL });
-const subClient = pubClient.duplicate();
-await Promise.all([pubClient.connect(), subClient.connect()]);
+// redis-io.adapter.ts
+import { IoAdapter } from "@nestjs/platform-socket.io";
+import { ServerOptions } from "socket.io";
+import { createAdapter } from "@socket.io/redis-adapter";
+import { createClient } from "redis";
 
-const adapter = new RedisIoAdapter(app);
-adapter.connectToRedis(pubClient, subClient);
-app.useWebSocketAdapter(adapter); // ahora los emits se propagan entre instancias
+export class RedisIoAdapter extends IoAdapter {
+  private adapterConstructor!: ReturnType<typeof createAdapter>;
+
+  async connectToRedis(url: string): Promise<void> {
+    const pubClient = createClient({ url });
+    const subClient = pubClient.duplicate();
+    await Promise.all([pubClient.connect(), subClient.connect()]);
+    this.adapterConstructor = createAdapter(pubClient, subClient);
+  }
+
+  createIOServer(port: number, options?: ServerOptions): unknown {
+    const server = super.createIOServer(port, options);
+    server.adapter(this.adapterConstructor); // ← acá se engancha el pub/sub
+    return server;
+  }
+}
 ```
+
+```ts
+// main.ts
+const redisIoAdapter = new RedisIoAdapter(app);
+await redisIoAdapter.connectToRedis(process.env.REDIS_URL!);
+app.useWebSocketAdapter(redisIoAdapter); // ahora los emits se propagan entre instancias
+```
+
+**La otra mitad que casi siempre se olvida: sticky sessions.** El adapter de Redis propaga los `emit` entre instancias, pero **no** resuelve un problema distinto: Socket.IO arranca el handshake con **HTTP long-polling** (y cae a polling como fallback), y eso son **varias requests HTTP** que **deben llegar todas a la misma instancia**. Si el balanceador las reparte round-robin entre A, B y C, el handshake se rompe con errores tipo *"Session ID unknown"*. Por eso, con varias instancias necesitás:
+
+- **Session affinity / sticky sessions** en el balanceador o ingress (afinidad por IP o cookie), para que todas las requests de un cliente caigan en la misma instancia; **o**
+- forzar `transports: ["websocket"]` en cliente y server, saltando el polling — más simple, pero perdés el fallback (si la red bloquea WebSocket, no hay plan B).
+
+La regla para la entrevista: **el adapter de Redis y las sticky sessions resuelven problemas diferentes y complementarios** — Redis propaga eventos *entre* instancias; las sticky sessions garantizan que el handshake de *un* cliente no rebote entre instancias. Necesitás los dos.
 
 Esto vuelve a apoyarse en que tu app sea **stateless** (el módulo de Node) y en Redis como **estado/coordinación compartida** (el módulo de Redis): las instancias no comparten memoria, se coordinan a través de Redis. Es el patrón estándar y la respuesta correcta si en una entrevista te preguntan "¿cómo escalás un chat con WebSockets?".
 
@@ -220,6 +298,8 @@ Esto vuelve a apoyarse en que tu app sea **stateless** (el módulo de Node) y en
 6.1 ¿Por qué un `server.emit(...)` no llega a todos los clientes cuando tenés varias instancias de tu app?
 6.2 ¿Cómo resuelve el adapter de Redis ese problema? ¿Qué capacidad de Redis usa?
 6.3 Conectá con módulos anteriores: ¿por qué este escalado de WebSockets depende de que la app sea stateless y de Redis como coordinación compartida?
+6.4 ¿Qué problema NO resuelve el adapter de Redis y sí resuelven las sticky sessions? ¿Por qué Socket.IO las necesita (pensá en el transporte polling)?
+6.5 (teclado) Levantá dos instancias de tu API con el adapter de Redis (y sticky sessions o `transports: ["websocket"]`). Conectá dos clientes que caigan en instancias distintas y verificá que un `emit` desde un cliente le llega al otro.
 
 ---
 
@@ -233,12 +313,22 @@ Esto vuelve a apoyarse en que tu app sea **stateless** (el módulo de Node) y en
 
 El error es usar WebSockets "porque es lo más avanzado" para algo que un SSE o un polling cada 30s resolvían sin la complejidad. La pregunta correcta: *¿realmente necesito bidireccionalidad y baja latencia, o solo que el cliente se entere de cambios ocasionales?* Para tu portfolio, un chat o notificaciones en vivo justifican WebSockets de sobra; para "avisar cuando un reporte está listo", un SSE o consultar el estado del job (módulo de Redis) alcanza.
 
-> Mención al pasar (el roadmap los nombra como nociones): **GraphQL** ofrece *subscriptions* para tiempo real, y **gRPC** tiene *streaming* bidireccional. Son alternativas en contextos específicos; para una API REST con features en vivo, WebSockets/Socket.IO es lo más directo y pedido.
+> Dato fino (SSE): en **HTTP/1.1** el navegador limita a ~6 conexiones por dominio, y cada SSE ocupa una — un detalle que tumba apps con varias pestañas. Con **HTTP/2** (multiplexado) ese límite desaparece. Saber esto distingue a un senior cuando defiende "SSE vs WS".
+
+**Lo que WebSockets NO te da gratis (entrega y salud de la conexión).** Que el canal esté abierto no significa que tus mensajes lleguen siempre. Tres cosas que tenés que operar y que caen en entrevista:
+
+- **ACKs (confirmación de recepción)**: por defecto `emit` es *fire-and-forget* — emitís y no sabés si llegó. Socket.IO soporta un **callback de ACK** para confirmar: `socket.emit("mensaje", data, (resp) => { /* el server confirmó */ })`. Úsalo cuando necesitás saber que el otro lado recibió (ej. "mensaje entregado").
+- **Heartbeats (ping/pong)**: Socket.IO manda pings periódicos (`pingInterval`/`pingTimeout`) para detectar conexiones muertas — una red mobile que se cae no siempre dispara un "close" limpio. Si no hay pong a tiempo, se considera caído y dispara la reconexión.
+- **Eventos perdidos al reconectar**: este es el grande. Mientras un cliente estuvo desconectado (túnel, cambio de red), **los `emit` que el server hizo en ese lapso se perdieron** — Socket.IO reconecta el socket, pero no reenvía lo que te perdiste. El patrón de producción es **re-sincronizar estado al reconectar**: en el evento de reconexión, el cliente pide el estado actual por REST (ej. "traeme los mensajes desde el timestamp X") en vez de asumir que el stream en vivo está completo. WebSockets es para *lo nuevo en vivo*; la fuente de verdad sigue siendo tu API REST + Postgres.
+
+> Mención al pasar (el roadmap los nombra como nociones): **GraphQL** ofrece *subscriptions* para tiempo real (aparecen en stacks con GraphQL/Apollo, normalmente sobre WebSockets por debajo), y **gRPC** tiene *streaming* bidireccional (típico en comunicación **entre microservicios internos**, no navegador↔servidor). Para una API REST con features en vivo de cara al cliente, WebSockets/Socket.IO es lo más directo y pedido.
 
 **Ejercicios 7**
 7.1 ¿En qué caso usarías SSE en lugar de WebSockets? ¿Cuál es la diferencia clave?
 7.2 Dá un ejemplo donde un polling cada 30s sea preferible a WebSockets, y justificá.
 7.3 ¿Por qué "usar WebSockets porque es lo más avanzado" puede ser un error? Conectá con el criterio de complejidad del archivo senior.
+7.4 ¿Qué es un ACK en Socket.IO y cuándo lo usarías en vez de un `emit` fire-and-forget?
+7.5 Un cliente mobile pierde la red 30s y reconecta. ¿Por qué no alcanza con confiar en el stream en vivo, y cuál es el patrón para no perderse lo que pasó mientras estuvo caído?
 
 ---
 
@@ -278,10 +368,17 @@ const config = new DocumentBuilder()
   .build();
 
 const document = SwaggerModule.createDocument(app, config);
-SwaggerModule.setup("docs", app, document); // Swagger UI queda en /docs
+
+// Proteger /docs en producción: no la expongas pública por defecto.
+if (process.env.NODE_ENV !== "production") {
+  SwaggerModule.setup("docs", app, document); // Swagger UI en /docs solo fuera de prod
+}
+// En prod: o no la montás, o la protegés con un guard / basic-auth detrás de la URL.
 ```
 
-Y enriquecés los DTOs y controladores con decoradores `@Api*` para que la doc sea precisa:
+> **Por qué proteger `/docs`:** `SwaggerModule.setup` deja la UI **pública** en esa ruta. Exponer el mapa completo de tu API (endpoints, esquemas, auth) a cualquiera en producción es regalarle reconocimiento a un atacante. El default sano: servirla solo en dev/staging, o protegerla con auth básica/guard en prod.
+
+Y enriquecés los DTOs y controladores con decoradores `@Api*` para que la doc sea precisa — incluyendo **los errores como parte del contrato**:
 
 ```ts
 export class CreateProjectDto {
@@ -290,23 +387,40 @@ export class CreateProjectDto {
   nombre!: string;
 }
 
+// El formato de error TAMBIÉN es parte del contrato: documentalo con un DTO
+export class ErrorResponseDto {
+  @ApiProperty({ example: 400 }) statusCode!: number;
+  @ApiProperty({ example: "Validation failed" }) message!: string;
+  @ApiProperty({ example: "Bad Request" }) error!: string;
+}
+
 @ApiTags("proyectos")               // agrupa los endpoints en la UI
 @ApiBearerAuth()                    // este controlador requiere token
-@Controller("proyectos")
+@Controller({ path: "proyectos", version: "1" }) // versionado: /v1/proyectos
 export class ProyectosController {
-  @ApiResponse({ status: 201, description: "Proyecto creado" })
-  @ApiResponse({ status: 401, description: "No autenticado" })
+  @ApiResponse({ status: 201, description: "Proyecto creado", type: ProjectDto })
+  @ApiResponse({ status: 400, description: "Datos inválidos", type: ErrorResponseDto })
+  @ApiResponse({ status: 401, description: "No autenticado", type: ErrorResponseDto })
+  @ApiResponse({ status: 403, description: "Sin permiso", type: ErrorResponseDto })
+  @ApiResponse({ status: 409, description: "Conflicto (duplicado)", type: ErrorResponseDto })
   @Post()
   crear(@Body() dto: CreateProjectDto) { /* ... */ }
 }
 ```
 
-Fijate la sinergia con módulos anteriores: los mismos DTOs con `class-validator` (módulo de Nest) ahora también documentan; el `@ApiBearerAuth` refleja tu auth JWT; los status codes documentados son los que aprendiste a usar bien (`201`, `401`, `404`). La spec se genera de tu código real, así que **no se desactualiza** mientras la mantengas con los decoradores — el problema clásico de la documentación a mano que miente.
+Dos decisiones de diseño que separan a un mid de un senior:
+
+- **Documentar los errores, no solo el camino feliz**: un consumidor necesita saber qué forma tiene un `400`/`401`/`403`/`409` para manejarlos. El formato de error es contrato igual que el de éxito.
+- **Versionado de la API**: NestJS soporta versionado por URI (`/v1/...`), header o media type (`app.enableVersioning()`). Versionar desde el principio te permite evolucionar la API sin romper los clientes ya generados desde la spec — clave si otros (o tu app mobile ya publicada) consumen tu backend.
+
+Fijate la sinergia con módulos anteriores: los mismos DTOs con `class-validator` (módulo de Nest) ahora también documentan; el `@ApiBearerAuth` refleja tu auth JWT; los status codes documentados son los que aprendiste a usar bien (`201`, `400`, `401`, `403`, `404`, `409`). La spec se genera de tu código real, así que **no se desactualiza** mientras la mantengas con los decoradores — el problema clásico de la documentación a mano que miente.
 
 **Ejercicios 9**
 9.1 ¿Por qué `@nestjs/swagger` puede generar gran parte de la doc automáticamente? ¿De qué se aprovecha?
 9.2 ¿Para qué sirve `addBearerAuth()` / `@ApiBearerAuth()` en la spec? Conectá con el módulo de auth.
 9.3 ¿Cuál es la ventaja de que la spec se genere del código real en vez de escribirse a mano en un documento aparte?
+9.4 ¿Por qué conviene documentar las respuestas de error (400/401/403/409), y no solo el 201? ¿Para quién es parte del contrato?
+9.5 ¿Por qué exponer `/docs` público en producción es un riesgo, y qué hacés en su lugar? ¿Qué problema previene versionar la API (`/v1`) desde el inicio?
 
 ---
 
@@ -323,10 +437,23 @@ Cómo se conectan las piezas que aprendiste, de punta a punta:
 
 El proyecto **capstone** que sugiere el roadmap y que mejor muestra esto: una plataforma tipo Trello/Linear o un chat en tiempo real, con tu frontend React (o tu app React Native) + backend Nest + Postgres + auth + WebSockets + deploy. Eso es, literalmente, todo el temario en un solo producto desplegado — la mejor pieza posible de tu portfolio, y la prueba de que la transición de frontend a full stack está hecha.
 
+**Criterios de aceptación (para que sea verificable, no "más o menos funciona").** Un capstone que muestra nivel cumple, como mínimo:
+
+1. **Auth completa**: registro/login con JWT access+refresh, refresh en store seguro (mobile) o cookie httpOnly (web), y logout que revoca (módulo de auth + Redis).
+2. **CRUD real con permisos**: un usuario solo ve/edita sus proyectos y tareas; un recurso ajeno devuelve `403` (autorización, no solo autenticación).
+3. **Tiempo real verificable**: abrir la app en dos clientes y ver que un cambio en uno aparece en el otro **sin recargar** (rooms por proyecto), con el socket autenticado por JWT.
+4. **Escala**: corre con ≥2 instancias detrás de un balanceador (adapter de Redis + sticky sessions) y el tiempo real sigue funcionando entre instancias.
+5. **Documentada**: Swagger UI navegable (protegida en prod), con errores documentados.
+6. **Desplegada**: URL pública (backend) + app instalable o web desplegada, con CI que corre los tests (módulo de Docker/deploy).
+7. **Con tests**: al menos los flujos críticos (auth, permisos, un caso de tiempo real) cubiertos (módulo de testing).
+
+Si tu proyecto cumple esos siete puntos, no es un "to-do app de tutorial": es la evidencia concreta de que cerrás el círculo frontend↔backend.
+
 **Ejercicios 10**
 10.1 En una app React Native, ¿dónde guardás el access token y dónde el refresh token, y por qué? (Conectá con el módulo de auth.)
 10.2 ¿Qué ventaja concreta da generar un cliente TypeScript desde la spec OpenAPI para tu frontend?
 10.3 ¿Por qué un capstone full stack (front React/RN + backend Nest + tiempo real + deploy) es la mejor pieza de portfolio para tu transición, y qué demuestra de tu perfil?
+10.4 (proyecto) Tomá los 7 criterios de aceptación y autoevaluá tu capstone: ¿cuáles cumplís hoy y cuál es el próximo que vas a cerrar?
 
 ---
 
@@ -356,6 +483,10 @@ El proyecto **capstone** que sugiere el roadmap y que mejor muestra esto: una pl
     eventos en vez de mensajes crudos. (También: fallback si WebSocket no está disponible.)
 2.3 De pensar en rutas/endpoints (request→response) a pensar en eventos con nombre que
     viajan en ambos sentidos: el cliente emite y escucha eventos, y el servidor también.
+2.4 (extra) Socket.IO NO es WebSocket puro: usa un protocolo propio sobre Engine.IO (que
+    usa WebSocket como transporte cuando puede y cae a polling). Por eso socket.io-client
+    no interopera con un server WS nativo (ws / API WebSocket del navegador) ni viceversa.
+    En prod va sobre WSS (TLS), igual que HTTPS.
 ```
 
 ### Módulo 3
@@ -368,6 +499,18 @@ El proyecto **capstone** que sugiere el roadmap y que mejor muestra esto: una pl
 3.3 En un service inyectado, no en el gateway. El gateway es la capa de entrada (como un
     controlador): recibe el evento y delega. Mantener la lógica en el service preserva la
     separación de capas y permite reusarla/testearla sin WebSockets.
+3.4 Porque en gateways el ValidationPipe global NO corre automáticamente (a diferencia de
+    HTTP): sin @UsePipes(new ValidationPipe()), el tipo del DTO no se valida en runtime y
+    entra cualquier payload que el cliente mande. El riesgo: datos malformados o
+    maliciosos llegan al service sin filtro. Hay que aplicar el pipe explícito en el
+    gateway/handler.
+3.5 Se lanza una WsException (de @nestjs/websockets), no una HttpException: el contexto es
+    WebSocket, no HTTP, así que las HttpException y los exception filters HTTP no aplican.
+    Para dar forma a los errores hacia el cliente se usa un filtro WS (@Catch +
+    BaseWsExceptionFilter).
+3.6 (teclado) Con el DTO + @UsePipes, un "mensaje" con texto ausente o de 5000 chars es
+    rechazado por class-validator (@IsString / @MaxLength) antes de llegar al service; sin
+    el pipe, pasaría sin validar.
 ```
 
 ### Módulo 4
@@ -381,6 +524,10 @@ El proyecto **capstone** que sugiere el roadmap y que mejor muestra esto: una pl
 4.3 Uniendo cada conexión del usuario a una room personal por su id (ej. usuario:42) al
     conectarse; las notificaciones se emiten con server.to(`usuario:42`).emit(...) y
     llegan a todos sus dispositivos conectados, solo a él.
+4.4 Si solo hacés client.join sin chequear, el cliente se cuela en la sala de un proyecto
+    ajeno y recibe sus eventos (fuga de datos): autenticar dice quién es, no qué puede ver.
+    Se previene chequeando pertenencia contra el service (¿es miembro del proyecto?) ANTES
+    del join, y rechazando con WsException si no lo es (idealmente vía un WsGuard).
 ```
 
 ### Módulo 5
@@ -394,6 +541,15 @@ El proyecto **capstone** que sugiere el roadmap y que mejor muestra esto: una pl
 5.3 Falta la autorización: chequear que ese usuario tenga permiso sobre ESE proyecto
     (que sea suyo o colaborador) antes de hacer client.join de su room. Autenticar dice
     quién es; autorizar, si puede unirse a ese recurso (igual que en HTTP).
+5.4 Si solo validás en el handshake, el socket queda autenticado mientras viva la conexión
+    aunque el access token haya expirado o la sesión se haya revocado: una conexión de
+    horas con un token de minutos sigue activa indefinidamente. Se resuelve cerrando el
+    socket al vencer el token (timer según el exp del payload) y dejando que el cliente
+    reconecte con un token fresco, o con un evento de re-auth periódico.
+5.5 Chequeando contra la lista de sesiones/refresh tokens en Redis (módulo de Redis): si
+    la sesión fue revocada (DEL de la clave), el server lo detecta y desconecta el socket
+    de inmediato, sin esperar a que expire el JWT. Un JWT por sí solo no se puede revocar
+    antes de su expiración.
 ```
 
 ### Módulo 6
@@ -407,6 +563,15 @@ El proyecto **capstone** que sugiere el roadmap y que mejor muestra esto: una pl
 6.3 Porque las instancias no comparten estado en memoria (son stateless): necesitan un
     canal externo para coordinarse, y ese canal es Redis (pub/sub). Es el mismo principio
     de "estado/coordinación compartida en Redis" de los módulos de Node y Redis.
+6.4 El adapter de Redis propaga los emits ENTRE instancias, pero no garantiza que las
+    varias requests HTTP del handshake de UN cliente caigan en la misma instancia.
+    Socket.IO arranca/cae a HTTP long-polling, que necesita afinidad: sin sticky sessions
+    (afinidad por IP/cookie en el balanceador), el handshake en polling rebota entre
+    instancias y falla ("Session ID unknown"). Alternativa: forzar transports:
+    ["websocket"] (perdiendo el fallback). Son problemas distintos y complementarios.
+6.5 (teclado) Con dos instancias + adapter de Redis, dos clientes conectados a instancias
+    distintas igual se ven los eventos: el emit de uno se publica en Redis y la otra
+    instancia lo reemite a su cliente. Sin el adapter, el segundo cliente no recibiría nada.
 ```
 
 ### Módulo 7
@@ -421,6 +586,15 @@ El proyecto **capstone** que sugiere el roadmap y que mejor muestra esto: una pl
     que quizás no necesitás: si un SSE o un polling resuelven, los WebSockets son
     complejidad accidental. El criterio del senior: elegí por el problema, no por lo
     "moderno".
+7.4 Un ACK es un callback de confirmación: el receptor avisa que recibió el evento
+    (socket.emit("ev", data, (resp) => ...)). Lo usás cuando necesitás certeza de entrega
+    o una respuesta (ej. "mensaje entregado", confirmar que se guardó), en vez del emit
+    fire-and-forget donde no sabés si llegó.
+7.5 Porque mientras el cliente estuvo desconectado, los emits que el server hizo en ese
+    lapso se perdieron: Socket.IO reconecta el socket pero NO reenvía lo que te perdiste.
+    El patrón: al reconectar, pedir el estado actual por REST (ej. mensajes desde el último
+    timestamp/id conocido) y re-sincronizar, tratando a Postgres/REST como fuente de verdad
+    y al stream en vivo solo para lo nuevo.
 ```
 
 ### Módulo 8
@@ -445,6 +619,15 @@ El proyecto **capstone** que sugiere el roadmap y que mejor muestra esto: una pl
 9.3 Que la doc no se desactualiza ni miente: al generarse del código real (DTOs,
     decoradores), refleja la API tal como es. La doc escrita a mano en un documento aparte
     queda vieja apenas cambia un endpoint y nadie la actualiza.
+9.4 Porque el consumidor (tu front, otro equipo) necesita saber qué forma tienen los
+    errores para manejarlos: el formato de un 400/401/403/409 es parte del contrato, igual
+    que el del 201. Documentar solo el camino feliz deja al cliente adivinando cómo reacciona
+    ante fallos.
+9.5 Exponer /docs público en prod revela el mapa completo de la API (endpoints, esquemas,
+    auth) a cualquiera, dándole reconocimiento gratis a un atacante: por eso se sirve solo
+    en dev/staging o se protege con guard/basic-auth. Versionar (/v1) desde el inicio
+    permite evolucionar la API (cambios incompatibles en /v2) sin romper a los clientes ya
+    publicados que consumen /v1 (ej. tu app mobile en las tiendas).
 ```
 
 ### Módulo 10
@@ -460,6 +643,11 @@ El proyecto **capstone** que sugiere el roadmap y que mejor muestra esto: una pl
      real, deploy) y demuestra que cerrás el círculo frontend↔backend. De tu perfil
      muestra el diferenciador: sabés mobile/React Y backend, algo que pocos backenders
      tienen y que te separa en una búsqueda.
+10.4 (proyecto) Autoevaluación honesta contra los 7 criterios (auth completa, permisos,
+     tiempo real verificable en 2 clientes, escala con ≥2 instancias, doc protegida,
+     deploy con CI, tests de flujos críticos). Lo importante es identificar el próximo
+     criterio a cerrar y atacarlo; un capstone que cumple los 7 ya no es un proyecto de
+     tutorial.
 ```
 
 ---
