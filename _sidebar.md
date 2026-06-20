@@ -52,5 +52,8 @@
   - [🦾 Agentes: LLM en un loop](agentes.md)
   - [📊 Evaluations: medir el sistema](evals.md)
 
+- **Liderazgo técnico**
+  - [🧭 De senior a Tech Lead](liderazgo.md)
+
 - **Enlaces**
   - [Repositorio en GitHub](https://github.com/jzamituy/fullstack-roadmap)
