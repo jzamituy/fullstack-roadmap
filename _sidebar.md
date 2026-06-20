@@ -42,5 +42,8 @@
 - **Arquitectura**
   - [🔀 Event-driven aplicada](event-driven.md)
 
+- **Inteligencia Artificial**
+  - [🤖 IA Generativa y LLMs](ia-llms.md)
+
 - **Enlaces**
   - [Repositorio en GitHub](https://github.com/jzamituy/fullstack-roadmap)
