@@ -26,6 +26,8 @@ npm i -D @types/passport-jwt @types/bcrypt
 10. Refresh token: rotación y revocación
 11. Endurecer: rate limiting, fugas de información y OWASP
 12. OAuth 2.1 / "login con Google" (panorama)
+13. Segundo factor: 2FA/MFA con TOTP
+14. Recuperar contraseña (password reset) seguro
 
 Las soluciones de **todos** los ejercicios están al final, en la sección "Soluciones".
 
@@ -56,7 +58,7 @@ Un error conceptual común: devolver `401` y `403` indistintamente. **`401 Unaut
 Pero no cualquier hash sirve. `md5`/`sha256` son **demasiado rápidos**: un atacante prueba miles de millones por segundo. Para contraseñas se usan algoritmos **lentos a propósito** y con **salt** (un valor aleatorio por usuario que evita que dos contraseñas iguales den el mismo hash y frena los ataques con tablas precalculadas):
 
 - **bcrypt**: el clásico, probado, suficiente para la mayoría. Tiene un "cost factor" (cuánto trabajo cuesta).
-- **argon2**: el ganador moderno (resistente a ataques con GPU/ASIC). Si podés elegir, es la recomendación 2026.
+- **argon2 (variante `argon2id`)**: el ganador moderno (resistente a ataques con GPU/ASIC, que es donde bcrypt flaquea). Si podés elegir, es la recomendación 2026. Usá la variante **`argon2id`** y los defaults seguros de la librería (del orden de ~19 MiB de memoria, 2 iteraciones, paralelismo 1) ajustando según tu hardware.
 
 ```ts
 import * as bcrypt from "bcrypt";
@@ -103,6 +105,10 @@ const token = await this.jwt.signAsync(
   { secret: process.env.JWT_SECRET, expiresIn: "15m" },
 );
 ```
+
+**HS256 vs. RS256.** `HS256` firma con un **secreto compartido** (el mismo que firma, verifica): simple, ideal cuando un único servicio emite y valida. `RS256`/`ES256` usan un **par de claves**: el servidor firma con la **privada** y cualquiera valida con la **pública** — necesario cuando varios servicios (o un cliente) deben **verificar** tokens sin poder **emitirlos**.
+
+**El ataque que tenés que conocer (`alg:none` y confusión de algoritmo).** El `alg` viaja en el **header del token**, que el atacante controla. Dos ataques clásicos: poner `alg: "none"` (token sin firma, esperando que el server lo acepte) o cambiar `RS256`→`HS256` para que el verificador use la **clave pública** (que es conocida) como si fuera el secreto HMAC y así firmar tokens válidos. La defensa es una sola regla: **el servidor fija el algoritmo esperado y nunca confía en el `alg` del token**. En `passport-jwt`/`@nestjs/jwt` eso se hace pasando explícitamente `algorithms: ["HS256"]` al verificar (lo ves en el módulo 7).
 
 **Ejercicios 3**
 3.1 ¿El payload de un JWT está encriptado? ¿Qué garantiza entonces la firma?
@@ -163,6 +169,8 @@ res.cookie("refreshToken", refreshToken, {
 
 La conclusión que importa para vos como frontend: **`localStorage` para tokens es la opción cómoda y la menos segura**; si te preguntan en una entrevista "¿dónde guardás el JWT?", la respuesta que demuestra criterio es "el refresh en una cookie httpOnly/SameSite y el access en memoria, no en localStorage, por el riesgo de XSS".
 
+**Matices de `SameSite` y CSRF (clave en entrevista).** Si tu access token viaja en el header `Authorization: Bearer` (no en cookie), tu API es **inmune a CSRF** en esos endpoints: CSRF explota el envío **automático** de cookies por el navegador, y un header lo setea tu propio JS a propósito. El riesgo de CSRF aparece cuando autenticás **por cookie**. Sobre `SameSite`: `Strict` es fuerte pero puede romper flujos legítimos (llegar desde un link externo, login con terceros); `Lax` suele ser el default razonable. Y si tu SPA y tu API están en **dominios distintos**, la cookie tiene que ser `SameSite=None; Secure` (cross-site) y ahí **sí** necesitás una defensa CSRF explícita: token de **doble envío** (double-submit) o verificación del header `Origin` (más en el módulo 11).
+
 **Ejercicios 5**
 5.1 ¿Por qué guardar el token en `localStorage` es riesgoso? ¿Qué tipo de ataque lo explota?
 5.2 ¿Qué propiedad de una cookie evita que JavaScript la lea, y de qué ataque protege eso?
@@ -196,37 +204,44 @@ export class AuthService {
     return this.emitirTokens(usuario);
   }
 
+  // hash "dummy" precalculado (un bcrypt de cualquier valor) para igualar tiempos
+  private static readonly DUMMY_HASH = "$2b$12$abcdefghijklmnopqrstuv...";
+
   async login(dto: LoginDto): Promise<Tokens> {
     const usuario = await this.usuarios.findByEmail(dto.email);
-    // mismo mensaje exista o no el usuario: no revelamos cuáles emails existen (módulo 11)
-    if (!usuario) throw new UnauthorizedException("Credenciales inválidas");
-
-    const ok = await bcrypt.compare(dto.password, usuario.passwordHash);
-    if (!ok) throw new UnauthorizedException("Credenciales inválidas");
+    // Comparamos SIEMPRE contra un hash (real o dummy) para que el tiempo de respuesta
+    // sea igual exista o no el email: si no, un timing attack revela qué emails existen.
+    const hash = usuario?.passwordHash ?? AuthService.DUMMY_HASH;
+    const ok = await bcrypt.compare(dto.password, hash);
+    if (!usuario || !ok) throw new UnauthorizedException("Credenciales inválidas");
 
     return this.emitirTokens(usuario);
   }
 
-  private async emitirTokens(usuario: Usuario): Promise<Tokens> {
-    const payload = { sub: usuario.id, email: usuario.email, roles: usuario.roles };
-    const accessToken = await this.jwt.signAsync(payload, {
-      secret: this.config.get<string>("JWT_ACCESS_SECRET"),
-      expiresIn: "15m",
-    });
-    const refreshToken = await this.jwt.signAsync(payload, {
-      secret: this.config.get<string>("JWT_REFRESH_SECRET"),
-      expiresIn: "7d",
-    });
+  // familyId agrupa la "familia" de tokens de una sesión (módulo 10)
+  private async emitirTokens(usuario: Usuario, familyId = randomUUID()): Promise<Tokens> {
+    // El ACCESS lleva los datos de autorización (roles); el REFRESH es mínimo:
+    // solo identifica usuario y sesión. Los roles NO viajan en el refresh (módulo 10).
+    const accessToken = await this.jwt.signAsync(
+      { sub: usuario.id, email: usuario.email, roles: usuario.roles, type: "access" },
+      { secret: this.config.get<string>("JWT_ACCESS_SECRET"), expiresIn: "15m" },
+    );
+    const refreshToken = await this.jwt.signAsync(
+      { sub: usuario.id, type: "refresh", familyId, jti: randomUUID() },
+      { secret: this.config.get<string>("JWT_REFRESH_SECRET"), expiresIn: "7d" },
+    );
+    // guardamos el HASH del refresh (no el token en claro) bajo su familia
+    await this.refreshStore.guardar(familyId, sha256(refreshToken));
     return { accessToken, refreshToken };
   }
 }
 ```
 
-Detalles que separan a un junior de un mid acá: el login devuelve **el mismo mensaje** falle por email inexistente o por contraseña incorrecta (no le digas al atacante cuáles emails existen, módulo 11); el `passwordHash` **jamás** se devuelve en la respuesta (acordate del DTO de salida del módulo de patrones); y el secreto del access y el del refresh son **distintos**.
+Detalles que separan a un junior de un mid acá: el login devuelve **el mismo mensaje** falle por email inexistente o por contraseña incorrecta, y además **compara siempre contra un hash (real o dummy)** para no filtrar por **tiempo de respuesta** qué emails existen (timing attack, módulo 11); el `passwordHash` **jamás** se devuelve en la respuesta (DTO de salida del módulo de patrones); el secreto del access y el del refresh son **distintos**; y el access y el refresh llevan un claim `type` y **payloads distintos** — el refresh **no** lleva `roles`, para que al renovar los permisos se relean de la base y no queden "congelados" los viejos (módulo 10).
 
 **Ejercicios 6**
 6.1 ¿Por qué `login` devuelve "Credenciales inválidas" tanto si el email no existe como si la contraseña está mal, en vez de mensajes distintos?
-6.2 Escribí el `RegisterDto` con `email` (formato email) y `password` (mínimo 8 caracteres), reusando lo que sabés de `class-validator`.
+6.2 Escribí el `RegisterDto` con `email` (formato email) y `password` (mínimo 12 caracteres), reusando lo que sabés de `class-validator`.
 6.3 El `AuthService` inyecta el `UserRepository` por un token. ¿Qué ventaja te da eso para testear el login sin una base real? (Conectá con el patrón Repository.)
 
 ---
@@ -245,6 +260,7 @@ interface JwtPayload {
   sub: number;
   email: string;
   roles: string[];
+  type: "access" | "refresh";
 }
 
 @Injectable()
@@ -254,12 +270,15 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(), // lee "Authorization: Bearer <token>"
       ignoreExpiration: false, // rechaza tokens vencidos
       secretOrKey: config.getOrThrow<string>("JWT_ACCESS_SECRET"),
+      algorithms: ["HS256"], // FIJAR el algoritmo: nunca confiar en el `alg` del token (módulo 3)
     });
   }
 
-  // solo se llama si la firma y la expiración son válidas
+  // solo se llama si la firma, la expiración y el algoritmo son válidos
   async validate(payload: JwtPayload): Promise<JwtPayload> {
-    return { sub: payload.sub, email: payload.email, roles: payload.roles };
+    // un refresh token NO debe servir como access token
+    if (payload.type !== "access") throw new UnauthorizedException("Token inválido");
+    return { sub: payload.sub, email: payload.email, roles: payload.roles, type: "access" };
   }
 }
 ```
@@ -373,25 +392,41 @@ El orden importa: `AuthGuard("jwt")` corre primero y pobla `request.user`; `Role
 
 **Revocación.** Para poder invalidar un refresh token (logout, robo) tenés que tener **estado**: guardás el refresh token (o su hash) en la base o en **Redis**. Al renovar, verificás que siga siendo válido y no esté revocado. Esto rompe el "stateless puro" del JWT, pero **a propósito**: el refresh es justamente el token que querés poder cortar.
 
+**Familia de tokens, hash y roles frescos.** Tres prácticas que hacen la diferencia:
+
+- **Familia/`jti`**: cada login abre una **familia** (`familyId`) y cada refresh lleva un `jti` (id único). La revocación opera sobre la **familia**: detectar un reuso corta toda la sesión, no un token suelto.
+- **Guardá el hash**, no el token en claro (mismo criterio que las contraseñas).
+- **Releé el usuario de la base al rotar**: los `roles` del nuevo access salen de la **DB**, nunca de los claims del refresh viejo. Si no, a un usuario al que le revocaste `admin` le seguirías emitiendo tokens con `admin` hasta que expire el refresh — una **escalada de privilegios** silenciosa. Por eso el refresh no lleva `roles` (módulo 6).
+
 ```ts
 async refresh(refreshToken: string): Promise<Tokens> {
-  // 1. verificar firma y expiración
-  const payload = await this.jwt.verifyAsync<JwtPayload>(refreshToken, {
+  // 1. verificar firma, expiración y algoritmo; exigir que sea un token de tipo refresh
+  const payload = await this.jwt.verifyAsync<RefreshPayload>(refreshToken, {
     secret: this.config.getOrThrow("JWT_REFRESH_SECRET"),
+    algorithms: ["HS256"], // fijar el algoritmo (módulo 3)
   });
-  // 2. ¿sigue vigente en el store? (no revocado, no ya usado)
-  const guardadoOk = await this.refreshStore.esValido(payload.sub, refreshToken);
-  if (!guardadoOk) {
-    await this.refreshStore.revocarTodos(payload.sub); // posible reuso → cortar todo
+  if (payload.type !== "refresh") throw new UnauthorizedException("Token inválido");
+
+  // 2. ¿sigue vigente en el store? Comparamos el HASH, no el token en claro
+  const hash = sha256(refreshToken);
+  const vigente = await this.refreshStore.esValido(payload.familyId, hash);
+  if (!vigente) {
+    // ya fue usado/rotado → posible reuso por robo: cortar TODA la familia
+    await this.refreshStore.revocarFamilia(payload.familyId);
     throw new UnauthorizedException("Refresh token inválido");
   }
-  // 3. rotar: invalidar el viejo, emitir par nuevo
-  await this.refreshStore.invalidar(payload.sub, refreshToken);
-  return this.emitirTokens({ id: payload.sub, email: payload.email, roles: payload.roles });
+
+  // 3. rotar: invalidar el viejo dentro de la familia
+  await this.refreshStore.invalidar(payload.familyId, hash);
+
+  // 4. RELEER el usuario de la base: los roles salen de la DB, no del token viejo
+  const usuario = await this.usuarios.findById(payload.sub);
+  if (!usuario) throw new UnauthorizedException("Usuario inexistente");
+  return this.emitirTokens(usuario, payload.familyId); // par nuevo en la misma familia
 }
 ```
 
-El **logout** es entonces simple: borrás/revocás el refresh token del store (y el cliente descarta el access, que de todos modos expira en minutos). Buena práctica: guardá el **hash** del refresh token, no el token en claro — mismo razonamiento que con las contraseñas.
+El **logout** es entonces simple: revocás la familia del refresh token en el store (y el cliente descarta el access, que de todos modos expira en minutos).
 
 **Ejercicios 10**
 10.1 ¿Qué es la rotación de refresh tokens y qué ataque ayuda a detectar?
@@ -405,8 +440,11 @@ El **logout** es entonces simple: borrás/revocás el refresh token del store (y
 **Teoría.** Un sistema de auth funcional no es lo mismo que uno seguro. Lo que un Senior endurece (conecta con la sección de seguridad del archivo senior y el OWASP Top 10):
 
 - **Rate limiting**: limitá los intentos de login por IP/usuario para frenar **fuerza bruta** (probar miles de contraseñas). En Nest, `ThrottlerModule`. Sin esto, tu login es un blanco fácil.
-- **No filtrar qué emails existen**: el mensaje de login fallido es el mismo exista o no el usuario (módulo 6). Lo mismo en "recuperar contraseña": respondé siempre "si el email existe, te enviamos un link", nunca "ese email no está registrado" — eso es un **enumeration attack**.
-- **Validar toda entrada**: DTOs con `class-validator`, y para datos externos en runtime, Zod. La inyección (SQL, etc.) nace de confiar en input no validado; tu ORM tipado (módulo anterior) ya te protege de SQL injection si no concatenás strings a mano.
+- **Bloqueo tras N intentos**: complementá el rate limiting con un **lockout temporal** de la cuenta (o un captcha) ante muchos fallos seguidos — frena el credential stuffing dirigido a una cuenta concreta.
+- **No filtrar qué emails existen**: el mensaje de login fallido es el mismo exista o no el usuario, y la respuesta tarda lo mismo (timing, módulo 6). Lo mismo en "recuperar contraseña": respondé siempre "si el email existe, te enviamos un link", nunca "ese email no está registrado" — eso es un **enumeration attack**.
+- **Validar toda entrada**: DTOs con `class-validator`, y para datos externos en runtime, Zod. La protección contra **SQL injection** viene de **parametrizar** las queries (lo que el ORM hace por defecto), no del ORM "por arte de magia": una *raw query* con input interpolado a mano sigue siendo vulnerable.
+- **Defensa CSRF** (solo si autenticás por **cookie**): además de `SameSite`, usá un **token CSRF de doble envío** o verificá el header `Origin`. Si tu access token va por header `Authorization: Bearer`, CSRF no aplica (módulo 5).
+- **Headers de seguridad**: `helmet` en NestJS (HSTS, `X-Content-Type-Options`, etc.) y una **CSP** (Content-Security-Policy) que limita el daño de un XSS.
 - **Secretos fuera del código**: `JWT_*_SECRET` en variables de entorno, nunca en git, y rotables. Validalos al arrancar (el `fail fast` del módulo de config).
 - **HTTPS siempre** en producción: un token que viaja en HTTP plano se puede interceptar. La cookie con `Secure` ni siquiera se manda sin HTTPS.
 - **Tiempos de expiración cortos** en el access token: limita la ventana de daño si se filtra.
@@ -426,6 +464,14 @@ El principio que ordena todo (del archivo senior): **mínimo privilegio** (cada 
 
 El flujo (Authorization Code) en una frase: tu app redirige al usuario a Google → el usuario se loguea y autoriza → Google redirige de vuelta a tu app con un **código** → tu backend cambia ese código por los datos del usuario → creás (o encontrás) el usuario en tu base y le emitís **tus propios** tokens (los del módulo 4). Es decir: OAuth resuelve el "¿quién sos?" inicial, pero **tu** sistema de sesiones sigue siendo el de access/refresh que ya armaste.
 
+**Lo que en 2026 no puede faltar (OAuth 2.1).** Tres piezas que separan una respuesta actualizada de una de 2018:
+
+- **PKCE** (`code_verifier`/`code_challenge`): hace que un código interceptado **no sirva** sin el verificador. Es **obligatorio** en OAuth 2.1, no opcional.
+- **`state`**: un valor aleatorio que mandás y verificás al volver, para proteger el callback de **CSRF**.
+- **Validar el `id_token`** (OIDC): antes de confiar en la identidad, validá su **firma** contra las **JWKS** del proveedor y los claims `iss`, `aud`, `exp` y `nonce`. No alcanza con "Google me lo devolvió".
+
+El viejo *implicit flow* (token en el redirect) está **obsoleto**; hoy siempre es Authorization Code + PKCE.
+
 Por qué importa como concepto: a los usuarios les ahorra otra contraseña, y a vos te saca de encima el manejo de credenciales (no guardás contraseñas si todos entran por Google). En Nest se implementa con una **estrategia de Passport** (`passport-google-oauth20`) — el mismo patrón Strategy del módulo 7, otra estrategia intercambiable.
 
 Cuándo sumarlo: cuando tu producto lo pida (usuarios que ya tienen Google y no quieren otra cuenta). No es obligatorio para un MVP, pero saber **cómo encaja** (delega authN, vos seguís emitiendo tus tokens) es lo que demuestra criterio en una entrevista.
@@ -434,6 +480,73 @@ Cuándo sumarlo: cuando tu producto lo pida (usuarios que ya tienen Google y no 
 12.1 En "login con Google", ¿quién verifica la contraseña del usuario, tu backend o Google? ¿Qué recibís vos al final del flujo?
 12.2 Después de que Google confirma la identidad, ¿qué tokens usa tu app para las siguientes requests: los de Google o los tuyos? ¿Por qué?
 12.3 ¿Qué patrón de diseño (ya visto) se repite al implementar "login con Google" como otra estrategia de Passport?
+
+---
+
+## Módulo 13 — Segundo factor: 2FA/MFA con TOTP
+
+**Teoría.** La **autenticación multifactor (MFA)** suma, además de "algo que sabés" (la contraseña), "algo que **tenés**" (tu teléfono). La forma más común sin SMS (los SMS son interceptables) es **TOTP** (Time-based One-Time Password, RFC 6238): apps como Google Authenticator o Authy generan un código de 6 dígitos que cambia cada 30 segundos.
+
+¿Cómo funciona? En el **enrolamiento**, el servidor genera un **secreto** único por usuario y se lo muestra como **QR** (una URL `otpauth://...`) para que lo escanee con su app. Desde ahí, tanto el server como la app derivan el mismo código de 6 dígitos a partir de ese secreto + la hora actual. En el **login**, tras validar la contraseña, se pide el código y se verifica contra el secreto.
+
+```ts
+import { authenticator } from "otplib";
+
+// 1. enrolamiento: generás el secreto, lo guardás CIFRADO y mostrás el QR
+const secret = authenticator.generateSecret();
+const otpauth = authenticator.keyuri(usuario.email, "MiApp", secret);
+// → convertís `otpauth` en un QR para que el usuario lo escanee con su app
+
+// 2. en el login (segundo paso): verificás el código de 6 dígitos
+const ok = authenticator.verify({ token: codigoIngresado, secret });
+if (!ok) throw new UnauthorizedException("Código 2FA inválido");
+```
+
+Detalles que importan: guardá el **secreto cifrado** en la base (no en claro, y **nunca** en el JWT — viaja a la vista). Generá **backup codes** de un solo uso (hasheados, como contraseñas) para que el usuario no quede afuera si pierde el teléfono. Y recién marcá el 2FA como activo cuando el usuario confirma un primer código válido (así sabés que escaneó bien el QR).
+
+**Ejercicios 13**
+13.1 ¿Qué dos factores combina 2FA y por qué un código TOTP cuenta como "algo que tenés"?
+13.2 ¿Para qué sirven los backup codes y qué propiedad de seguridad deben tener (cómo se guardan)?
+13.3 ¿Dónde guardás el secreto TOTP del usuario? ¿Estaría bien meterlo en el JWT? Justificá.
+
+---
+
+## Módulo 14 — Recuperar contraseña (password reset) seguro
+
+**Teoría.** Casi toda app tiene "olvidé mi contraseña", y hacerlo mal es una vulnerabilidad clásica. El flujo seguro tiene dos endpoints:
+
+**`POST /auth/forgot`** — recibe un email y responde **siempre lo mismo** ("si el email existe, te enviamos un link"), exista o no (anti-enumeration, módulo 11). Si el usuario existe, generás un token **aleatorio criptográficamente seguro**, guardás su **hash** con un `expiresAt` corto (15-60 min) y lo enviás por email (el token en claro viaja **solo** en el email).
+
+**`POST /auth/reset`** — recibe el token + la nueva contraseña, busca por el **hash** del token, valida que no esté **vencido ni usado**, cambia el `passwordHash`, marca el token como **usado** (un solo uso) y **revoca las sesiones existentes** (las familias de refresh) para cerrar cualquier sesión del atacante.
+
+```ts
+import { randomBytes } from "node:crypto";
+
+async forgotPassword(email: string): Promise<void> {
+  const usuario = await this.usuarios.findByEmail(email);
+  if (!usuario) return; // el controlador responde 200 igual: respuesta neutra
+  const token = randomBytes(32).toString("hex");            // token en claro → va al email
+  await this.resetStore.guardar(usuario.id, sha256(token), enMinutos(60)); // guardamos el HASH
+  await this.mailer.enviarReset(email, token);
+}
+
+async resetPassword(token: string, nuevaPassword: string): Promise<void> {
+  const registro = await this.resetStore.buscarPorHash(sha256(token));
+  if (!registro || registro.usado || registro.expiraEl < new Date())
+    throw new BadRequestException("Token inválido o expirado");
+  const passwordHash = await bcrypt.hash(nuevaPassword, 12);
+  await this.usuarios.actualizarPassword(registro.usuarioId, passwordHash);
+  await this.resetStore.marcarUsado(registro.id);
+  await this.refreshStore.revocarTodas(registro.usuarioId); // cerrar sesiones existentes
+}
+```
+
+Por qué cada decisión: token **aleatorio** (no adivinable) y **hasheado** en la base (si te filtran la tabla, los hashes no sirven para resetear); **expiración corta** y **un solo uso** (limita la ventana); **respuesta neutra** (no filtrás emails); **revocar sesiones** (si el atacante ya tenía una sesión, el reset la corta).
+
+**Ejercicios 14**
+14.1 ¿Por qué `POST /auth/forgot` debe responder lo mismo exista o no el email?
+14.2 ¿Por qué se guarda el **hash** del token de reset y no el token en claro? Nombrá las tres propiedades que debe tener el token (aleatoriedad, expiración, un solo uso).
+14.3 Tras cambiar la contraseña, ¿por qué conviene revocar los refresh tokens existentes del usuario?
 
 ---
 
@@ -511,10 +624,8 @@ const coincide = await bcrypt.compare(passwordPlano, usuario.passwordHash); // a
 ```
 6.1 Para no revelar qué emails están registrados. Si dijeras "email no existe" vs.
     "contraseña incorrecta", un atacante podría enumerar cuentas válidas. Mismo mensaje
-    = no das información útil al atacante.
-6.3 Como el AuthService depende de la INTERFAZ UserRepository (por token), en los tests
-    le inyectás un repo en memoria o un mock que devuelva un usuario fijo, y probás
-    toda la lógica de login (hash, comparación, emisión de tokens) sin levantar Postgres.
+    (y mismo tiempo de respuesta, comparando contra un hash dummy) = no das información
+    útil al atacante.
 ```
 ```ts
 // 6.2
@@ -524,9 +635,16 @@ export class RegisterDto {
   @IsEmail()
   email!: string;
 
-  @MinLength(8)
+  @MinLength(12) // longitud > reglas de composición (guía NIST 2026)
   password!: string;
 }
+// Mejor aún: validar contra listas de contraseñas filtradas (have-i-been-pwned/zxcvbn)
+// en vez de exigir mayúsculas/símbolos, que empujan a passwords predecibles.
+```
+```
+6.3 Como el AuthService depende de la INTERFAZ UserRepository (por token), en los tests
+    le inyectás un repo en memoria o un mock que devuelva un usuario fijo, y probás
+    toda la lógica de login (hash, comparación, emisión de tokens) sin levantar Postgres.
 ```
 
 ### Módulo 7
@@ -620,6 +738,34 @@ borrar(@Param("id", ParseIntPipe) id: number): Promise<void> {
 12.3 El patrón Strategy: "login con Google" es otra estrategia de Passport
      (passport-google-oauth20), intercambiable con la estrategia JWT/local sin cambiar
      el resto de la app.
+```
+
+### Módulo 13
+```
+13.1 "Algo que sabés" (la contraseña) + "algo que tenés" (el teléfono con la app TOTP).
+     El código TOTP cuenta como "algo que tenés" porque se deriva de un secreto que solo
+     está en TU dispositivo (lo escaneaste del QR); un atacante con tu contraseña pero
+     sin tu teléfono no puede generarlo.
+13.2 Son códigos de un solo uso para entrar si perdés el teléfono (el segundo factor).
+     Se guardan HASHEADOS como las contraseñas (si te filtran la base, no sirven), y cada
+     uno se invalida al usarse.
+13.3 En la base, CIFRADO (no en claro). NUNCA en el JWT: el payload es legible (módulo 3),
+     así que meter el secreto TOTP ahí lo expondría en cada request, anulando el segundo
+     factor.
+```
+
+### Módulo 14
+```
+14.1 Para no filtrar qué emails están registrados (enumeration): si respondiera distinto
+     según exista o no, un atacante armaría una lista de cuentas válidas. Respuesta
+     neutra siempre: "si el email existe, enviamos el link".
+14.2 Porque si te filtran la tabla, un hash no permite resetear cuentas (no es el token
+     real); guardar el token en claro sería como guardar contraseñas en claro.
+     Propiedades: (1) aleatorio/criptográficamente seguro (no adivinable), (2) con
+     expiración corta, (3) de un solo uso (se invalida al consumirse).
+14.3 Porque si un atacante ya tenía una sesión activa (un refresh válido), cambiar la
+     contraseña no lo echaría: hay que revocar las familias de refresh del usuario para
+     cerrar todas las sesiones existentes y forzar re-login.
 ```
 
 ---
