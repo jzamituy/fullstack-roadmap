@@ -55,5 +55,8 @@
 - **Liderazgo técnico**
   - [🧭 De senior a Tech Lead](liderazgo.md)
 
+- **Track Python AI**
+  - [🐍 Python para quien viene de TS/Node](python.md)
+
 - **Enlaces**
   - [Repositorio en GitHub](https://github.com/jzamituy/fullstack-roadmap)
