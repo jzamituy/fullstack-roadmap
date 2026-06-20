@@ -19,6 +19,7 @@
 
 - **Bases de datos**
   - [🐘 PostgreSQL + ORM](postgresql.md)
+  - [🍃 NoSQL: MongoDB y DynamoDB](nosql.md)
 
 - **Seguridad**
   - [🔐 Autenticación y autorización](autenticacion.md)
