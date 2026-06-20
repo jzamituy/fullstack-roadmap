@@ -30,6 +30,7 @@
 - **DevOps**
   - [🐳 Docker, deploy y CI/CD](docker-deploy.md)
   - [☸️ Kubernetes: orquestación](kubernetes.md)
+  - [🔭 Observabilidad práctica](observabilidad.md)
 
 - **Caché y colas**
   - [⚡ Redis: caché, colas y jobs](redis.md)
