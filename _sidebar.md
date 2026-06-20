@@ -39,5 +39,8 @@
   - [☁️ AWS para backend](aws.md)
   - [🛠️ AWS hands-on con CDK](aws-practica.md)
 
+- **Arquitectura**
+  - [🔀 Event-driven aplicada](event-driven.md)
+
 - **Enlaces**
   - [Repositorio en GitHub](https://github.com/jzamituy/fullstack-roadmap)
