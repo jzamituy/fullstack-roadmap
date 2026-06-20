@@ -26,6 +26,7 @@
 
 - **Testing**
   - [🧪 Testing práctico](testing.md)
+  - [🔴 TDD como disciplina](tdd.md)
 
 - **DevOps**
   - [🐳 Docker, deploy y CI/CD](docker-deploy.md)
