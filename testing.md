@@ -90,26 +90,61 @@ describe("suma", () => {
 
 Un buen test prueba **una cosa** y su nombre describe el comportamiento esperado ("devuelve 404 si el usuario no existe"), no la implementación. Si el nombre del test es claro, cuando falla ya sabés qué se rompió sin leer el código.
 
+**Tests parametrizados (`it.each`).** Cuando el mismo comportamiento hay que verificarlo con varios inputs (varios emails inválidos, varios casos de un cálculo), no copies el test N veces: pasá una tabla y Jest corre un caso por fila. `describe.each` hace lo mismo a nivel de grupo.
+
+```ts
+describe("validación de email", () => {
+  it.each([
+    ["sin-arroba.com"],
+    ["@sin-usuario.com"],
+    ["espacio @test.com"],
+    [""],
+  ])("rechaza %s", (email) => {
+    expect(esEmailValido(email)).toBe(false);
+  });
+});
+```
+
+Cada fila es un caso independiente: si una falla, Jest te dice exactamente cuál (`rechaza @sin-usuario.com`) sin que tengas que adivinar entre cuatro tests casi idénticos. Es la forma estándar de cubrir bordes sin inflar el archivo.
+
 **Ejercicios 2**
 2.1 ¿Qué significan las tres "A" de AAA y qué va en cada parte?
 2.2 ¿Cuál es la diferencia entre `toBe` y `toEqual`? ¿Cuál usarías para comparar `{ id: 1 }` con `{ id: 1 }`?
 2.3 Escribí un test que verifique que una función `dividir(10, 0)` lanza una excepción. Pista: `toThrow`.
+2.4 Tenés cuatro tests casi iguales que verifican que `esPasswordValida` rechaza `""`, `"123"`, `"abc"` y `"        "`. Reescribilos como un solo `it.each`.
 
 ---
 
 ## Módulo 3 — Unit test de un service con un mock del repositorio
 
-**Teoría.** Acá se ve por qué valió la pena el patrón Repository. Tu `UsersService` depende de la **interfaz** `UserRepository`, no de la implementación concreta. En el test le pasás un **mock** (un objeto que cumple la interfaz) y probás toda la lógica del service **sin tocar la base**.
+**Teoría.** Acá se ve por qué valió la pena el patrón Repository. Tu `UsersService` depende de la **interfaz** `UserRepository` —es el alias en inglés del `UsuarioRepository` del módulo de patrones: misma idea, mismo rol— y no de la implementación concreta. En el test le pasás un objeto que **cumple esa interfaz** y probás toda la lógica del service **sin tocar la base**. (Técnicamente eso es un *stub*; en el módulo 4 distinguimos stub, mock y spy. Por ahora alcanza con "objeto falso que responde lo que yo le diga".)
+
+Recordá la interfaz y su token de inyección (un `Symbol`, no un string mágico, como en el módulo de patrones):
+
+```ts
+export const USER_REPO = Symbol("USER_REPO");
+
+interface UserRepository {
+  findById(id: number): Promise<Usuario | null>;
+  findByEmail(email: string): Promise<Usuario | null>;
+  save(u: Omit<Usuario, "id">): Promise<Usuario>;
+}
+```
+
+Con eso, el test del camino feliz y el del error:
 
 ```ts
 import { NotFoundException } from "@nestjs/common";
 
 describe("UsersService", () => {
   it("devuelve el usuario si existe", async () => {
-    // Arrange: mock del repositorio que devuelve un usuario fijo
+    // Arrange: stub del repositorio que devuelve un usuario fijo.
+    // Implementa TODA la interfaz aunque este test use solo findById:
+    // si el tipo es UserRepository, en --strict no podés omitir métodos.
     const usuarioFijo: Usuario = { id: 1, email: "ana@test.com", roles: ["user"] };
     const repoMock: UserRepository = {
       findById: async () => usuarioFijo,
+      findByEmail: async () => null,
       save: async (u) => ({ ...u, id: 1 }),
     };
     const service = new UsersService(repoMock);
@@ -124,6 +159,7 @@ describe("UsersService", () => {
   it("lanza NotFoundException si el usuario no existe", async () => {
     const repoMock: UserRepository = {
       findById: async () => null, // simulamos "no encontrado"
+      findByEmail: async () => null,
       save: async (u) => ({ ...u, id: 1 }),
     };
     const service = new UsersService(repoMock);
@@ -154,11 +190,16 @@ Jest los crea con `jest.fn()`:
 
 ```ts
 it("guarda el usuario con la contraseña hasheada", async () => {
-  const repoMock = {
+  // jest.Mocked<T> tipa cada método como jest.fn() respetando la interfaz:
+  // implementás los tres métodos y NO necesitás el `as unknown as` (un cast a
+  // ciegas que apaga el chequeo de tipos y esconde mocks que no cumplen la interfaz).
+  const repoMock: jest.Mocked<UserRepository> = {
+    findById: jest.fn(),
     findByEmail: jest.fn().mockResolvedValue(null), // stub: no existe ese email
     save: jest.fn().mockImplementation(async (u) => ({ ...u, id: 1 })),
   };
-  const service = new AuthService(repoMock as unknown as UserRepository, jwtMock, configMock);
+  // jwtMock y configMock: mocks de JwtService y ConfigService (mismo patrón)
+  const service = new AuthService(repoMock, jwtMock, configMock);
 
   await service.register({ email: "ana@test.com", password: "secreta123" });
 
@@ -195,7 +236,7 @@ describe("UsersService (con TestingModule)", () => {
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
         UsersService,
-        { provide: "USER_REPO", useValue: repoMock }, // mock en lugar del repo real
+        { provide: USER_REPO, useValue: repoMock }, // mock en lugar del repo real (mismo Symbol del módulo 3)
       ],
     }).compile();
 
@@ -217,8 +258,9 @@ Las piezas: `providers` arma el grafo de DI con tus mocks; `.compile()` lo const
 
 **Ejercicios 5**
 5.1 ¿Qué ventaja te da `Test.createTestingModule` sobre instanciar el service con `new` a mano?
-5.2 ¿Para qué sirve `{ provide: "USER_REPO", useValue: repoMock }` dentro de los `providers` del test?
+5.2 ¿Para qué sirve `{ provide: USER_REPO, useValue: repoMock }` dentro de los `providers` del test?
 5.3 ¿Por qué conviene llamar a `jest.clearAllMocks()` en un `afterEach`? ¿Qué problema evita?
+5.4 Escribí un `Test.createTestingModule` que inyecte un `repoMock` por el token `USER_REPO` y verifique que `obtener(1)` delega en `findById` con el argumento correcto.
 
 ---
 
@@ -266,10 +308,52 @@ describe("DrizzleUserRepository (integración)", () => {
 
 El segundo test es el argumento entero a favor de la integración: la restricción `UNIQUE` vive en Postgres, no en tu código TypeScript; un mock la ignoraría y te daría falsa confianza. Estos tests son más lentos (levantar Docker tarda segundos), por eso son **menos** que los unitarios — pero atrapan una categoría de bugs que ningún unitario ve.
 
+**Datos de prueba: builders y fixtures.** Apenas tus tests creen usuarios, proyectos y tareas, vas a repetir el mismo objeto una y otra vez. Un **builder** centraliza ese armado y deja sobreescribir solo lo que importa en cada test:
+
+```ts
+// makeUser: builder con valores por defecto + overrides puntuales
+function makeUser(overrides: Partial<Omit<Usuario, "id">> = {}): Omit<Usuario, "id"> {
+  return { email: "ana@test.com", roles: ["user"], ...overrides };
+}
+
+it("dos usuarios con emails distintos conviven", async () => {
+  await repo.save(makeUser({ email: "uno@test.com" }));
+  await repo.save(makeUser({ email: "dos@test.com" }));
+  // el test declara lo único relevante (los emails); el resto queda fuera de vista
+});
+```
+
+Así cada test dice solo lo que lo hace distinto y el ruido del setup desaparece. El mismo patrón sirve para sembrar datos comunes en un `beforeEach` (un *fixture*).
+
+**Variables de entorno: `.env.test`.** Tus tests de integración nunca deben pegarle a tu base de desarrollo. Con testcontainers la URL de la base sale del contenedor (`container.getConnectionUri()`), pero el resto de la config (claves JWT de prueba, flags) va en un **`.env.test`** separado, cargado solo en los tests:
+
+```ts
+// en el AppModule de test, o en un setup global de Jest
+ConfigModule.forRoot({ envFilePath: ".env.test" });
+```
+
+La regla: el entorno de test es **propio y descartable**, jamás el de desarrollo o producción.
+
+**Separar la suite lenta del watch (Jest `projects`) y aislar la DB.** Los tests de integración tardan segundos (levantan Docker); los unitarios, milisegundos. Si los mezclás, tu `test:watch` se vuelve inusable. La solución es separarlos en **proyectos** de Jest por convención de nombre:
+
+```ts
+// jest.config.ts
+export default {
+  projects: [
+    { displayName: "unit", testMatch: ["**/*.spec.ts"] },
+    { displayName: "int", testMatch: ["**/*.int-spec.ts"] },
+  ],
+};
+```
+
+Así corrés `jest --selectProjects unit` en el watch (instantáneo) e `int` en CI o a demanda. Para los de integración, dos cuidados de **aislamiento**: corrélos en serie (`--runInBand`) o, si querés paralelizar, dale a cada worker su propia base —un schema o una DB por `JEST_WORKER_ID`— para que no se pisen. Sin eso, dos tests escribiendo en la misma tabla a la vez producen flakiness (módulo 10).
+
 **Ejercicios 6**
 6.1 ¿Por qué el archivo senior dice que NO hay que mockear tu propia base de datos en los tests de integración?
 6.2 Nombrá dos tipos de bug que un test de integración contra Postgres atrapa y un unitario con mock no.
 6.3 ¿Qué ventaja da usar testcontainers en lugar de apuntar los tests a una base de datos instalada manualmente en tu máquina?
+6.4 Escribí un builder `makeUser(overrides)` con valores por defecto y usalo para crear dos usuarios con emails distintos en un test.
+6.5 Tu `npm test` tarda 40 s porque arranca Docker en cada corrida del watch. ¿Cómo separás la suite de integración de la de unit para que el watch vuelva a ser instantáneo?
 
 ---
 
@@ -295,7 +379,7 @@ describe("Usuarios (e2e)", () => {
     await app.init();
   });
 
-  afterAll(async () => await app.close()); // graceful shutdown del módulo de Node
+  afterAll(async () => await app.close()); // cierra la app Nest y sus hooks de shutdown; sin esto Jest queda colgado con handles abiertos
 
   it("POST /usuarios crea un usuario y devuelve 201", async () => {
     const res = await request(app.getHttpServer())
@@ -304,7 +388,8 @@ describe("Usuarios (e2e)", () => {
       .expect(201);
 
     expect(res.body.email).toBe("ana@test.com");
-    expect(res.body.password).toBeUndefined(); // el DTO de salida NO expone la contraseña
+    expect(res.body.password).toBeUndefined();     // el DTO de salida NO expone la contraseña
+    expect(res.body.passwordHash).toBeUndefined(); // ni el hash que sí vive en la base
   });
 
   it("POST /usuarios rechaza un email inválido con 400", async () => {
@@ -354,10 +439,12 @@ it("GET /proyectos con token válido devuelve 200", async () => {
 
 ```ts
 const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
-  .overrideGuard(AuthGuard("jwt"))
+  .overrideGuard(JwtAuthGuard) // la clase nombrada, no AuthGuard("jwt") (ver nota)
   .useValue({ canActivate: () => true }) // siempre pasa, en estos tests no probamos auth
   .compile();
 ```
+
+> **Cuidado:** `overrideGuard` matchea por la **clase** del guard, y `AuthGuard("jwt")` genera una clase mixin nueva en cada llamada — sobreescribir esa expresión directamente es frágil y puede no calzar con el guard que aplica el controller. El patrón robusto (y el que vas a ver en producción) es extraer tu guard a una clase nombrada —`export class JwtAuthGuard extends AuthGuard("jwt") {}`—, usarla en los controllers y sobreescribir **esa** clase.
 
 El criterio: si lo que estás probando **es** la autorización (que sin token da 401, que sin rol admin da 403), usá el flujo real. Si estás probando la lógica de proyectos y la auth solo se interpone, sobreescribí el guard para no acoplar cada test al login. Tené al menos **un** test que sí verifique que la protección funciona — si todos saltan el guard, nadie comprueba que las rutas están realmente protegidas.
 
@@ -402,6 +489,8 @@ La **cobertura de ramas** (branches) suele ser más reveladora que la de líneas
 
 Un olor a problema: si tenés que correr los tests "en cierto orden" para que pasen, o si limpiar la base entre tests los arregla, tenés un problema de aislamiento. Cada test debe poder correr solo y en cualquier orden.
 
+Ahora que sabés **escribir** tests confiables, el paso siguiente es invertir el orden: en **TDD** (archivo siguiente) el test va *primero* y maneja el diseño del código.
+
 **Ejercicios 10**
 10.1 ¿Qué es un test "flaky" y por qué es peor que no tener ese test?
 10.2 Nombrá tres causas típicas de flakiness.
@@ -436,6 +525,7 @@ Qué **no** mockear (recordatorio del módulo 6): tu propia base en los tests de
 11.1 ¿Por qué un test que usa `Date.now()` sin mockear puede volverse flaky? ¿Cómo lo controlás en Jest?
 11.2 ¿Por qué nunca deberías pegarle a la API real de un proveedor de pagos en un test? ¿Qué inyectarías en su lugar?
 11.3 Conectá con hexagonal: ¿cómo hace "depender de `PagoPort`" que testear el pago sea trivial y sin red?
+11.4 Escribí un test con fake timers que verifique que `crearTarea("Comprar pan")` fija `creadaEl` a un instante determinista. Acordate de restaurar el reloj al final.
 
 ---
 
@@ -466,6 +556,13 @@ Qué **no** mockear (recordatorio del módulo 6): tu propia base en los tests de
 // 2.3
 it("dividir por cero lanza error", () => {
   expect(() => dividir(10, 0)).toThrow();
+});
+
+// 2.4
+describe("esPasswordValida", () => {
+  it.each([[""], ["123"], ["abc"], ["        "]])("rechaza %j", (password) => {
+    expect(esPasswordValida(password)).toBe(false);
+  });
 });
 ```
 
@@ -509,11 +606,35 @@ it("registrar devuelve el usuario con id asignado", async () => {
 5.1 Construye el grafo de DI real con tus mocks: si el service tiene muchas
     dependencias, no las cableás a mano una por una, y probás que la inyección por
     tokens funciona como en producción. Más cercano a cómo Nest arma el service.
-5.2 Reemplaza el provider real del token "USER_REPO" por tu mock: cuando el service
-    pida ese token, Nest le inyecta el mock en lugar del repositorio real (Postgres).
+5.2 Reemplaza el provider real del token USER_REPO (un Symbol) por tu mock: cuando el
+    service pida ese token, Nest le inyecta el mock en lugar del repositorio real (Postgres).
 5.3 Para resetear los registros de llamadas y las implementaciones de los mocks entre
     tests. Evita que las llamadas de un test "se filtren" al siguiente y produzcan
     tests que pasan o fallan según el orden (falta de aislamiento).
+```
+```ts
+// 5.4
+import { Test, TestingModule } from "@nestjs/testing";
+
+describe("UsersService (TestingModule)", () => {
+  let service: UsersService;
+  const repoMock = { findById: jest.fn(), findByEmail: jest.fn(), save: jest.fn() };
+
+  beforeEach(async () => {
+    const moduleRef: TestingModule = await Test.createTestingModule({
+      providers: [UsersService, { provide: USER_REPO, useValue: repoMock }],
+    }).compile();
+    service = moduleRef.get(UsersService);
+  });
+
+  afterEach(() => jest.clearAllMocks());
+
+  it("obtener(1) delega en findById(1)", async () => {
+    repoMock.findById.mockResolvedValue({ id: 1, email: "ana@test.com", roles: ["user"] });
+    await service.obtener(1);
+    expect(repoMock.findById).toHaveBeenCalledWith(1);
+  });
+});
 ```
 
 ### Módulo 6
@@ -527,6 +648,22 @@ it("registrar devuelve el usuario con id asignado", async () => {
 6.3 testcontainers levanta una base efímera y limpia por corrida y la tira al terminar:
     reproducible, aislada y sin depender de que cada dev tenga una base instalada y en
     cierto estado. El mismo test corre igual en tu máquina y en el CI.
+6.5 Separás las suites en proyectos de Jest por convención de nombre (unit en *.spec.ts,
+    integración en *.int-spec.ts) y en el watch corrés solo el proyecto unit
+    (jest --selectProjects unit --watch). La suite de integración (Docker) queda para CI
+    o para correr a demanda, así el watch vuelve a ser instantáneo.
+```
+```ts
+// 6.4
+function makeUser(overrides: Partial<Omit<Usuario, "id">> = {}): Omit<Usuario, "id"> {
+  return { email: "ana@test.com", roles: ["user"], ...overrides };
+}
+
+it("guarda dos usuarios con emails distintos", async () => {
+  const uno = await repo.save(makeUser({ email: "uno@test.com" }));
+  const dos = await repo.save(makeUser({ email: "dos@test.com" }));
+  expect(uno.id).not.toBe(dos.id);
+});
 ```
 
 ### Módulo 7
@@ -602,9 +739,20 @@ it("GET /proyectos sin token devuelve 401", async () => {
      test le inyectás PagoFalsoAdapter (que implementa el puerto) y probás toda la lógica
      sin red, sin claves y en milisegundos. Es "testear el puerto, no el adaptador".
 ```
+```ts
+// 11.4
+it("crearTarea fija creadaEl al instante actual", () => {
+  jest.useFakeTimers().setSystemTime(new Date("2026-06-20T10:00:00Z"));
+
+  const tarea = crearTarea("Comprar pan");
+
+  expect(tarea.creadaEl).toEqual(new Date("2026-06-20T10:00:00Z"));
+  jest.useRealTimers(); // restaurar el reloj para no contaminar otros tests
+});
+```
 
 ---
 
 ## Siguientes pasos
 
-Con este módulo cerrás la teoría de testing del archivo senior con práctica concreta: unitarios con mocks para la lógica, integración con testcontainers para la persistencia, e2e con Supertest para los flujos críticos, y el criterio para que sean confiables. El recorrido natural desde acá: **(1)** llevá tu "Task API" a una cobertura **significativa** (>70% con foco en dominio y caminos de error), no a un 100% inflado; **(2)** integrá los tests al **pipeline de CI/CD** (el siguiente módulo, Docker + deploy): que cada push corra `lint → test → build` y no mergee si algo falla verde; **(3)** sumá **contract testing** el día que partas a microservicios (lo plantea el archivo senior). Tener una suite en la que confiás es lo que te deja refactorizar a hexagonal, cambiar de ORM o extraer un servicio sin miedo — todo lo que viene se apoya en esta red de seguridad.
+Con este módulo cerrás la teoría de testing del archivo senior con práctica concreta: unitarios con mocks para la lógica, integración con testcontainers para la persistencia, e2e con Supertest para los flujos críticos, y el criterio para que sean confiables. El recorrido natural desde acá: **(1)** llevá tu "Task API" a una cobertura **significativa** (>70% con foco en dominio y caminos de error), no a un 100% inflado —y más adelante, **mutation testing** (Stryker) mide lo que la cobertura no puede: si tus tests *detectan* un bug introducido a propósito, no solo si ejecutan la línea—; **(2)** integrá los tests al **pipeline de CI/CD** (el siguiente módulo, Docker + deploy): que cada push corra `lint → test → build` y no mergee si algo falla verde; **(3)** sumá **contract testing** el día que partas a microservicios (lo plantea el archivo senior). Tener una suite en la que confiás es lo que te deja refactorizar a hexagonal, cambiar de ORM o extraer un servicio sin miedo — todo lo que viene se apoya en esta red de seguridad.
