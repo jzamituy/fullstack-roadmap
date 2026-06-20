@@ -60,6 +60,7 @@
   - [⚡ FastAPI: APIs en Python](fastapi.md)
   - [✍️ Prompt Engineering](prompt-engineering.md)
   - [🧮 Vector Databases y RAG en Python](vector-dbs.md)
+  - [🦾 AI Agents en Python (LangGraph/AutoGen)](ai-agents-python.md)
 
 - **Enlaces**
   - [Repositorio en GitHub](https://github.com/jzamituy/fullstack-roadmap)
