@@ -85,10 +85,20 @@ La asimetría importante: **el ingest es caro pero infrecuente; el query es bara
 
 El principio que ordena todo: **mismo modelo de embeddings en ambos pipelines.** La pregunta y los chunks tienen que vivir en el mismo "espacio vectorial" para que la cercanía signifique algo. Si embeddeás los documentos con un modelo y la pregunta con otro, la búsqueda devuelve basura. (Corolario: si cambiás de modelo de embeddings, tenés que **reindexar todo**.)
 
+**El "día 2": qué pasa cuando un documento cambia o se borra.** El ingest no es de una sola vía. En producción los documentos se **editan y se borran**, y esto es lo que más rompe un RAG: si reinsertás un documento sin limpiar lo viejo, te quedan **chunks huérfanos** — y si un documento se borra pero sus chunks siguen en la base, el sistema sigue **recuperando y citando data que ya no debería existir** (una fuga / problema de compliance servido por tu propio retrieval). La regla es **re-ingest idempotente**: cada chunk guarda su `documento_id`, y el job de ingest, **antes de insertar**, borra los chunks viejos de ese documento (`DELETE FROM chunks WHERE documento_id = $1`) y recién entonces inserta los nuevos. Para evitar reprocesar lo que no cambió, guardás un **hash del contenido** del documento y salteás el re-ingest si el hash coincide. Para data revocada que no querés servir mientras se reprocesa, **soft-delete** (un flag que el `WHERE` del retrieval respeta). Esto es exactamente la **idempotencia** del módulo de colas (Redis/BullMQ): el job de ingest debe poder correr dos veces sobre el mismo documento y dejar la base igual.
+
+```sql
+-- Re-ingest idempotente: borrar lo viejo del documento, luego insertar lo nuevo
+-- (idealmente dentro de una transacción, como en el módulo de PostgreSQL)
+DELETE FROM chunks WHERE documento_id = $1;
+-- ... INSERT de los chunks nuevos ...
+```
+
 **Ejercicios 2**
 2.1 Nombrá los pasos de cada pipeline (ingest y query) en orden.
 2.2 ¿Por qué el ingest conviene correrlo en una cola y no en el request? Conectá con un módulo anterior.
 2.3 ¿Qué pasa si embeddeás los documentos con un modelo y la pregunta con otro distinto? ¿Qué implica al cambiar de modelo de embeddings?
+2.4 ¿Por qué un re-ingest "ingenuo" (solo insertar) es peligroso cuando un documento se edita o se borra? Describí el re-ingest idempotente y conectalo con la idempotencia del módulo de colas.
 
 ---
 
@@ -126,10 +136,37 @@ function chunkPorSecciones(markdown: string): string[] {
 }
 ```
 
+**Cortar por estructura no alcanza solo: el split jerárquico.** El caso real más común es una sección que, aun respetando el encabezado, **supera el tamaño objetivo en tokens** (una sección larga sigue siendo un chunk gigante). Por eso el chunking serio es de **dos pasadas**: primero partís por estructura (encabezados), y después **re-partís** las secciones que exceden el límite, idealmente por párrafos u oraciones y **manteniendo el overlap** entre los sub-chunks. Cortá por estructura *y* por tamaño, no una sola.
+
+```ts
+// Segunda pasada: re-partir las secciones que exceden el límite de tokens.
+// `contarTokens` usa el tokenizador real (módulo de LLMs), no `.length`.
+function rePartir(seccion: string, maxTokens = 500, overlap = 60): string[] {
+  if (contarTokens(seccion) <= maxTokens) return [seccion];
+  const parrafos = seccion.split(/\n\n+/);
+  const out: string[] = [];
+  let buffer = "";
+  for (const p of parrafos) {
+    if (buffer && contarTokens(`${buffer}\n\n${p}`) > maxTokens) {
+      out.push(buffer);
+      const cola = buffer.split(/\s+/).slice(-overlap).join(" "); // overlap por solapamiento
+      buffer = `${cola}\n\n${p}`;
+    } else {
+      buffer = buffer ? `${buffer}\n\n${p}` : p;
+    }
+  }
+  if (buffer) out.push(buffer);
+  return out;
+}
+
+declare function contarTokens(texto: string): number;
+```
+
 **Ejercicios 3**
 3.1 ¿Por qué se dice que el chunking es el error #1 de un RAG? Da el problema de chunks muy grandes y de chunks muy chicos.
 3.2 ¿Qué es el "chunking ingenuo" y por qué es malo? Nombrá dos estrategias mejores.
 3.3 ¿Cuál es la prueba de que un chunk está bien cortado? (la regla de auto-contención)
+3.4 (Implementación) Partir por encabezados deja una sección que igual supera ~500 tokens. ¿Por qué es un problema y qué hacés? Escribí (o completá `rePartir`) la segunda pasada que re-parte esa sección manteniendo overlap.
 
 ---
 
@@ -153,7 +190,7 @@ CREATE TABLE chunks (
 );
 ```
 
-La dimensión (`1024` arriba) la fija el modelo de embeddings: la columna `vector(N)` debe coincidir con la salida del modelo (ej. `voyage-3` produce 1024 dimensiones). Si cambiás de modelo con otra dimensión, cambia el esquema y reindexás (módulo 2).
+La dimensión (`1024` arriba) la fija el modelo de embeddings: la columna `vector(N)` debe coincidir con la salida del modelo. El modelo de Voyage vigente al escribir esto es **`voyage-3.5`** (1024 dimensiones por defecto); `voyage-3` también produce 1024. Tomá el `1024` como ejemplo y **verificá la dimensión real de tu modelo** en `docs.voyageai.com` antes de crear la tabla. Si cambiás de modelo con otra dimensión, cambia el esquema y reindexás (módulo 2).
 
 Para buscar rápido necesitás un **índice vectorial**. Sin índice, Postgres compara la pregunta contra **todos** los vectores (full scan) — funciona con miles de filas, no con millones. pgvector ofrece **HNSW** (el default razonable hoy: muy rápido en lectura, buena precisión) e **IVFFlat**. Esto conecta con lo que viste en PostgreSQL: igual que un índice B-tree acelera un `WHERE`, el índice HNSW acelera la búsqueda por cercanía — y, como todo índice, **es una aproximación con un trade-off** (velocidad vs. recall: puede no devolver el vecino exacto). Lo verificás con `EXPLAIN`, igual que cualquier query.
 
@@ -162,10 +199,23 @@ Para buscar rápido necesitás un **índice vectorial**. Sin índice, Postgres c
 CREATE INDEX ON chunks USING hnsw (embedding vector_cosine_ops);
 ```
 
+**¿HNSW o IVFFlat?** El criterio práctico:
+
+| | HNSW | IVFFlat |
+|---|---|---|
+| Velocidad de lectura | muy alta | buena |
+| Recall (a igual velocidad) | mejor | bueno |
+| Memoria | más (grafo en RAM) | menos |
+| Build del índice | más lento | más rápido |
+| Parámetros clave | `m`, `ef_construction` (build); `hnsw.ef_search` (query) | `lists` (build); `ivfflat.probes` (query) |
+
+**Default: HNSW**, salvo que la memoria sea un problema o tengas decenas de millones de vectores donde el build de HNSW duela. Detalle que sorprende a muchos: **IVFFlat se construye *después* de cargar los datos** (necesita los vectores existentes para calcular sus `lists`/clusters; un IVFFlat sobre tabla vacía da recall malo). En ambos, subir el parámetro de query (`hnsw.ef_search` / `ivfflat.probes`) mejora recall a costa de latencia — el mismo trade-off velocidad/recall, ahora como perilla que movés y medís con `EXPLAIN (ANALYZE)`.
+
 **Ejercicios 4**
 4.1 ¿Qué es una vector database y qué ventaja concreta da usar pgvector sobre Postgres en vez de una base vectorial aparte?
 4.2 ¿Qué fija la dimensión de la columna `vector(N)` y qué pasa si cambiás de modelo de embeddings?
 4.3 ¿Para qué sirve un índice HNSW y con qué concepto del módulo de PostgreSQL lo conectás? ¿Qué trade-off tiene?
+4.4 ¿Cuándo elegirías IVFFlat sobre HNSW, y qué cuidado tiene IVFFlat respecto al momento de crear el índice? Nombrá la perilla que sube recall a costa de latencia en cada uno.
 
 ---
 
@@ -190,14 +240,27 @@ LIMIT 5;
 
 Nota técnica clave: el índice HNSW se usa **solo si el `ORDER BY` matchea el operador del índice** (`vector_cosine_ops` ↔ `<=>`). Si ordenás por otra distancia, el índice no aplica y caés en full scan — exactamente el tipo de detalle que verificás con `EXPLAIN`, como en el módulo de PostgreSQL.
 
+Segundo detalle, y este sí muerde en producción: el `WHERE tenant_id = $2` + el índice HNSW es **filtered search**, y combinar un filtro **muy selectivo** con `LIMIT k` puede **degradar el recall**. HNSW navega el grafo de vectores y descarta los que no pasan el `WHERE`; si el tenant tiene pocos chunks entre millones, el grafo puede agotar su exploración antes de juntar k resultados que pasen el filtro, y te devuelve **menos de k** o vecinos peores. Las salidas: subir `hnsw.ef_search` (explora más nodos, a costa de latencia), un **índice parcial** por tenant, o **particionar** la tabla por `tenant_id`. Verificalo con `EXPLAIN (ANALYZE)` — lo retomamos en el módulo 9, que es donde el filtro de permisos se vuelve obligatorio.
+
 En el código, envuelto detrás de una interfaz (el patrón Repository / puerto que ya usás, para no acoplar tu lógica a pgvector):
 
 ```ts
+// Firmas asumidas (las provee tu infra; declaradas para que el ejemplo compile en --strict).
+// `db.query<T>` devuelve las filas ya tipadas como T[].
+declare function embeddear(
+  textos: string[],
+  tipo: "document" | "query",
+): Promise<number[][]>;
+declare function toSqlVector(v: number[]): string; // ej. "[0.1,0.2,...]"
+declare const db: {
+  query<T>(sql: string, params: unknown[]): Promise<T[]>;
+};
+
 async function recuperar(pregunta: string, tenantId: number, k = 5): Promise<string[]> {
   // 1. mismo modelo de embeddings que en el ingest
   const [vector] = await embeddear([pregunta], "query"); // ver nota sobre input_type abajo
   // 2. búsqueda vectorial filtrada por permisos
-  const filas = await db.query(
+  const filas = await db.query<{ contenido: string }>(
     `SELECT contenido FROM chunks
      WHERE tenant_id = $2
      ORDER BY embedding <=> $1
@@ -216,14 +279,27 @@ Un detalle que sube la calidad gratis: muchos modelos de embeddings (Voyage entr
 5.1 Describí los tres pasos del retrieval vectorial dado una pregunta.
 5.2 ¿Qué hace el operador `<=>` en pgvector, y por qué el `ORDER BY` debe matchear el operador del índice?
 5.3 La búsqueda siempre devuelve k chunks. ¿Por qué eso es un problema y qué dos módulos lo mitigan?
+5.4 (Implementación) Escribí la query SQL de retrieval que (a) filtra por `tenant_id`, (b) ordena por distancia coseno y (c) limita a k, y que **use el índice HNSW**. ¿Qué tendría que pasar en el `ORDER BY` para que el índice NO se use?
 
 ---
 
 ## Módulo 6 — Retrieval híbrido (vectorial + BM25) y reranking
 
-**Teoría.** La búsqueda vectorial es genial para **significado** ("olvidé mi clave" matchea "resetear contraseña"), pero floja para **coincidencias exactas**: un código de error `ERR_4021`, el nombre propio `Zamit`, un SKU, un número de cláusula. Esos los encuentra mejor la búsqueda **léxica por palabras clave** — el clásico **BM25** (lo que hace un buscador full-text tradicional, incluido el de Postgres con `tsvector`).
+**Teoría.** La búsqueda vectorial es genial para **significado** ("olvidé mi clave" matchea "resetear contraseña"), pero floja para **coincidencias exactas**: un código de error `ERR_4021`, el nombre propio `Zamit`, un SKU, un número de cláusula. Esos los encuentra mejor la búsqueda **léxica por palabras clave** — el clásico **BM25**, el algoritmo de ranking de los buscadores full-text. Precisión importante: el full-text nativo de Postgres (`tsvector` + `ts_rank`) te da búsqueda léxica, **pero `ts_rank` no es BM25** — es una función de ranking propia, una aproximación más simple. Para la mayoría de los RAG el full-text de Postgres alcanza y te ahorra otro sistema; si necesitás BM25 real (dominios con mucho término técnico donde el ranking léxico fino importa), lo dan extensiones de Postgres orientadas a BM25 o un motor de búsqueda dedicado (Elasticsearch/OpenSearch). Para los ejercicios tratamos "léxica" y "BM25" como sinónimos conceptuales, con esta salvedad presente.
 
-El **retrieval híbrido** combina las dos: corrés la búsqueda vectorial **y** la léxica, y fusionás los resultados (una técnica común es **Reciprocal Rank Fusion**, que combina los rankings sin necesitar que las puntuaciones sean comparables). Capturás lo mejor de ambos mundos: semántica + exactitud. Saltarse el híbrido y quedarse solo en vectorial es un error frecuente cuando el dominio tiene muchos términos exactos (código, legal, productos).
+El **retrieval híbrido** combina las dos: corrés la búsqueda vectorial **y** la léxica, y fusionás los resultados. Capturás lo mejor de ambos mundos: semántica + exactitud. Saltarse el híbrido y quedarse solo en vectorial es un error frecuente cuando el dominio tiene muchos términos exactos (código, legal, productos).
+
+¿Cómo se fusionan dos rankings cuyos scores **no son comparables** (la distancia coseno y el score de `ts_rank`/BM25 viven en escalas distintas)? La técnica estándar es **Reciprocal Rank Fusion (RRF)**, y su truco es justamente **ignorar los scores y usar solo la posición (rank)**. Para cada documento, su puntaje RRF es la suma sobre cada lista de `1 / (k + rank)`, donde `rank` es su posición (1, 2, 3, …) en esa lista y `k` es una constante (típicamente 60) que amortigua el peso de los primeros puestos. Un documento que aparece alto en ambas listas acumula puntaje de las dos.
+
+Ejemplo: el chunk **A** sale 1.º en vectorial y 3.º en léxica; el **B** sale 2.º en vectorial y no aparece en léxica (con k=60):
+
+```
+RRF(A) = 1/(60+1) + 1/(60+3) = 0.01639 + 0.01587 = 0.03226
+RRF(B) = 1/(60+2)            = 0.01613
+→ A queda por encima de B: aparecer en ambas listas pesa más que un buen puesto en una sola.
+```
+
+Se fusiona por **rank** y no por score crudo precisamente porque sumar una distancia coseno (0–2) con un `ts_rank` (otra escala) no significa nada; el rank, en cambio, es comparable entre listas.
 
 El segundo refuerzo es el **reranking**, y **saltárselo es otro de los errores típicos**. El problema: el retrieval (vectorial o híbrido) está optimizado para ser **rápido sobre millones de chunks**, no para ser **preciso**. Trae, digamos, los 20 candidatos "más o menos buenos". Un **reranker** es un modelo más pesado (un cross-encoder, ej. `rerank-2` de Voyage) que mira **la pregunta y cada candidato juntos** y los reordena por relevancia real. Es caro por candidato, así que solo se aplica a los pocos que el retrieval ya filtró:
 
@@ -293,12 +369,35 @@ Las decisiones que separan un RAG serio de uno que alucina:
 - **Separar contexto de instrucciones con etiquetas XML** (`<contexto>`, `<pregunta>`): lo que aprendiste en prompting — distingue tus instrucciones del dato, y es la primera defensa contra **prompt injection** (módulo de LLMs): un documento malicioso podría contener "ignorá lo anterior y...". Acá el riesgo es real porque el contexto viene de **tu data, que puede incluir input de usuarios**.
 - **Citar la fuente**: como sabés qué chunk usaste, podés mostrar la cita. Da trazabilidad y deja al usuario verificar.
 
-Conexión con lo anterior: la generación es una **llamada normal a la Messages API** (módulo 2 de LLMs), con todo lo que ya sabés —streaming para mostrar la respuesta a medida que sale, structured output si querés la respuesta como JSON con campos `respuesta` + `fuentes`, model tiering para elegir el modelo. RAG no es una API nueva: es **buena recuperación + un prompt bien armado** sobre la API que ya conocés.
+> **Citación manual ≠ la feature Citations de Anthropic.** El `[1]`/`[2]` entre corchetes del prompt de arriba es **citación manual**: vos numerás los chunks y le pedís al modelo que devuelva el número en el texto. Es distinta de la **feature nativa Citations** de la Messages API (que ancla afirmaciones a spans del documento). Detalle que muerde: **Citations nativas y `output_config.format` (structured output) son incompatibles** — combinarlas devuelve un **400**. Entonces, si querés una respuesta **JSON estructurada con fuentes**, las fuentes van como **un campo del schema** (ej. `{ respuesta: string, fuentes: number[] }`, con los números de chunk), **no** vía la feature Citations. Elegí uno de los dos caminos, no los dos a la vez.
+
+Conexión con lo anterior: la generación es una **llamada normal a la Messages API** (módulo 2 de LLMs), con todo lo que ya sabés —streaming para mostrar la respuesta a medida que sale, structured output si querés la respuesta como JSON con campos `respuesta` + `fuentes` (ver la nota de arriba), model tiering para elegir el modelo. RAG no es una API nueva: es **buena recuperación + un prompt bien armado** sobre la API que ya conocés.
+
+**El presupuesto de tokens del contexto.** Recuperar k chunks no es gratis: cada chunk que metés en `<contexto>` son **tokens de input que pagás en cada query** y que ocupan la ventana del modelo. Dos errores de junior acá: (1) meter k grande "por las dudas" y disparar el costo por request; (2) no controlar el tamaño y, si los chunks son largos, **exceder la ventana de contexto** (o empujar la pregunta tan abajo que el modelo la atiende peor — *lost in the middle*). La disciplina es un **token budget**: definí un tope de tokens para el contexto, **contá** los tokens de los chunks recuperados (con el contador del módulo de LLMs, no `.length`) y, si te pasás, **recortá** — menos k, o quedarte con los mejores tras el rerank, o resumir los chunks de más abajo. Concretamente: rerank (módulo 6) ordena por relevancia → vas sumando chunks **mientras entren en el presupuesto** y cortás cuando se llena. Así el costo por query es **acotado y predecible**, no función del azar del retrieval.
+
+```ts
+declare function contarTokens(texto: string): number; // tokenizador real (módulo de LLMs)
+
+// Llená el contexto con los chunks ya rerankeados hasta agotar el presupuesto.
+function armarContexto(chunksRankeados: string[], maxTokens = 4000): string[] {
+  const elegidos: string[] = [];
+  let usados = 0;
+  for (const chunk of chunksRankeados) {
+    const t = contarTokens(chunk);
+    if (usados + t > maxTokens) break; // entra el mejor que quepa, no más
+    elegidos.push(chunk);
+    usados += t;
+  }
+  return elegidos;
+}
+```
 
 **Ejercicios 8**
 8.1 ¿Qué dos instrucciones en el prompt son las que más reducen la alucinación en RAG, y qué hace cada una?
 8.2 ¿Por qué hay que separar el contexto recuperado de las instrucciones con etiquetas? ¿Por qué el riesgo de prompt injection es especialmente real en RAG?
 8.3 Conectá la generación con el módulo de LLMs: ¿qué tres cosas que ya sabés aplicás tal cual en este paso?
+8.4 ¿Por qué traer k grande "por las dudas" es un problema de costo y de ventana? Describí (o completá `armarContexto`) la estrategia de token budget sobre los chunks ya rerankeados.
+8.5 Querés devolver la respuesta como JSON con un campo `fuentes`. ¿Podés usar la feature nativa Citations de Anthropic para eso? ¿Por qué? ¿Cómo lo resolvés entonces?
 
 ---
 
@@ -329,6 +428,7 @@ El principio integrador (del archivo senior): **defensa en profundidad** y **mí
 9.1 ¿Por qué la búsqueda vectorial sola no respeta permisos, y qué puede pasar en un sistema multi-tenant si no filtrás?
 9.2 ¿Por qué pgvector hace el filtrado por permisos más simple que una base vectorial aparte?
 9.3 ¿Por qué hay que filtrar antes/durante la búsqueda y no después? Da el problema concreto de filtrar después.
+9.4 (Implementación) Escribí la query de retrieval multi-tenant con (a) filtro obligatorio por `tenant_id`, (b) filtro opcional por `proyecto_id` (NULL = todos), (c) orden por coseno y (d) `LIMIT k`. Después explicá qué riesgo de recall introduce el `WHERE` muy selectivo y cómo lo verificás (pista: módulo 5, filtered search).
 
 ---
 
@@ -371,12 +471,43 @@ Y el consejo de "empezá simple" del módulo de LLMs aplica acá: **no armes un 
 
 Cómo se mide en la práctica: armás un **golden set** —un conjunto de preguntas con su respuesta correcta y el/los chunk(s) que la contienen—. El recall@k se calcula con código (¿el chunk esperado está entre los k?). La faithfulness y la relevancia, al ser sobre texto libre, se evalúan con **LLM-as-judge**: otro LLM (o el mismo) puntúa si la respuesta es fiel al contexto y relevante a la pregunta. Esto es exactamente el puente al **módulo de Evals** del track, donde lo desarrollamos.
 
-El principio (el mismo del archivo senior y del módulo de costo de LLMs): **medí antes de optimizar.** Sin separar retrieval de generación, vas a "mejorar el prompt" cuando el problema era el chunking, o a tocar el chunking cuando el modelo estaba alucinando con buen contexto. Instrumentá las dos capas por separado y atacá la que mide mal.
+Un cuidado con el juez: el LLM-as-judge **también puede equivocarse** (sesgos conocidos: favorecer respuestas largas, su propio estilo, la primera opción). Usá un modelo **igual o superior** al que evaluás, y **calibrá el juez** contra un puñado de juicios humanos antes de confiar en sus números — si el juez no correlaciona con humanos, sus scores son ruido. (Esto lo profundiza el módulo de Evals.)
+
+**3. ¿Y el costo y la latencia?** "Calidad" no es la única métrica que se evalúa en una entrevista de AI Engineer. Un RAG de producción tiene un presupuesto **operacional** que también medís:
+
+- **Latencia (p95 end-to-end).** El query es una **suma de llamadas de red en serie**: embedding de la pregunta → búsqueda vectorial (+ léxica) → rerank → generación. Mirá el **p95**, no el promedio (el promedio esconde la cola que sufren los usuarios). Mitigás cacheando embeddings de preguntas frecuentes, paralelizando lo que no depende entre sí (vectorial y léxica en paralelo), o recortando etapas para queries simples.
+- **Costo por query.** Cada pregunta = 1 embedding + los **tokens de contexto** que metés (de ahí el token budget del módulo 8) + la generación. El rerank suma una llamada por candidato; Contextual Retrieval es costo de **ingest** (una vez), no de query.
+
+El trade-off que tenés que saber defender: **subir k mejora el recall pero empeora latencia y costo** (más candidatos a rerankear, más tokens al prompt). No hay un k "correcto" universal — lo elegís midiendo recall@k contra tu golden set *y* mirando qué le hace a tu p95 y a tu costo por query.
+
+El principio (el mismo del archivo senior y del módulo de costo de LLMs): **medí antes de optimizar.** Sin separar retrieval de generación, vas a "mejorar el prompt" cuando el problema era el chunking, o a tocar el chunking cuando el modelo estaba alucinando con buen contexto. Instrumentá las tres dimensiones —retrieval, generación y operación (latencia/costo)— por separado y atacá la que mide mal.
 
 **Ejercicios 11**
 11.1 ¿Cuáles son los dos lugares donde puede fallar un RAG, y por qué hay que medirlos por separado?
 11.2 ¿Qué mide recall@k y qué te dice un recall@k bajo sobre dónde está el problema?
-11.3 ¿Qué es la faithfulness y por qué no alcanza con que la respuesta "suene bien"? ¿Cómo se mide algo así sobre texto libre?
+11.3 ¿Qué es la faithfulness y por qué no alcanza con que la respuesta "suene bien"? ¿Cómo se mide algo así sobre texto libre? ¿Qué cuidado tenés con el LLM-as-judge?
+11.4 Subís k de 5 a 20 y el recall@k mejora. ¿Qué le pasa a la latencia p95 y al costo por query, y por qué? ¿Cómo decidís el k final? (razoná el trade-off recall ↔ latencia/costo)
+
+---
+
+## Proyecto integrador (capstone): un RAG sobre tus propios apuntes
+
+Hasta acá viste cada pieza por separado. Este es el ejercicio que cierra el módulo —y el que mostrás en una entrevista de AI Engineer cuando te piden "¿armaste un RAG?"—: **un RAG funcional end-to-end sobre los propios apuntes de este sitio** (los `.md` del repo). No te damos la solución completa; te damos los **criterios de aceptación**. Construilo vos.
+
+**Qué construir.** Una mini-app de consola (TS/NestJS) con dos comandos:
+
+1. **`ingest`** — toma una carpeta de `.md`, los chunkea por estructura + re-particiona por tamaño (módulo 3), embeddéa cada chunk con Voyage como `"document"` (módulos 2 y 5), y guarda `(documento_id, tenant_id, contenido, embedding)` en pgvector con su índice HNSW (módulo 4). **Re-ingest idempotente**: correrlo dos veces sobre el mismo archivo no duplica chunks (módulo 2).
+2. **`query "<pregunta>"`** — embeddéa la pregunta como `"query"`, recupera los k vecinos filtrando por `tenant_id` (módulos 5 y 9), arma el contexto respetando un token budget (módulo 8), genera la respuesta con Claude con el prompt grounded (módulo 8) y **muestra las fuentes** (qué chunks/archivos usó).
+
+**Criterios de aceptación.**
+- [ ] `ingest` corrido dos veces deja la misma cantidad de chunks (idempotencia verificable con un `COUNT`).
+- [ ] El código TS compila en `--strict`.
+- [ ] La query filtra por `tenant_id` en la misma SQL que el `ORDER BY ... <=>` (no después).
+- [ ] Si la pregunta no tiene respuesta en los apuntes, el sistema responde "No tengo esa información" (no alucina).
+- [ ] La respuesta muestra las fuentes (al menos el archivo/sección de cada chunk citado).
+- [ ] Respondés correctamente **3 preguntas** cuya respuesta está en distintos módulos de estos apuntes, mostrando las fuentes.
+
+**Extensiones (opcionales, suben el nivel).** Agregá retrieval híbrido + RRF (módulo 6); medí recall@k sobre un mini golden set de 10 preguntas (módulo 11); compará la respuesta con y sin Contextual Retrieval (módulo 7); mostrá la latencia por etapa y el costo por query (módulo 11).
 
 ---
 
@@ -408,6 +539,12 @@ El principio (el mismo del archivo senior y del módulo de costo de LLMs): **med
 2.3 La búsqueda devuelve basura: la pregunta y los chunks viven en espacios vectoriales
     distintos y la "cercanía" deja de significar nada. Al cambiar de modelo de embeddings
     hay que reindexar TODO (reembeddear todos los chunks).
+2.4 Porque al editar/borrar un documento, solo insertar deja chunks viejos (huérfanos) y
+    el sistema sigue recuperando/citando data que ya no debería existir (fuga/compliance).
+    Re-ingest idempotente: el job borra los chunks del documento (DELETE ... WHERE
+    documento_id) antes de reinsertar, usa un hash del contenido para saltear lo no
+    cambiado, y soft-delete para data revocada. Es la misma idempotencia del módulo de
+    colas: correr el job dos veces sobre el mismo documento deja la base igual.
 ```
 
 ### Módulo 3
@@ -421,6 +558,10 @@ El principio (el mismo del archivo senior y del módulo de costo de LLMs): **med
     tamaño en tokens, no en caracteres.)
 3.3 La auto-contención: si alguien lo lee aislado, entiende de qué habla. Si para entenderlo
     necesita el párrafo anterior, está mal cortado o le falta contexto (Contextual Retrieval).
+3.4 Porque una sección, aun cortada por encabezado, puede superar el tamaño objetivo y volverse
+    un chunk gigante (embedding difuso, quema tokens). Solución: segunda pasada que re-parte esa
+    sección por párrafos/oraciones manteniendo overlap, hasta que cada sub-chunk entre en el
+    límite de tokens (split jerárquico: por estructura Y por tamaño).
 ```
 
 ### Módulo 4
@@ -435,6 +576,11 @@ El principio (el mismo del archivo senior y del módulo de costo de LLMs): **med
     todos los vectores (full scan). Se conecta con los índices del módulo de PostgreSQL:
     igual que un B-tree acelera un WHERE, HNSW acelera el ORDER BY por distancia. Trade-off:
     es una aproximación (velocidad vs. recall: puede no devolver el vecino exacto).
+4.4 IVFFlat cuando la memoria importa o tenés muchísimos vectores y el build de HNSW duele;
+    HNSW es el default (mejor recall a igual velocidad). Cuidado de IVFFlat: se construye
+    DESPUÉS de cargar datos (necesita los vectores para calcular sus lists/clusters; sobre
+    tabla vacía da recall malo). Perillas de recall vs latencia: hnsw.ef_search (HNSW) e
+    ivfflat.probes (IVFFlat) — subirlas mejora recall y cuesta latencia.
 ```
 
 ### Módulo 5
@@ -447,6 +593,10 @@ El principio (el mismo del archivo senior y del módulo de costo de LLMs): **med
 5.3 Porque "cercano" no es "correcto": devuelve los k más cercanos aunque ninguno sea
     relevante, lo que puede meter ruido en el prompt. Lo mitigan el rerank (módulo 6, reordena
     por relevancia real) y los evals (módulo 11, miden si se recuperó lo correcto).
+5.4 SELECT contenido FROM chunks WHERE tenant_id = $2 ORDER BY embedding <=> $1 LIMIT $3.
+    Usa HNSW porque el ORDER BY usa <=> (coseno), el mismo operador del índice
+    (vector_cosine_ops). Si ordenaras por otra distancia (ej. <-> L2 o <#> producto interno)
+    el índice vector_cosine_ops NO aplica y caés en full scan (verificable con EXPLAIN).
 ```
 
 ### Módulo 6
@@ -491,6 +641,14 @@ El principio (el mismo del archivo senior y del módulo de costo de LLMs): **med
 8.3 (1) Es una llamada normal a la Messages API. (2) Streaming para mostrar la respuesta a
     medida que sale. (3) Structured output si querés la respuesta como JSON (respuesta +
     fuentes). (También: model tiering para elegir el modelo.)
+8.4 Porque cada chunk son tokens de input que pagás en CADA query y ocupan la ventana; k grande
+    dispara el costo y puede exceder la ventana o empujar la pregunta abajo (lost in the middle).
+    Token budget: contar tokens (con el tokenizador real) de los chunks ya rerankeados e ir
+    sumándolos hasta un tope; entra el mejor que quepa, cortás cuando se llena. Costo por query
+    acotado y predecible.
+8.5 No con la feature nativa Citations: es incompatible con output_config.format (structured
+    output) y devuelve 400. Se resuelve poniendo las fuentes como un campo del schema JSON (ej.
+    fuentes: number[] con los números de chunk) — citación manual, no la feature Citations.
 ```
 
 ### Módulo 9
@@ -504,6 +662,13 @@ El principio (el mismo del archivo senior y del módulo de costo de LLMs): **med
 9.3 Porque si filtrás después de traer los k más cercanos, podés quedarte con menos de k (o
     cero) resultados relevantes, y además procesaste data prohibida. El WHERE debe ir en la
     misma query que el ORDER BY ... <=>.
+9.4 SELECT contenido FROM chunks
+    WHERE tenant_id = $2 AND ($3::bigint IS NULL OR proyecto_id = $3)
+    ORDER BY embedding <=> $1 LIMIT $4;
+    Riesgo: un WHERE muy selectivo + LIMIT es "filtered search" sobre HNSW y puede degradar
+    recall (devolver menos de k o vecinos peores) porque el grafo descarta lo que no pasa el
+    filtro. Se mitiga con hnsw.ef_search más alto, índice parcial por tenant o particionado, y
+    se verifica con EXPLAIN (ANALYZE).
 ```
 
 ### Módulo 10
@@ -533,7 +698,13 @@ El principio (el mismo del archivo senior y del módulo de costo de LLMs): **med
      que el modelo inventó. No alcanza con que "suene bien" porque una respuesta fluida puede
      ser infiel al contexto (alucinada). Al ser texto libre se mide con LLM-as-judge: otro LLM
      puntúa si la respuesta es fiel al contexto y relevante a la pregunta (puente al módulo de
-     Evals).
+     Evals). Cuidado: el juez también se equivoca (sesgos: favorece respuestas largas, su
+     propio estilo); usá un modelo igual o superior y calibralo contra juicios humanos.
+11.4 El recall@k mejora pero la latencia p95 y el costo por query empeoran: más candidatos para
+     rerankear (más llamadas) y más tokens de contexto al prompt (más input que pagás cada vez).
+     El k final no es universal: lo elegís midiendo recall@k contra el golden set Y mirando qué
+     le hace al p95 y al costo por query — el punto donde el recall ya no sube lo suficiente
+     para justificar la latencia/costo extra.
 ```
 
 ---
