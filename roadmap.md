@@ -1,14 +1,16 @@
 # De Frontend (React / React Native) a Full Stack con Node.js
 
-**Roadmap intensivo · 2-3 meses · Edición 2026**
+**Roadmap · Edición 2026 · Fase 1 (10 semanas) + Fase 2 (senior / Tech Lead / IA Engineer)**
 
 > Punto de partida asumido: dominás React y React Native, entendés REST/JSON, consumís APIs y ya hiciste algún CRUD con Node/Express. El objetivo de este plan no es enseñarte "qué es un servidor", sino **profesionalizarte** para postular a roles full stack con criterio de producción.
+
+> **Cómo leer este roadmap.** Tiene dos fases. La **Fase 1** es un núcleo intensivo de ~10 semanas que te deja **contratable como full stack (junior / semi-senior)**: es el plan semana a semana de la sección 3. La **Fase 2** (sección "Más allá de las 10 semanas") es el recorrido que ya cubre este temario hacia perfil **senior / Tech Lead** e **IA Engineer** —PostgreSQL senior, Node por dentro, AWS con CDK, event-driven aplicado, Kubernetes, observabilidad y un track de IA completo—, sin plazo fijo. Si abrís solo la Fase 1, mirá igual la Fase 2: es la otra mitad del viaje.
 
 ---
 
 ## 1. Qué se está usando de verdad en backend JS en 2026
 
-El mercado se reparte entre **Express** (lo más pedido por volumen, base de la mayoría del código existente), **NestJS** (el estándar de facto en empresas medianas/grandes por su arquitectura opinada) y un grupo emergente de alto rendimiento: **Fastify** y **Hono** (este último líder en benchmarks y pensado para edge/serverless). La constante: **TypeScript de punta a punta** ("JavaScript everywhere"), porque es lo que te permite reutilizar tu experiencia de frontend y es prácticamente requisito en ofertas profesionales hoy.
+El mercado se reparte entre **Express** (lo más pedido por volumen, base de la mayoría del código existente), **NestJS** (el estándar de facto en empresas medianas/grandes por su arquitectura opinada) y un grupo emergente de alto rendimiento: **Fastify** y **Hono** (este último destaca en performance y está pensado para edge/serverless). La constante: **TypeScript de punta a punta** ("JavaScript everywhere"), porque es lo que te permite reutilizar tu experiencia de frontend y es prácticamente requisito en ofertas profesionales hoy.
 
 ### Stack objetivo recomendado (el que te hace contratable)
 
@@ -20,12 +22,14 @@ El mercado se reparte entre **Express** (lo más pedido por volumen, base de la 
 | Base de datos | **PostgreSQL** (relacional) + nociones de **MongoDB** | Postgres es el default profesional. Mongo aparece en el stack MERN/startups. |
 | ORM | **Drizzle** (moderno, ligero, SQL-first) y/o **Prisma** (más maduro, schema-first) | Drizzle es la elección recomendada para proyectos nuevos en 2026; Prisma sigue dominando en ecosistema y tutoriales. Aprendé uno bien y entendé el otro. |
 | Caché / colas | **Redis** | Caché, sesiones, rate limiting, colas simples. Aparece en casi toda oferta. |
-| Auth | **JWT** + **OAuth 2.1 / OpenID Connect**, hashing con **bcrypt/argon2** | Base de seguridad. Suma una librería como Passport o better-auth. |
+| Auth | **JWT** + **OAuth 2.1 / OpenID Connect**, hashing con **argon2id** (preferido) o **bcrypt** | Base de seguridad. argon2id es la recomendación actual de OWASP para proyectos nuevos; bcrypt sigue válido por compatibilidad/legacy. Suma Passport o better-auth. |
 | API | **REST** (obligatorio) + nociones de **GraphQL** y **gRPC** | REST primero. GraphQL/gRPC como diferenciadores. |
-| Mensajería | **Kafka** o **RabbitMQ** (conceptual) | Para arquitecturas event-driven; entender el "por qué" más que dominarlo. |
-| DevOps | **Docker** (imprescindible) + nociones de **Kubernetes** y **CI/CD** | Docker es must-have hoy. K8s suma mucho. Pipeline en GitHub Actions. |
-| Cloud | **AWS** (o GCP/Azure) | Saber desplegar: contenedores, una DB gestionada, variables de entorno, logs. |
+| Mensajería | **Kafka** o **RabbitMQ** (conceptual) | Para arquitecturas event-driven; entender el "por qué" más que dominarlo. Se profundiza en el módulo de event-driven (Fase 2). |
+| DevOps | **Docker** (imprescindible) + **Kubernetes** y **CI/CD** | Docker es must-have hoy. K8s suma mucho (módulo propio en Fase 2). Pipeline en GitHub Actions. |
+| Cloud | **AWS** (o GCP/Azure) | Saber desplegar: contenedores, una DB gestionada, variables de entorno, logs. Práctica real con IaC (CDK) en Fase 2. |
+| Observabilidad | **OpenTelemetry** + métricas/logs/traces, SLOs | Operar lo que desplegás: ver qué hace en producción y reducir el MTTR (módulo propio en Fase 2). |
 | Testing | **Vitest/Jest** + **Supertest** | Tests unitarios y de integración de endpoints. |
+| IA aplicada | **LLM APIs (Claude/SDK)** + **RAG (pgvector)** + **Agentes/MCP** + **Evaluations** | El diferenciador de empleabilidad 2026: integrar LLMs en tu backend con criterio. Track propio en Fase 2. |
 
 ---
 
@@ -39,15 +43,17 @@ Estos son los que aparecen en entrevistas y los que separan a un junior de un mi
 4. **Hexagonal (Ports & Adapters)** — La evolución natural de Clean Architecture: tu lógica depende de interfaces, no de bases de datos o APIs concretas. Excelente para testabilidad. Considerado de los patrones más prácticos y "future-proof" para microservicios Node.
 5. **Microservicios** — Servicios independientes, cada uno dueño de su data, comunicados por API o mensajes. Cambian complejidad de código por complejidad operativa: no empieces acá, pero entendé cuándo justifican el costo.
 
-**Patrones tácticos que conviene conocer:** Repository, Dependency Injection (Nest lo trae de fábrica), DTOs + validación (Zod / class-validator), middleware/interceptors, manejo centralizado de errores, y CQRS (separar lecturas de escrituras) como concepto avanzado.
+**Patrones tácticos que conviene conocer:** Repository, Dependency Injection (Nest lo trae de fábrica), DTOs + validación (Zod / class-validator), middleware/interceptors, manejo centralizado de errores, y CQRS (separar lecturas de escrituras) como concepto avanzado —se profundiza, aplicado, en el módulo de **event-driven** (Fase 2), junto con event sourcing, saga y el patrón outbox—.
 
 > Consejo de entrevista: sabé *cuándo NO* usar microservicios. Demostrar criterio ("empezaría con un monolito modular y extraería servicios cuando el dominio lo pida") vale más que listar tecnologías.
 
 ---
 
-## 3. Roadmap semana a semana (plan intensivo ~10 semanas)
+## 3. Roadmap semana a semana — Fase 1 (plan intensivo ~10 semanas)
 
-Asume varias horas al día. Cada bloque termina con un proyecto que va directo a tu portfolio.
+Esta es la **Fase 1**: el núcleo que te deja contratable como full stack. Cada bloque termina con un proyecto que va directo a tu portfolio.
+
+> **Sé honesto con el ritmo.** El plan es **agresivo**: asumí **~15-20 h/semana** sostenidas y que ya programás (venís de frontend). Varias semanas están cargadas a propósito (S1 mete TS + Node interno + HTTP; S7 mete Docker + CI/CD + deploy). Si vas con menos horas, **estiralo sin culpa**: es mejor consolidar cada proyecto que correr. Los temas profundos (event loop/streams, infra) tienen módulos propios para volver con calma.
 
 ### Semana 1 — TypeScript de backend + fundamentos sólidos
 - TypeScript profundo: tipos, generics, utility types, narrowing, `tsconfig` estricto.
@@ -137,11 +143,45 @@ Cada proyecto debe estar **desplegado, con README, tests y diagrama**. Calidad s
 - **80% construyendo, 20% leyendo.** Tu ventaja como frontend es que ya sabés programar; no caigas en "tutorial hell".
 - **Una herramienta por categoría, bien.** No aprendas Prisma *y* Drizzle a la vez: dominá una, conocé la otra.
 - **Git desde el día 1** en todos los proyectos, con commits limpios.
-- **Documentá decisiones de arquitectura** (un breve ADR por proyecto): es justo lo que evalúan en entrevistas mid.
+- **Documentá decisiones de arquitectura** (un breve ADR por proyecto): es justo lo que evalúan en entrevistas mid —y es la antesala del **liderazgo técnico** de la Fase 2—.
 - **Leé código ajeno** de repos NestJS bien valorados para absorber convenciones.
+- **Cuando domines lo anterior, dá el salto a la Fase 2** (sección 6): la disciplina de **TDD** (red-green-refactor), la mitad operativa (observabilidad, K8s, AWS práctico) y el **track de IA**. Ahí es donde el perfil pasa de "contratable" a "senior / Tech Lead".
+
+---
+
+## 6. Más allá de las 10 semanas — Fase 2 (de full stack a senior / Tech Lead / IA Engineer)
+
+La Fase 1 te deja **contratable**. La Fase 2 es lo que te lleva de "sé entregar" a "sé entregar **y operar** sistemas de producción, y diseñar con criterio" —el salto a **senior / Tech Lead**— más un **track de IA** que es el mayor diferenciador de empleabilidad en 2026. No tiene plazo fijo: se hace por módulos, cuando un proyecto o un objetivo laboral lo pide. Todo esto **ya está cubierto en el temario**:
+
+**Profundización del core (de junior a senior):**
+- [PostgreSQL nivel senior](postgresql.md) — aislamiento/locks, MVCC, índices/EXPLAIN, paginación keyset, pooling, JSONB.
+- [Node.js por dentro](nodejs.md) — event loop a fondo, thread pool de libuv, streams, cluster, escalado.
+- [Redis: caché, colas y jobs](redis.md) — cache-aside, stampede, BullMQ, idempotencia, rate limiting atómico.
+- [Testing práctico](testing.md) y, próximamente, **TDD como disciplina** (red-green-refactor).
+- [Patrones de diseño en NestJS](nestjs-patrones.md) y [NestJS nivel Senior](nestjs-senior.md).
+
+**Operación y nube (perfil Tech Lead):**
+- [Docker, deploy y CI/CD](docker-deploy.md) — multi-stage, PID 1, estrategias de deploy, healthchecks.
+- [AWS para backend](aws.md) (criterio) + [AWS hands-on con CDK](aws-practica.md) (infra como código, RDS/S3/Fargate, FinOps, Well-Architected).
+- [Kubernetes](kubernetes.md) — cuándo K8s vs Fargate, y los fundamentos.
+- [Observabilidad práctica](observabilidad.md) — OpenTelemetry, los 3 pilares, SLO/error budgets, alerting por burn rate.
+- [Arquitectura event-driven aplicada](event-driven.md) — event sourcing, CQRS, saga, outbox/CDC.
+- [Tiempo real (WebSockets) y Swagger](tiempo-real.md) — features en vivo + documentación de API.
+- Próximamente: **liderazgo técnico** (ADRs, métricas DORA, Team Topologies).
+
+**Track de IA (el diferenciador 2026 — perfil IA Engineer):**
+- [IA Generativa y LLMs](ia-llms.md) — fundamentos de integrar LLMs (Claude/SDK) en tu backend.
+- [RAG: responder con tu data](rag.md) — embeddings, pgvector sobre Postgres, retrieval híbrido, reranking.
+- [Agentes (loop, MCP, Claude Agent SDK)](agentes.md) — de un workflow a un sistema que decide su camino.
+- [Evaluations](evals.md) — medir un sistema de IA: golden set, LLM-as-judge, tracing.
+- Bases NoSQL: [MongoDB / DynamoDB](nosql.md).
+
+> El hilo conductor del track de IA es el mismo sistema que crece: una llamada simple → un extractor → RAG sobre tus propios apuntes → un agente → evals. Y conecta con el resto: el tracing de un sistema de IA es el mismo concepto que la observabilidad de microservicios; pgvector vive sobre el Postgres que ya sabés operar.
 
 ---
 
 ## Resumen ejecutivo
 
-Tu camino más corto a "full stack contratable": **TypeScript + NestJS + PostgreSQL + Drizzle/Prisma + Redis + Docker**, con **JWT/OAuth** para auth y **arquitectura en capas evolucionando a hexagonal**. Empezá por un monolito modular bien hecho, no por microservicios. Construí 4-5 proyectos desplegados (uno aprovechando tu React Native) y prepará system design básico. En 2-3 meses intensivos eso te deja en condiciones reales de postular.
+**Fase 1 — camino más corto a "full stack contratable" (junior / semi-senior):** **TypeScript + NestJS + PostgreSQL + Drizzle/Prisma + Redis + Docker**, con **JWT/OAuth** para auth y **arquitectura en capas evolucionando a hexagonal**. Empezá por un monolito modular bien hecho, no por microservicios. Construí 4-5 proyectos desplegados (uno aprovechando tu React Native) y prepará system design básico. En ~2-3 meses intensivos (a buen ritmo) eso te deja en condiciones reales de postular.
+
+**Fase 2 — de full stack a senior / Tech Lead / IA Engineer (sin plazo fijo):** profundizás el core (Postgres/Node/Redis senior, TDD), sumás la mitad operativa (AWS+CDK, Kubernetes, observabilidad, event-driven, CI/CD real) y el **track de IA** (LLMs, RAG, agentes+MCP, evaluations) que hoy es el mayor diferenciador. El camino no termina en "contratable": sigue hacia "el que diseña y opera el sistema".
