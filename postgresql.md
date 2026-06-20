@@ -34,6 +34,15 @@ docker exec -it pg-fullstack psql -U postgres
 13. El puente: conectar el ORM al patrón Repository de Nest
 14. Drizzle vs. Prisma (conocé la otra)
 
+**Nivel senior — profundidad para producción**
+
+15. Concurrencia: aislamiento de transacciones y locks
+16. MVCC, VACUUM y bloat (Postgres por dentro)
+17. Índices a fondo y leer un `EXPLAIN`
+18. Paginación: offset vs. keyset
+19. Connection pooling y PgBouncer
+20. JSONB y full-text search
+
 Las soluciones de **todos** los ejercicios están al final, en la sección "Soluciones".
 
 El dominio de ejemplo es el de la "Task API" del roadmap: **usuarios** que tienen **proyectos**, y proyectos que tienen **tareas**.
@@ -52,7 +61,7 @@ La regla práctica: **empezá con Postgres salvo que tengas una razón concreta 
 |---|---|---|
 | Esquema | Fijo, validado por la DB | Flexible, validás vos |
 | Relaciones | Nativas (foreign keys, joins) | Manuales (embebido o refs) |
-| Transacciones | ACID, su fuerte | Existen, pero menos centrales |
+| Transacciones | ACID, su fuerte | ACID multi-documento desde 4.0, pero el modelo favorece el documento único |
 | Cuándo | El default; datos con relaciones | Datos heterogéneos, sin relaciones fuertes |
 
 **Ejercicios 1**
@@ -70,6 +79,8 @@ La **clave primaria** (`PRIMARY KEY`) identifica de forma única cada fila. Dos 
 
 - **`serial` / `bigserial`**: entero autoincremental (1, 2, 3…). Simple y compacto.
 - **`uuid`**: identificador aleatorio (`a3f1...`). No revela cuántos registros hay ni es adivinable; bueno para IDs que viajan al cliente.
+
+> En proyectos nuevos (2026) se prefiere `GENERATED ALWAYS AS IDENTITY` sobre `serial`: es el estándar SQL y evita problemas de permisos sobre la secuencia. `serial` es la forma clásica que aún vas a ver mucho. Para `uuid`, generalos con `gen_random_uuid()` (nativo desde PG13). Ojo: un UUID **v4** como clave primaria fragmenta el índice (es aleatorio, las inserciones caen en cualquier lado del B-tree); si querés UUID, preferí **UUIDv7/ULID**, que son ordenables en el tiempo.
 
 ```sql
 CREATE TABLE usuarios (
@@ -247,6 +258,8 @@ GROUP BY proyecto_id;
 
 Regla mental: lo que ponés en `SELECT` junto a una agregación tiene que estar en el `GROUP BY` (o ser una agregación). No podés mezclar una columna "suelta" con un `COUNT(*)` sin agruparla.
 
+**`NULL` en agregaciones (trampa clásica):** `COUNT(*)` cuenta filas, pero `COUNT(columna)` **ignora los `NULL`** (y `SUM`/`AVG` también los descartan, no los cuentan como cero). Para contar valores distintos usás `COUNT(DISTINCT columna)`. Confundir `COUNT(*)` con `COUNT(col)` es una fuente típica de números mal calculados.
+
 `WHERE` vs `HAVING`: `WHERE` filtra filas **antes** de agrupar; `HAVING` filtra **grupos** después de agregar. "Proyectos con más de 5 tareas":
 
 ```sql
@@ -401,7 +414,7 @@ export const tareasRelations = relations(tareas, ({ one }) => ({
 // export const db = drizzle(pool, { schema });
 ```
 
-Y consultás con `with` (Drizzle resuelve esto de forma eficiente, sin caer en N+1):
+Y consultás con `with` (Drizzle lo resuelve en pocas queries planificadas, **no** en N+1 — conviene verificar en los logs cuántas emite tu versión):
 
 ```ts
 const proyectoConTareas = await db.query.proyectos.findFirst({
@@ -420,7 +433,7 @@ for (const p of todos) {
   // ...
 }
 
-// BIEN: una sola query con la relación (o un JOIN). Un solo viaje.
+// BIEN: una sola llamada que el ORM resuelve de forma eficiente (no una query por fila).
 const todos = await db.query.proyectos.findMany({ with: { tareas: true } });
 ```
 
@@ -505,6 +518,8 @@ export class UsersModule {}
 
 El `UsersService`, sus tests unitarios (que siguen usando el repo en memoria como mock) y los controladores quedan **intactos**. En tests unitarios usás el `Map`; en producción, Postgres. El service no se entera. Esta es la razón concreta por la que valió la pena la abstracción: cambiar de "en memoria" a "base real" es cambiar una línea de configuración.
 
+**Detalle de producción:** cuando una inserción viola una constraint `UNIQUE` (ej. email repetido), Postgres lanza el error con código `23505`. En el repositorio conviene **capturarlo y traducirlo a una excepción de dominio** (`ConflictException` → HTTP 409) en vez de dejar que escape como un 500 genérico. Lo mismo aplica a `created_at`/`updated_at`: resolvelos con `DEFAULT now()` y, para el `updated_at`, un trigger o el `$onUpdate` de Drizzle, en vez de setearlos a mano en cada query.
+
 **Ejercicios 13**
 13.1 ¿Qué archivos cambian y cuáles **no** al pasar de `InMemoryUserRepository` a `DrizzleUserRepository`? ¿Por qué el service queda intacto?
 13.2 Escribí una `DrizzleProjectRepository` que implemente `findById(id)` y `save(p)` para `proyectos`, inyectando el cliente `db` por el token `"DB"`.
@@ -533,6 +548,227 @@ La decisión Senior no es "cuál es mejor" (ambos son buenas opciones), sino **e
 14.1 Nombrá dos diferencias concretas entre Drizzle y Prisma.
 14.2 Un equipo arranca un proyecto nuevo en 2026, valora el control del SQL y desplegará en serverless. ¿Cuál sugerís y por qué?
 14.3 Si tu app usa el patrón Repository y querés migrar de Prisma a Drizzle, ¿qué parte del código tenés que reescribir y qué parte queda igual?
+
+---
+
+# Nivel senior — profundidad para producción
+
+Los módulos 1-14 te dan una base sólida. Los que siguen son los temas que separan "sé usar una base" de "entiendo Postgres en producción", y son justo los que más se preguntan en entrevistas mid/senior.
+
+## Módulo 15 — Concurrencia: aislamiento de transacciones y locks
+
+**Teoría.** El módulo 12 mostró la **atomicidad** ("todo o nada"). Pero una transacción tiene una segunda cara igual de importante: el **aislamiento** (la "I" de ACID), o sea qué ve una transacción de los cambios de otras que corren **al mismo tiempo**. Y acá está el error de seniority más común: creer que `db.transaction(...)` te protege de condiciones de carrera. **No lo hace por sí solo.**
+
+El default de Postgres es **READ COMMITTED**: cada sentencia ve los datos confirmados (committed) hasta el momento en que esa sentencia empieza. Esto deja pasar el **lost update** (actualización perdida) en el patrón clásico *leer → modificar → escribir*:
+
+```sql
+-- Dos requests descuentan stock a la vez (READ COMMITTED):
+-- T1: SELECT stock FROM productos WHERE id = 1;   -- lee 10
+-- T2: SELECT stock FROM productos WHERE id = 1;   -- lee 10
+-- T1: UPDATE productos SET stock = 9 WHERE id = 1;
+-- T2: UPDATE productos SET stock = 9 WHERE id = 1;  -- ¡quedó 9; debería ser 8!
+```
+
+Tres formas de arreglarlo, de más simple a más fuerte:
+
+```sql
+-- (1) Cálculo atómico en la propia DB (lo más simple cuando se puede):
+UPDATE productos SET stock = stock - 1 WHERE id = 1 AND stock > 0;
+
+-- (2) Lock pesimista: T2 espera a que T1 confirme antes de leer
+SELECT stock FROM productos WHERE id = 1 FOR UPDATE;
+
+-- (3) Subir el aislamiento y reintentar ante conflicto (lock optimista a nivel DB)
+--     BEGIN ISOLATION LEVEL SERIALIZABLE; ... ; -- si falla con error 40001, reintentás
+```
+
+Los **niveles de aislamiento** y qué anomalía previene cada uno:
+
+| Nivel | Previene |
+|---|---|
+| **READ COMMITTED** (default) | dirty reads (no ves cambios sin confirmar) |
+| **REPEATABLE READ** | + non-repeatable reads y phantom reads (trabajás sobre un *snapshot* fijo del inicio de la transacción) |
+| **SERIALIZABLE** | + anomalías de serialización: el resultado es **como si** las transacciones hubieran corrido una tras otra |
+
+En Postgres, `REPEATABLE READ` ya usa un snapshot que evita lecturas no repetibles y phantoms; `SERIALIZABLE` agrega la detección de anomalías y puede **abortar** una transacción con error `40001` (`serialization_failure`) que tu código **debe reintentar**.
+
+**Locks y deadlocks.** El `SELECT ... FOR UPDATE` toma un **lock de fila** (otros que quieran esa fila esperan). Un **deadlock** ocurre cuando dos transacciones se traban mutuamente: T1 tiene la fila A y pide la B, T2 tiene la B y pide la A. Postgres lo detecta y **mata una** con error `40P01` (`deadlock_detected`). La forma de evitarlos: tomar los locks **siempre en el mismo orden** en todo el código.
+
+**Ejercicios 15**
+15.1 Dos requests hacen `SELECT saldo` → suman 100 en memoria → `UPDATE saldo`. ¿Qué anomalía aparece bajo READ COMMITTED y cómo se llama? Escribí una versión del `UPDATE` que la evite sin locks.
+15.2 ¿Para qué sirve `SELECT ... FOR UPDATE` y qué problema del ejercicio anterior resuelve?
+15.3 ¿Qué es un deadlock y cuál es la regla práctica para prevenirlo?
+
+---
+
+## Módulo 16 — MVCC, VACUUM y bloat (Postgres por dentro)
+
+**Teoría.** ¿Cómo hace Postgres para que los lectores no bloqueen a los escritores (ni al revés)? Con **MVCC** (Multi-Version Concurrency Control). La idea: Postgres **no actualiza las filas en el lugar**. Cada `UPDATE` crea una **nueva versión** de la fila (una tupla nueva) y marca la vieja como obsoleta; cada `DELETE` marca la tupla como muerta. Cada transacción ve la versión que le corresponde según su snapshot. Por eso una lectura larga no frena una escritura.
+
+El costo de esto son las **tuplas muertas** (dead tuples): versiones viejas que quedan ocupando espacio. Si no se limpian, la tabla y sus índices se inflan — eso es el **bloat**.
+
+- **`VACUUM`** (y el **autovacuum**, que corre solo) recupera el espacio de las tuplas muertas para reusarlo. Es mantenimiento normal y necesario.
+- **`VACUUM FULL`** reescribe la tabla entera y devuelve el espacio al SO, pero **bloquea la tabla** — se usa con cuidado, fuera de hora pico.
+- **`ANALYZE`** actualiza las **estadísticas** que el planner usa para decidir planes (clave para el módulo 17).
+
+Consecuencias prácticas que un senior conoce:
+
+- `COUNT(*)` en Postgres recorre las tuplas vivas (no hay un contador mágico): en tablas enormes puede ser lento, sobre todo con bloat. Para un aproximado rápido se puede mirar `reltuples` en `pg_class`.
+- Tablas con muchísimos `UPDATE`/`DELETE` (colas, contadores) acumulan bloat rápido; conviene vigilar el autovacuum.
+- Los índices también sufren bloat; a veces se hace `REINDEX`.
+
+**Ejercicios 16**
+16.1 ¿Por qué un `UPDATE` en Postgres no "pisa" la fila vieja? ¿Qué genera eso y cómo se llama el problema si se acumula?
+16.2 ¿Qué hace el autovacuum y por qué es importante en una tabla con muchas escrituras?
+16.3 ¿Por qué `COUNT(*)` puede ser lento en una tabla grande, a diferencia de lo que mucha gente asume?
+
+---
+
+## Módulo 17 — Índices a fondo y leer un `EXPLAIN`
+
+**Teoría.** El módulo 8 introdujo el índice B-tree. Para producción necesitás más: **tipos de índice**, **índices compuestos** y, sobre todo, **leer un plan de ejecución**.
+
+**Tipos de índice** (no todo es B-tree):
+
+- **B-tree**: el default; sirve para `=`, `<`, `>`, `BETWEEN`, `ORDER BY`.
+- **GIN**: para columnas con múltiples valores por fila — **JSONB**, arrays y **full-text search** (módulo 20).
+- **GiST**: rangos, datos geométricos/geoespaciales (PostGIS).
+- **BRIN**: tablas enormes y "append-only" naturalmente ordenadas (ej. logs por fecha); ocupa poquísimo.
+
+**Índice compuesto y la regla del prefijo izquierdo.** Un índice en `(a, b)` sirve para filtrar por `a` o por `a AND b`, y para `ORDER BY a`, pero **no** para filtrar por `b` solo. El orden de las columnas importa: poné primero la que más filtra / por la que siempre filtrás.
+
+```sql
+CREATE INDEX idx_tareas_proy_estado ON tareas (proyecto_id, completada);
+-- sirve para WHERE proyecto_id = 1  y  WHERE proyecto_id = 1 AND completada = false
+-- NO sirve (bien) para WHERE completada = false  solo
+```
+
+**Índice parcial** (solo las filas que te importan, más chico y rápido):
+
+```sql
+CREATE INDEX idx_tareas_pendientes ON tareas (proyecto_id) WHERE completada = false;
+```
+
+**Covering index** (`INCLUDE`): permite un *index-only scan* sin ir a la tabla, si todas las columnas que pedís están en el índice.
+
+**Leer un `EXPLAIN ANALYZE`.** No alcanza con "¿usa índice?". Hay que leer el plan:
+
+```
+EXPLAIN ANALYZE SELECT * FROM tareas WHERE proyecto_id = 42;
+
+Index Scan using idx_tareas_proyecto on tareas
+  (cost=0.42..8.45 rows=5 width=64) (actual time=0.018..0.021 rows=4 loops=1)
+  Index Cond: (proyecto_id = 42)
+Planning Time: 0.10 ms
+Execution Time: 0.05 ms
+```
+
+- `cost` es una **estimación** en unidades arbitrarias (no ms); `actual time` es lo medido de verdad.
+- `rows=5` (estimadas) vs `rows=4` (reales): si difieren **mucho**, tus estadísticas están viejas → corré `ANALYZE`. El planner elige mal con estadísticas malas.
+- Tipos de nodo de join que vas a ver: **Nested Loop** (pocas filas), **Hash Join** (sets grandes sin orden), **Merge Join** (entradas ordenadas).
+
+**Mito a matar:** `Seq Scan` **no siempre es malo**. Si la tabla es chica, o la query trae el 80% de las filas, leer todo secuencialmente es **más rápido** que saltar por un índice. El planner lo sabe y por eso a veces ignora un índice a propósito (por **selectividad**).
+
+**Ejercicios 17**
+17.1 Tenés un índice en `(proyecto_id, completada)`. ¿Para cuáles de estas queries sirve y para cuál no? (a) `WHERE proyecto_id = 1`; (b) `WHERE proyecto_id = 1 AND completada = false`; (c) `WHERE completada = false`.
+17.2 En un `EXPLAIN ANALYZE`, las `rows` estimadas son 5 y las reales 50.000. ¿Qué problema sugiere y qué comando lo corrige?
+17.3 ¿Por qué a veces un `Seq Scan` es la decisión correcta del planner y no un error a "arreglar" con un índice?
+
+---
+
+## Módulo 18 — Paginación: offset vs. keyset
+
+**Teoría.** Casi todo endpoint de listado pagina. La forma intuitiva es `LIMIT/OFFSET`:
+
+```sql
+SELECT * FROM tareas ORDER BY id DESC LIMIT 20 OFFSET 10000;
+```
+
+El problema: `OFFSET` **no salta** mágicamente; Postgres tiene que **leer y descartar** las 10.000 filas anteriores para devolver las 20 siguientes. Es O(n): la página 1 es instantánea, la página 500 es lenta. En tablas grandes es un anti-patrón de performance conocido (y pregunta de entrevista).
+
+La alternativa profesional es **keyset / cursor pagination**: en vez de "saltá 10.000", decís "dame lo que viene **después del último que vi**", usando una columna ordenada e indexada:
+
+```sql
+-- primera página
+SELECT * FROM tareas ORDER BY id DESC LIMIT 20;
+-- siguientes páginas: pasás el id del último visto
+SELECT * FROM tareas WHERE id < :ultimoId ORDER BY id DESC LIMIT 20;
+```
+
+En Drizzle:
+
+```ts
+import { lt, desc } from "drizzle-orm";
+
+await db.select().from(tareas)
+  .where(lt(tareas.id, ultimoId))
+  .orderBy(desc(tareas.id))
+  .limit(20);
+```
+
+Keyset es **rápido y estable** (no se "corre" si insertan filas mientras paginás), pero requiere ordenar por una columna **única e indexada** (o una combinación que desempate, ej. `(creado_el, id)`). Su límite: no podés saltar a "la página 7" arbitraria — solo avanzar/retroceder. Para feeds e *infinite scroll* es ideal; para una grilla con números de página, a veces `OFFSET` (en datasets chicos) sigue siendo aceptable.
+
+**Ejercicios 18**
+18.1 ¿Por qué `OFFSET 100000 LIMIT 20` se vuelve lento aunque solo devuelvas 20 filas?
+18.2 Escribí la query keyset (SQL o Drizzle) para "las 20 tareas siguientes después de la última que mostré", ordenadas por `id` descendente.
+18.3 ¿Qué requisito tiene la columna por la que ordenás para que el keyset funcione bien, y qué limitación tiene frente a offset?
+
+---
+
+## Módulo 19 — Connection pooling y PgBouncer
+
+**Teoría.** Cada conexión a Postgres **no es gratis**: el servidor lanza **un proceso** por conexión, con su memoria. Abrir y cerrar una conexión por cada request es caro, y hay un límite duro (`max_connections`, ~100 por defecto). Por eso usás un **pool**: un conjunto de conexiones ya abiertas que se **reutilizan**.
+
+Eso es lo que hace `new Pool(...)` de la librería `pg` (el del módulo 10): mantiene conexiones vivas y te las presta. Si todas están ocupadas, el request **espera** una libre (o falla por timeout) — eso es **agotar el pool**, un síntoma típico cuando hay queries lentas que retienen conexiones.
+
+**Dimensionar el pool** es un equilibrio: muy chico = cuello de botella artificial; muy grande × muchas instancias de tu app = superás el `max_connections` de Postgres y este empieza a rechazar conexiones. Regla útil: `pool_por_instancia × número_de_instancias` debe quedar holgadamente por debajo de `max_connections`.
+
+**PgBouncer** entra cuando tenés **muchas** instancias o serverless (cada lambda/función abre sus propias conexiones y revienta el límite). Es un **pooler externo** que multiplexa miles de conexiones de cliente sobre unas pocas reales a Postgres. Tiene dos modos clave:
+
+- **session mode**: una conexión real queda atada a la sesión del cliente mientras dura. Compatible con todo, pero menos eficiente.
+- **transaction mode**: la conexión real se devuelve al pool **al terminar cada transacción** — muchísimo más eficiente, pero **rompe** features ligadas a la sesión: *prepared statements*, `SET`, `LISTEN/NOTIFY` y advisory locks de sesión. Hay que configurar el driver para no usarlas.
+
+**Ejercicios 19**
+19.1 ¿Por qué abrir una conexión nueva a Postgres por cada request es mala idea? ¿Qué resuelve el pool?
+19.2 Tu app escala a 20 instancias, cada una con un pool de 10. Postgres tiene `max_connections = 100`. ¿Qué problema hay y cómo lo encarás?
+19.3 ¿Qué gana y qué pierde PgBouncer en *transaction mode* frente a *session mode*?
+
+---
+
+## Módulo 20 — JSONB y full-text search
+
+**Teoría.** Postgres no es "solo tablas": dos de sus superpoderes son **JSONB** y la **búsqueda de texto**.
+
+**JSONB** guarda JSON binario, indexable y consultable. Sirve para datos **semiestructurados, opcionales o variables** que no querés (o no podés) modelar como columnas: metadata, payloads de webhooks, configuraciones por fila.
+
+```sql
+ALTER TABLE tareas ADD COLUMN metadata JSONB;
+
+-- -> devuelve JSONB ; ->> devuelve TEXT ; @> "contiene"
+SELECT metadata->>'origen' FROM tareas WHERE metadata @> '{"origen":"import"}';
+
+-- se indexa con GIN para que esas búsquedas sean rápidas:
+CREATE INDEX idx_tareas_meta ON tareas USING GIN (metadata);
+```
+
+El criterio senior: usá JSONB para lo flexible, **no para reemplazar el modelado relacional**. Si metés todo en un JSONB perdés constraints, foreign keys, tipos y queries claras. La regla: lo que tiene relaciones y reglas → columnas y tablas; lo verdaderamente variable → JSONB.
+
+**Full-text search (FTS).** Para buscar palabras dentro de texto con stemming y ranking (no un `LIKE '%...%'`, que no escala ni entiende idioma), Postgres trae `tsvector`/`tsquery`:
+
+```sql
+SELECT * FROM tareas
+WHERE to_tsvector('spanish', titulo) @@ to_tsquery('spanish', 'informe');
+
+-- índice GIN sobre el tsvector para que sea rápido:
+CREATE INDEX idx_tareas_fts ON tareas USING GIN (to_tsvector('spanish', titulo));
+```
+
+Alcanza para búsqueda integrada sin sumar infraestructura. Si necesitás algo más potente (relevancia avanzada, typo-tolerance, facetas), ahí sí entra un motor dedicado como Elasticsearch o Meilisearch — pero para la mayoría de las apps, FTS de Postgres sobra.
+
+**Ejercicios 20**
+20.1 ¿Cuándo conviene una columna `JSONB` y cuándo es mejor modelar con columnas/tablas relacionales? Dá un criterio.
+20.2 Escribí la query que traiga las tareas cuyo `metadata` contenga `{"prioridad":"alta"}` y el índice que la acelera.
+20.3 ¿Por qué `to_tsvector @@ to_tsquery` es mejor que `LIKE '%palabra%'` para buscar texto, y con qué tipo de índice se acelera?
 
 ---
 
@@ -732,8 +968,9 @@ const [proyecto] = await db
 ### Módulo 11
 ```
 11.1 Listás N usuarios con 1 query, y después por cada usuario hacés otra query para
-     sus proyectos: 1 + N. Con 50 usuarios son 51 queries (mal). Bien: una sola query
-     que trae usuarios y proyectos juntos (con `with` o un JOIN) → 1 query.
+     sus proyectos: 1 + N. Con 50 usuarios son 51 queries (mal). Bien: una sola llamada
+     que trae usuarios y proyectos juntos (con `with` o un JOIN) → pocas queries
+     planificadas, no una por fila.
 
 11.3 Activando el log de SQL del ORM y viendo la MISMA query repetida muchas veces,
      idéntica salvo el valor del id en el WHERE. Ese patrón repetido es la firma del
@@ -822,6 +1059,106 @@ export class DrizzleProjectRepository implements ProjectRepository {
 14.3 Reescribís solo las implementaciones de los repositorios (las clases que hablan
      con el ORM). La interfaz del repositorio, el service, los controladores y la
      lógica de dominio quedan igual: dependen del puerto, no del ORM.
+```
+
+### Módulo 15
+```
+15.1 Es un "lost update" (actualización perdida): ambas leen el mismo saldo, suman 100
+     sobre ese valor y guardan; la segunda escritura pisa a la primera y se "pierde"
+     una suma. Bajo READ COMMITTED no se previene solo. Versión sin locks (cálculo
+     atómico en la DB):
+        UPDATE cuentas SET saldo = saldo + 100 WHERE id = :id;
+15.2 SELECT ... FOR UPDATE toma un lock de fila: la segunda transacción que pida esa
+     fila espera a que la primera confirme, así no leen el mismo valor "viejo" en
+     paralelo. Resuelve el lost update cuando el cálculo no se puede hacer atómico en
+     un solo UPDATE (ej. lógica de por medio).
+15.3 Un deadlock es cuando dos transacciones se bloquean mutuamente (cada una tiene un
+     lock que la otra necesita). Postgres lo detecta y aborta una (error 40P01). Regla
+     para prevenirlo: tomar los locks SIEMPRE en el mismo orden en todo el código.
+```
+
+### Módulo 16
+```
+16.1 Por MVCC: el UPDATE crea una nueva versión (tupla) de la fila y marca la vieja
+     como obsoleta, para que lectores concurrentes sigan viendo su snapshot sin
+     bloquearse. Eso genera "tuplas muertas"; si se acumulan, es "bloat" (la tabla y
+     sus índices se inflan).
+16.2 El autovacuum recupera el espacio de las tuplas muertas (y actualiza estadísticas)
+     de forma automática. En tablas con muchas escrituras es clave: sin él, el bloat
+     crece y degrada el rendimiento (más páginas que leer, índices más grandes).
+16.3 Porque no hay un contador global: COUNT(*) recorre las tuplas vivas que la
+     transacción puede ver (MVCC), y con bloat hay aún más páginas que recorrer. Para
+     un aproximado rápido se puede mirar reltuples en pg_class.
+```
+
+### Módulo 17
+```
+17.1 (a) Sí (prefijo izquierdo: proyecto_id es la primera columna). (b) Sí (usa ambas
+     columnas en orden). (c) No bien: filtrar solo por `completada` no puede aprovechar
+     el índice (proyecto_id es la primera columna del compuesto).
+17.2 Las estadísticas del planner están desactualizadas: estima 5 filas pero hay
+     50.000, así que probablemente eligió un mal plan. Se corrige con ANALYZE (o
+     esperando al autovacuum, que también analiza).
+17.3 Porque si la tabla es chica o la query trae una fracción grande de las filas
+     (baja selectividad), leer todo secuencialmente es más barato que saltar por el
+     índice fila por fila. El planner lo decide con estadísticas; forzar un índice ahí
+     empeoraría.
+```
+
+### Módulo 18
+```
+18.1 Porque OFFSET no "salta": Postgres lee y descarta las 100.000 filas previas para
+     poder devolver las 20 siguientes. Es O(n) en el offset, así que las páginas
+     profundas se degradan aunque el LIMIT sea chico.
+18.3 La columna de orden debe ser única e indexada (o una combinación que desempate,
+     ej. (creado_el, id)); si no, podés saltear o repetir filas. Limitación frente a
+     offset: solo podés avanzar/retroceder desde el último visto, no saltar a una
+     "página N" arbitraria.
+```
+```ts
+// 18.2
+import { lt, desc } from "drizzle-orm";
+
+const pagina = await db
+  .select()
+  .from(tareas)
+  .where(lt(tareas.id, ultimoId)) // ultimoId = id de la última fila mostrada
+  .orderBy(desc(tareas.id))
+  .limit(20);
+```
+
+### Módulo 19
+```
+19.1 Porque cada conexión Postgres es un proceso del servidor (con su memoria) y abrir/
+     cerrar una por request es caro; además hay un límite (max_connections). El pool
+     mantiene conexiones abiertas y las reutiliza entre requests.
+19.2 20 × 10 = 200 conexiones posibles, pero max_connections = 100: Postgres rechazará
+     conexiones cuando se supere. Opciones: bajar el tamaño del pool por instancia,
+     subir max_connections con criterio, o (lo más escalable) poner PgBouncer delante
+     para multiplexar muchas conexiones de cliente sobre pocas reales.
+19.3 Gana eficiencia: en transaction mode la conexión real se libera al pool al
+     terminar cada transacción, así sirve a muchos más clientes con pocas conexiones.
+     Pierde compatibilidad con features de sesión: prepared statements, SET,
+     LISTEN/NOTIFY y advisory locks de sesión (hay que configurar el driver).
+```
+
+### Módulo 20
+```
+20.1 JSONB para datos semiestructurados, opcionales o variables que no tienen
+     relaciones ni reglas fuertes (metadata, payloads, config por fila). Columnas/
+     tablas cuando el dato tiene relaciones, constraints, tipos o se consulta seguido:
+     ahí JSONB te haría perder integridad y claridad. Criterio: relacional por defecto,
+     JSONB para lo verdaderamente flexible.
+20.3 Porque to_tsvector/to_tsquery entienden el idioma (stemming: "informe" matchea
+     "informes"/"informar"), ignoran stopwords y permiten ranking, mientras que
+     LIKE '%palabra%' es una búsqueda literal que no escala (no usa índice B-tree con
+     comodín al inicio) ni entiende variantes. Se acelera con un índice GIN sobre el
+     tsvector.
+```
+```sql
+-- 20.2
+SELECT * FROM tareas WHERE metadata @> '{"prioridad":"alta"}';
+CREATE INDEX idx_tareas_meta ON tareas USING GIN (metadata);
 ```
 
 ---
