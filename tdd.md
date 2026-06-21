@@ -186,6 +186,7 @@ Corro los tests: siguen verdes. El refactor mejoró el diseño (cada objeto resp
 3.3 El refactor movió `isMember` de `Task` a `Project`. ¿Qué principio de diseño mejoró y cómo supiste que no rompiste nada?
 3.4 ¿Qué quiere decir que "el diseño emergió del ciclo" en este ejemplo?
 3.5 **Hacelo vos** (este es el ejercicio que importa). Regla nueva de la Task API: *"un proyecto no puede tener más de 5 tareas abiertas"*. Hacé el ciclo completo en código: (a) escribí el primer test y verificá que **falla/no compila** (rojo); (b) escribí el **mínimo** green —vale hardcodear—; (c) escribí un segundo test que te **fuerce a generalizar** (triangulación); (d) refactorizá si emerge una responsabilidad mal ubicada. Pegá tu ciclo. (No mires la solución hasta tener tu intento.)
+3.6 Volvé a las dos fases **green** de este módulo (ciclo 1 y ciclo 2) e identificá **cuál de las tres tácticas de Beck** (implementación obvia / fake it / triangulación, módulo 2) se usó en cada una. Justificá.
 
 ---
 
@@ -193,7 +194,7 @@ Corro los tests: siguen verdes. El refactor mejoró el diseño (cada objeto resp
 
 **Teoría.** Acá está el debate que define el estilo de TDD que practicás, y que aparece seguro en una entrevista senior. Hay **dos escuelas** sobre cómo testear una unidad que depende de otras:
 
-- **Classicist** (también "Detroit", "Chicago" o "clásica" — la de Kent Beck): la **unidad bajo test es un comportamiento**, y usás las **dependencias reales** siempre que puedas. Solo reemplazás por un doble las dependencias **incómodas**: las que salen del proceso y son difíciles de manejar en un test (la base de datos, una API externa, el reloj, la red). Un `TaskService` que usa un `Project` y un validador de dominio se testea **con el `Project` y el validador reales**. Mockeás Postgres, no tus propios objetos.
+- **Classicist** (o escuela de **Chicago**; "Detroit" es otro sinónimo informal — la de Kent Beck): la **unidad bajo test es un comportamiento**, y usás las **dependencias reales** siempre que puedas. Solo reemplazás por un doble las dependencias **incómodas**: las que salen del proceso y son difíciles de manejar en un test (la base de datos, una API externa, el reloj, la red). Un `TaskService` que usa un `Project` y un validador de dominio se testea **con el `Project` y el validador reales**. Mockeás Postgres, no tus propios objetos. Tiende a trabajarse **inside-out** (del dominio hacia afuera, con objetos reales).
 
 - **Mockist** (también "London" — Freeman & Pryce, *Growing Object-Oriented Software*): la **unidad bajo test es una clase**, y mockeás **todas** sus colaboradoras. Testeás el `TaskService` en total aislamiento, con dobles para *todas* sus dependencias, verificando las **interacciones** (que `taskService` llamó a `project.isMember()` con tal argumento). Esto lleva al estilo **outside-in**: empezás por el test del borde (el controller), descubrís qué colaboradores necesita mockeando, y vas implementando hacia adentro.
 
@@ -248,6 +249,8 @@ it('asigna la tarea a un miembro y la persiste', async () => {
 });
 ```
 
+(`service.assign` y `repo` vienen del mismo andamiaje del módulo de Testing que el `beforeEach` de arriba; el bloque es ilustrativo del *estilo* —resultado vs interacción—, no un ejemplo ejecutable end-to-end por sí solo.)
+
 La regla, simple y poderosa: **verificá el resultado observable (el estado final, el valor devuelto, el efecto visible), no las interacciones internas.** Las únicas interacciones que vale la pena verificar son las que cruzan un borde que te importa y *no podés observar de otra forma* —ej. que efectivamente mandaste el email, que publicaste el evento a la cola—. Verificar que tu objeto llamó a su propio colaborador interno es testear la implementación, no el comportamiento.
 
 En la taxonomía de dobles que viste en Testing, esto es literal: lo que verifica **interacción** es un **mock**; lo que solo provee datos es un **stub**; un colaborador real-pero-liviano (el `Project` real, un repo en memoria) es un **fake**. "Sobre-mockear" es, exactamente, usar un **mock** (verificación de interacción) donde alcanzaba un **stub** o un **fake** (verificación de estado). De eso trata, justamente, el ensayo de Fowler que da nombre a la distinción: *"Mocks Aren't Stubs"*.
@@ -272,7 +275,7 @@ En la taxonomía de dobles que viste en Testing, esto es literal: lo que verific
 
 4. **Mantenibilidad** (*maintainability*): ¿qué tan fácil es leer y mantener el test? Tests con setup enorme, mocks por todos lados y asserts crípticos cuestan más de lo que valen.
 
-La idea más importante de Khorikov es que **los tres primeros** (protección, resistencia y feedback rápido) están en **tensión mutua: no podés maximizar los tres a la vez**, tenés que sacrificar uno. La **mantenibilidad es un eje aparte —siempre querés maximizarla—** y no entra en ese trade-off. Y modela el **valor de un test como el _producto_ de los tres primeros**: si alguno es cero, el test no vale nada (por eso un test trivialmente resistente pero sin protección es inútil). En la práctica sostenés **protección + resistencia** y sacrificás **feedback rápido** cuando hace falta —por eso los tests de integración contra Postgres real, más lentos, igual valen la pena—. El cuadrante que se desprende (sobre los dos ejes que definen un test valioso):
+La idea más importante de Khorikov es que **los tres primeros** (protección, resistencia y feedback rápido) están en **tensión mutua: no podés maximizar los tres a la vez**, tenés que sacrificar uno. La **mantenibilidad no entra en ese trade-off —siempre querés maximizarla—**. Y modela el **valor de un test como el _producto_ de los cuatro atributos**: si **alguno** es cero, el test no vale nada (por eso un test trivialmente resistente pero sin protección es inútil, y por eso la mantenibilidad —aunque esté fuera de la tensión— también multiplica: un test ilegible e infumable de mantener tiende su valor a cero). En la práctica sostenés **protección + resistencia** y sacrificás **feedback rápido** cuando hace falta —por eso los tests de integración contra Postgres real, más lentos, igual valen la pena—. El cuadrante que se desprende (sobre los dos ejes que definen un test valioso):
 
 - **Mucha protección + poca resistencia** = los **tests frágiles** del módulo 5 (sobre-mockeados): atrapan bugs pero también saltan ante refactors legítimos. Peor de lo que parece, porque entrenan a ignorar la suite.
 - **Mucha resistencia + poca protección** = tests **triviales** (testear un getter): nunca se rompen pero tampoco atrapan nada. Inútiles.
@@ -327,6 +330,8 @@ it('detecta un assignee que dejó de ser miembro (bug #412)', () => {
   expect(task.hasValidAssignee(project)).toBe(false); // ← comportamiento NUEVO que el bug pide
 });
 ```
+
+(`project.removeMember()` y `task.hasValidAssignee()` todavía no existen en el andamiaje del módulo 3: son justamente el comportamiento que este ciclo va a implementar. Que el test no compile **es** el rojo —ley 2: no compilar es fallar—, igual que cuando introdujimos `assignTo` en el módulo 3.)
 
 Tres ventajas enormes: (a) el rojo **confirma que reprodujiste el bug** —si pasa de una, no entendiste el bug—; (b) cuando lo arreglás y se pone verde, **probaste que lo arreglaste** de verdad, no que creés que sí; (c) el test queda para siempre como **protección contra esa regresión** —si alguien reintroduce el bug, salta—. Por eso los bugs son la mejor materia prima del golden set... y acá conecta literal con el [módulo 2 de Evaluations](evals.md): un fallo de producción se convierte en un caso de test permanente, en código y en evals.
 
@@ -464,6 +469,7 @@ it('lanza al abrir la 6ta tarea', () => {
 // 🔵 refactor: extraé el 5 a una constante con nombre (MAX_OPEN_TASKS) y, si la
 //    regla crece, considerá una política de proyecto. Tests siguen verdes.
 ```
+3.6 **Ciclo 1 (green):** sobre la asignación en sí fue **implementación obvia** (`this.assigneeId = userId` es lo trivial y directo), pero respecto a la **regla de pertenencia** fue **fake it**: la ignoró deliberadamente (asignar a cualquiera) para pasar el único test que existía, posponiendo el caso general. **Ciclo 2 (green):** **triangulación** — el segundo test (no-miembro debe lanzar) es el segundo punto de datos que el hardcode ya no satisface, y eso fuerza la implementación general (el chequeo real de pertenencia). Es el patrón típico: un primer green que finge, y un segundo test que triangula hacia la solución completa.
 
 ### Módulo 4
 4.1 **Classicist**: la unidad es **un comportamiento**; mockea **solo** las dependencias incómodas/out-of-process (DB, red, reloj), usando reales las demás. **Mockist**: la unidad es **una clase**; mockea **todas** sus colaboradoras y verifica interacciones.
