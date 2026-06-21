@@ -6,7 +6,7 @@
 
 **Lo que asumimos.** TypeScript (modo `--strict`), POO y el patrón Repository ([NestJS senior](nestjs-senior.md)), nociones de transacciones ([PostgreSQL](postgresql.md)) y de eventos ([Event-driven](event-driven.md)). El dominio de ejemplo es un **e-commerce** (Ventas, Facturación, Envíos, Soporte), con el `Pedido` como protagonista táctico.
 
-**Para practicar.** No hace falta instalar nada: es modelado en TypeScript. El código de las soluciones compila en `--strict`. Lo que sí conviene tener a mano es un **dominio real** (el tuyo, o el e-commerce del módulo) para no quedarte en lo abstracto.
+**Para practicar.** No hace falta instalar nada: es modelado en TypeScript. Los snippets de cada módulo son **fragmentos ilustrativos** (asumen tipos de soporte como `Dinero`, `ClienteId`, `LineaPedido`, etc.); el código del **capstone** y de las **soluciones** compila en `--strict` cuando se completa con esos tipos. Lo que sí conviene tener a mano es un **dominio real** (el tuyo, o el e-commerce del módulo) para no quedarte en lo abstracto.
 
 > Nota sobre el "estado del arte 2026": DDD no tiene *breakthroughs* anuales; evoluciona por **síntesis**. Lo moderno (vs el "blue book" de Evans de 2003) es: DDD **pragmático y liviano** (Vlad Khononov, *Learning Domain-Driven Design*, 2021), el **modelado colaborativo** (EventStorming de Brandolini; Event Modeling de Adam Dymitruk; Domain Storytelling), el **giro sociotécnico** (Team Topologies, Skelton & Pais), el diseño táctico **type-driven/funcional** (Scott Wlaschin, *Domain Modeling Made Functional*), el **modular monolith** por sobre el "microservicios primero", y la **relevancia en la era de la IA**. Todo eso está en este módulo, con sus fuentes.
 
@@ -65,7 +65,9 @@ servicio.process(pedido, 2);
 // ✅ El código ES el lenguaje del negocio: cualquiera del negocio entiende qué hace
 pedido.confirmar();
 pedido.aplicarDescuento(cupon);
-if (pedido.estaListoParaEnviar()) { ... }
+if (pedido.estaListoParaEnviar()) {
+  despacho.programar(pedido);
+}
 ```
 
 Tres cosas que tenés que internalizar sobre el lenguaje ubicuo:
@@ -100,6 +102,8 @@ La heurística de esfuerzo, que es **el** insight estratégico moderno:
 | **Supporting** | Necesario, no diferencial, simple | Medio (a veces CRUD) | Construir simple |
 | **Generic** | Resuelto, igual para todos | Mínimo | **Comprar / off-the-shelf** |
 
+Un matiz importante: la clasificación **no es estática ni siempre nítida**. Un subdominio puede ser core hoy y *commoditizarse* mañana (lo que te diferenciaba se vuelve estándar de la industria y conviene comprarlo), o ser "core" solo en una dimensión y genérico en otra. Tratá los tres tipos como una **guía de inversión que se revisa**, no como etiquetas fijas que pegás una vez.
+
 El error caro y muy común: invertir esfuerzo de DDD táctico en un subdominio **genérico** (modelar elaboradamente tu propio sistema de auth) mientras el **core** —donde sí importa— queda como un CRUD anémico. La regla: **identificá tu core domain y volcá ahí el esfuerzo de modelado; comprá lo genérico; mantené simple lo de soporte.** Esto conecta directo con el criterio de cierre (módulo 13): DDD táctico es para el **core complejo**, no para todo. La frase mental: **dividí el sistema en subdominios —core (tu ventaja, complejo → máximo esfuerzo de DDD, in-house), supporting (necesario, simple → esfuerzo medio), generic (resuelto, igual para todos → comprar)— y volcá el modelado rico donde te diferenciás, no en un genérico que otros ya resolvieron—.**
 
 **Ejercicios 3**
@@ -124,22 +128,26 @@ El ejemplo canónico es el término **"Cliente"**:
 El error que parece "lo correcto" pero es un desastre: crear **un único modelo `Cliente` gigante** que sirva a todos los contextos. Termina siendo una clase con 60 campos donde la mitad son `null` según quién la use, acoplada a todo, que nadie entiende y que cambia por razones de cuatro equipos distintos. La jugada DDD: **un modelo `Cliente` por contexto**, cada uno con **solo lo que ese contexto necesita**, y se relacionan por **identidad compartida (un `clienteId`)** y **eventos**, no por una clase compartida.
 
 ```ts
-// Ventas: el Cliente que le importa a Ventas
-class Cliente { // (en el módulo/contexto de Ventas)
-  constructor(
-    readonly id: ClienteId,
-    private readonly historialCompras: Compra[],
-    private readonly descuentos: Descuento[],
-  ) {}
+// Cada contexto es su propio módulo/namespace: el MISMO nombre `Cliente` convive
+// porque vive en scopes distintos (en el repo serían ventas/cliente.ts y facturacion/cliente.ts).
+namespace Ventas {
+  export class Cliente {          // el Cliente que le importa a Ventas
+    constructor(
+      readonly id: ClienteId,
+      private readonly historialCompras: Compra[],
+      private readonly descuentos: Descuento[],
+    ) {}
+  }
 }
 
-// Facturación: OTRO Cliente, con lo que Facturación necesita — mismo id, modelo distinto
-class Cliente { // (en el módulo/contexto de Facturación)
-  constructor(
-    readonly id: ClienteId,        // misma identidad
-    readonly datosFiscales: DatosFiscales,
-    readonly condicionImpositiva: CondicionImpositiva,
-  ) {}
+namespace Facturacion {
+  export class Cliente {          // OTRO Cliente — mismo id, modelo distinto
+    constructor(
+      readonly id: ClienteId,     // misma identidad
+      readonly datosFiscales: DatosFiscales,
+      readonly condicionImpositiva: CondicionImpositiva,
+    ) {}
+  }
 }
 ```
 
@@ -184,6 +192,7 @@ class AclFacturacion {
 - **Shared Kernel**: dos contextos comparten **una porción pequeña de modelo** (código común). Poderoso pero **peligroso**: ese kernel compartido acopla los dos equipos (cualquier cambio los afecta a ambos), así que se reserva para un núcleo chico, estable y co-gestionado.
 - **Partnership**: dos equipos/contextos con éxito o fracaso mutuo, coordinación estrecha y bidireccional.
 - **Separate Ways**: la decisión de **no integrar** —duplicar es más barato que el costo de integrar—. A veces la respuesta correcta.
+- **Big Ball of Mud**: no es un patrón a buscar, sino el que **identificás para defenderte**. Es el contexto legacy sin estructura ni lenguaje claro (donde todo se mezcla); al mapear sistemas heredados conviene marcarlo como tal y **aislarlo detrás de un ACL** para que su desorden no contamine los contextos sanos.
 
 El **context map** es el diagrama que muestra tus contextos y qué patrón los relaciona —una herramienta de comunicación de arquitectura de primer nivel, porque hace visible el acoplamiento—. La regla de criterio: **cuando integrás con un modelo que no controlás o no querés que te contamine, ACL; cuando exponés a muchos, OHS + lenguaje publicado; conformist solo si el modelo ajeno es bueno y no lo podés negociar; shared kernel lo mínimo posible.** La frase mental: **el context mapping cataloga cómo se relacionan los contextos —ACL (traducí y protegé tu modelo del ajeno, el más útil), OHS+published language (exponé un contrato estable si muchos te consumen), conformist (acoplate sin traducir si no podés negociar), shared kernel (compartí lo mínimo, acopla equipos), separate ways (no integres)—; el context map hace visible el acoplamiento y es decisión de arquitectura de primer nivel—.**
 
@@ -279,6 +288,7 @@ La regla práctica que distingue al senior: **modelá con value objects todo lo 
 7.2 ¿Qué significa "hacer imposibles los estados inválidos" y cómo lo logra un value object? Dá el ejemplo del Email.
 7.3 ¿Por qué una entity es mutable pero no tiene setters públicos? ¿Cómo cambia su estado entonces?
 7.4 ¿Qué es la "primitive obsession" y por qué modelar con value objects la combate? ¿Cuándo NO conviene un value object?
+7.5 **Implementá.** Escribí un value object `Dinero` (monto + moneda) con igualdad por valor, validación en el constructor (monto no negativo) y un método `sumar` que **lance** si las monedas difieren. Que compile en `--strict`.
 
 ---
 
@@ -290,6 +300,7 @@ El ejemplo clásico: un `Pedido` (raíz) contiene `LineasDePedido`. **No modific
 
 ```ts
 class Pedido {                          // aggregate root
+  readonly id!: PedidoId;               // identidad (constructor de creación/reconstitución omitido; ver módulo 9)
   private lineas: LineaPedido[] = [];
   private estado: "borrador" | "confirmado" = "borrador";
   private eventos: EventoDeDominio[] = [];
@@ -308,7 +319,11 @@ class Pedido {                          // aggregate root
     this.eventos.push(new PedidoConfirmado(this.id, this.total())); // evento de dominio (módulo 9)
   }
 
-  private total(): Dinero { /* suma de líneas; invariante: nunca negativo */ ... }
+  private total(): Dinero {
+    // suma de las líneas; la invariante "nunca negativo" se sostiene porque
+    // cada LineaPedido ya validó cantidad > 0 y precio >= 0 en su constructor
+    return this.lineas.reduce((acc, l) => acc.sumar(l.subtotal()), Dinero.cero("USD"));
+  }
 }
 ```
 
@@ -338,6 +353,7 @@ Esta última es la regla más contraintuitiva y la más importante: **dentro de 
 8.2 ¿Por qué conviene diseñar aggregates chicos? ¿Qué problemas trae el aggregate gigante?
 8.3 ¿Por qué se referencia a otros aggregates por ID y no por objeto? Dá el ejemplo de `Pedido`/`Cliente`.
 8.4 Explicá la regla "una transacción = un aggregate" y qué implica para la consistencia entre aggregates. Dá el ejemplo de confirmar pedido / descontar stock.
+8.5 **Implementá.** El negocio define que, por un **límite operativo de picking/packing del depósito**, un pedido no puede tener más de 20 líneas distintas. Agregá esa invariante de negocio al método `agregarLinea` del aggregate `Pedido` y escribí un test que la viole (espere el error). (Ojo al modelar: una invariante *de negocio* —tiene una razón del dominio— no es lo mismo que un límite técnico arbitrario; protegé en el aggregate las primeras.)
 
 ---
 
@@ -369,9 +385,24 @@ interface PedidoRepository {
 // La implementación (PedidoRepositoryPostgres) vive en INFRAESTRUCTURA y el dominio no la conoce.
 ```
 
-**Domain service (servicio de dominio).** Lógica de dominio que **no pertenece naturalmente a ninguna entity ni value object** —típicamente una operación que involucra **varios aggregates**—. Ej.: un `ServicioDeTransferencia` que mueve dinero entre dos cuentas (no es responsabilidad de una cuenta sola). **Cuidado**: es para lógica de **dominio** genuina, no para meter ahí lógica que en realidad va en un aggregate (el síntoma del *modelo anémico*: aggregates sin comportamiento y "services" con toda la lógica).
+**Persistir el aggregate sin filtrar el ORM.** Acá está la tensión real que toda entrevista de arquitectura toca: tu aggregate tiene **constructor privado, campos privados e invariantes**, pero un ORM (TypeORM/Prisma) quiere entidades anémicas con setters públicos o decoradores. Si ponés decoradores de TypeORM sobre tu `Pedido`, el ORM se **filtró** al dominio (acoplamiento). La salida es un **mapper en infraestructura** que traduce entre el modelo de persistencia (filas/DTOs) y el aggregate, y un constructor de **reconstitución** separado del de creación:
+
+```ts
+class Pedido {
+  // crear(): valida invariantes — para un pedido NUEVO
+  static crear(id: PedidoId, clienteId: ClienteId): Pedido { /* ...reglas... */ }
+  // reconstituir(): rehidrata desde la DB SIN re-validar (esos datos ya fueron válidos)
+  static reconstituir(estado: PedidoEstadoPersistido): Pedido { /* ...arma sin chequear... */ }
+}
+```
+
+Dos puntos que el repositorio resuelve y que hay que nombrar: (1) **`crear` vs `reconstituir`** —crear corre las invariantes, reconstituir confía en lo que ya estaba en la base, sin volver a validar ni exponer setters—; (2) **concurrencia**: como "una transacción = un aggregate" (módulo 8), dos transacciones sobre el mismo `Pedido` se resuelven con **optimistic locking** (un campo `version` que se chequea al guardar; si cambió, reintentás) —el mecanismo del módulo de [PostgreSQL](postgresql.md)—.
+
+**Domain service (servicio de dominio).** Lógica de dominio que **no pertenece naturalmente a ninguna entity ni value object** —típicamente una operación que involucra **varios aggregates**—. Ej.: un `ServicioDeTransferencia` que coordina mover dinero entre dos cuentas (no es responsabilidad de una cuenta sola). **Ojo con la regla 4 del módulo 8**: si cada `Cuenta` es su propio aggregate, el domain service **no** debita y acredita las dos en una sola transacción —eso sería consistencia inmediata entre aggregates—; coordina la lógica, pero la transferencia real se resuelve con **consistencia eventual** (débito → evento → crédito), o es una **saga** (ver abajo). El domain service encapsula el *cálculo/decisión* de dominio, no fuerza una transacción cruzada. **Cuidado** también con el abuso: no metas en services lógica que en realidad va en un aggregate (el síntoma del *modelo anémico*: aggregates sin comportamiento y "services" con toda la lógica).
 
 **Factory (fábrica).** Encapsula la **creación compleja** de un aggregate o value object cuando construirlo bien requiere lógica (varios pasos, invariantes a chequear al crear). Si crear un `Pedido` válido tiene reglas, una factory las concentra en vez de desparramarlas.
+
+**Saga / Process Manager.** Cuando un flujo del negocio **cruza varios aggregates o contextos** y "una transacción = un aggregate" (módulo 8) te lo prohíbe en una sola transacción, el coordinador de ese flujo es una **saga** (o *process manager*): una secuencia de pasos disparados por eventos, **con acciones de compensación** si un paso falla. El caso de libro: confirmar pedido → cobrar → reservar stock → despachar; si el **cobro falla** después de reservar stock, la saga ejecuta la **compensación** (liberar el stock, cancelar el pedido). Es lo que cierra el flujo que el módulo 8 dejó en "un handler descuenta el stock después": ese handler, encadenado con compensaciones, **es** la saga. Hay dos estilos (lo profundiza [event-driven](event-driven.md)): **coreografía** (cada aggregate reacciona a eventos, sin un coordinador central —simple, pero el flujo queda implícito—) y **orquestación** (un process manager explícito dirige los pasos —más visible y testeable cuando el flujo es complejo—). En EventStorming, la saga es justamente la **policy** (post-it lila, módulo 6): "cuando pasó X, hacé Y". La regla: no hay transacciones distribuidas ACID entre aggregates; hay sagas con consistencia eventual y compensación.
 
 El antipatrón que enmarca todo esto: el **modelo anémico** (*anemic domain model*). Es cuando tus "entities" son **bolsas de datos con getters/setters y cero comportamiento**, y toda la lógica vive en "services" gordos. Parece DDD (hay clases con nombres del dominio) pero **no lo es**: es procedural disfrazado. El DDD táctico de verdad pone el **comportamiento donde están los datos** —el `Pedido` sabe confirmarse, la `Cuenta` sabe debitar—; los domain services son la excepción para lo que genuinamente cruza aggregates, no la regla. La frase mental: **domain events comunican lo que pasó entre aggregates/contextos (consistencia eventual); repositories persisten aggregates como una colección (uno por aggregate root, interfaz en el dominio, impl en infra); domain services son para lógica que cruza varios aggregates; factories encapsulan creación compleja —y el enemigo a evitar es el modelo anémico, entities sin comportamiento con toda la lógica en services gordos—.**
 
@@ -380,6 +411,8 @@ El antipatrón que enmarca todo esto: el **modelo anémico** (*anemic domain mod
 9.2 ¿Por qué hay un repositorio por aggregate root y no por tabla? ¿Dónde vive la interfaz y dónde la implementación, y con qué patrón conecta?
 9.3 ¿Cuándo usás un domain service y cuál es el riesgo de abusar de ellos?
 9.4 ¿Qué es el "modelo anémico", por qué es un antipatrón, y cómo se ve un modelo rico en cambio?
+9.5 "Confirmar pedido → cobrar → reservar stock → despachar". Si el **cobro falla** después de reservar el stock, ¿qué patrón coordina el flujo y qué hace ante el fallo? Distinguí coreografía de orquestación.
+9.6 Tu `Pedido` tiene constructor privado con invariantes. ¿Cómo lo reconstruís desde la base de datos sin saltear ni exponer esas invariantes, y cómo evitás que el ORM se filtre al dominio?
 
 ---
 
@@ -420,6 +453,7 @@ Por qué esto importa para DDD específicamente: el modelo de dominio es lo más
 10.2 ¿Qué hace la capa de aplicación y qué NO hace? Dá el ejemplo del `ConfirmarPedidoHandler`.
 10.3 Enunciá la regla de dependencia. ¿Cómo permite cambiar Postgres por Mongo sin tocar el dominio?
 10.4 ¿Por qué un dominio puro es especialmente fácil de testear, y con qué módulo del temario conecta?
+10.5 **Implementá.** Escribí el handler de aplicación `CancelarPedido` (capa de aplicación): carga el `Pedido` del repositorio, llama a la regla de dominio (`pedido.cancelar()`), guarda y publica los eventos —sin meter lógica de negocio en el handler—.
 
 ---
 
@@ -453,12 +487,7 @@ El criterio integrador: **DDD te da el modelo y los límites; la arquitectura (m
 
 - **El Inverse Conway Maneuver**: como la organización moldea la arquitectura, **organizá los equipos a propósito para obtener la arquitectura que querés**. Si querés bounded contexts autónomos (Ventas, Facturación, Envíos), armá **equipos alineados a esos contextos** —no equipos por capa técnica—. El bounded context (módulo 4) deja de ser solo una frontera de software y se vuelve también una **frontera de equipo**.
 
-**Team Topologies** (Matthew Skelton & Manuel Pais, 2019) es el marco moderno que sistematiza esto, y se volvió compañero inseparable del DDD estratégico. Define cuatro tipos de equipo y tres modos de interacción:
-
-- **Stream-aligned team**: el equipo principal, alineado a un flujo de valor —típicamente **un bounded context**—. Es dueño de su contexto de punta a punta (lo construye, lo despliega, lo opera).
-- **Platform team**: provee servicios internos (infra, herramientas) que les facilitan la vida a los stream-aligned —un subdominio **genérico** (módulo 3) servido como plataforma—.
-- **Enabling team**: ayuda a otros equipos a adquirir capacidades (mentoring, prácticas), temporalmente.
-- **Complicated-subsystem team**: dueño de una parte que requiere expertise profunda (un motor de cálculo complejo, ML).
+**Team Topologies** (Matthew Skelton & Manuel Pais, 2019) sistematiza esto con **cuatro tipos de equipo** —*stream-aligned* (≈ un bounded context, dueño de punta a punta), *platform* (sirve un subdominio genérico como plataforma interna), *enabling* (sube de nivel a otros, temporal) y *complicated-subsystem* (expertise profunda)— y tres modos de interacción. El **detalle de los cuatro tipos y los tres modos está en el [módulo de Liderazgo técnico](liderazgo.md)** (una sola fuente de verdad, para no duplicar); acá lo que importa es el **ángulo DDD**: el tipo que mapea a un bounded context es el **stream-aligned**, y el subdominio genérico (módulo 3) suele servirse como **platform**.
 
 El concepto central que lo une con DDD es la **carga cognitiva (cognitive load)**: un equipo solo puede entender y mantener bien una cantidad limitada de complejidad. **Un bounded context bien dimensionado es, además, una unidad de carga cognitiva manejable para un equipo.** Si un contexto es demasiado grande, sobrecarga al equipo; si los límites están mal trazados, los equipos se pisan constantemente. Por eso el dimensionamiento de bounded contexts y la estructura de equipos **se diseñan juntos**.
 
@@ -489,6 +518,21 @@ Esto es **emergente**, no dogma asentado: la práctica de combinar DDD con desar
 - **DDD táctico rico (aggregates, value objects, todo el módulo 7-9)**: solo en el **core domain complejo** —donde la lógica de negocio es intrincada, cambia seguido, y es tu ventaja—. Ahí el modelado paga con creces.
 - **DDD estratégico (lenguaje ubicuo, bounded contexts, context mapping)**: vale **casi siempre que haya más de un subdominio**, incluso en sistemas medianos —es barato y previene el modelo gigante—. El lenguaje ubicuo, en particular, **siempre** rinde.
 - **Un CRUD simple, un subdominio genérico o de soporte trivial**: **no** necesita aggregates ni el aparato táctico completo. Forzar DDD táctico ahí es **over-engineering** —complejidad y ceremonia sin retorno—. Un CRUD honesto es mejor que un "DDD" de juguete.
+
+El "DDD de juguete" (over-engineering) al lado de lo calibrado:
+
+```ts
+// ❌ Over-engineering: ceremonia sin retorno en un concepto trivial
+class NombreDeEtiqueta {                 // un value object para... el nombre de una etiqueta
+  private constructor(readonly valor: string) {}
+  static crear(v: string): NombreDeEtiqueta { return new NombreDeEtiqueta(v); } // no valida nada real
+}
+class EtiquetaService { /* "domain service" para un CRUD de etiquetas sin reglas */ }
+
+// ✅ Calibrado: lo trivial es un tipo simple; el esfuerzo de modelado va al core
+type NombreDeEtiqueta = string;          // una etiqueta no tiene reglas → no necesita VO
+// y los aggregates/VOs con invariantes se reservan para el Pedido del core, donde sí pagan
+```
 
 El error en los dos extremos: el junior que hace un CRUD anémico del core complejo (subdiseña lo importante), y el que mete aggregates y value objects en cada tabla de un sistema sin complejidad real (sobre-diseña lo trivial). **La marca del senior es calibrar.** Y el principio que recorre todo el temario: **la mejor solución es la más simple que resuelve el problema real** —en DDD: el modelado más rico donde la complejidad del dominio lo justifica, y nada de ceremonia donde no—. La frase mental: **DDD en la era de la IA importa más (el lenguaje ubicuo es el mejor contexto para el LLM, los bounded contexts scopean RAG/agentes, y el riesgo es que la IA erosione el modelo hacia CRUD anémico); y el criterio que cierra todo es calibrar el esfuerzo: táctico rico solo en el core complejo, estratégico casi siempre que haya varios subdominios, y nada de ceremonia en un CRUD trivial —subdiseñar el core o sobre-diseñar lo trivial son los dos errores que un senior evita—.**
 
@@ -524,6 +568,7 @@ El ejercicio que cierra el módulo —y que mostrás en una entrevista de arquit
 - **Context map** (módulo 5): dibujá cómo tu contexto se relaciona con otro (ej. un ACL hacia un sistema externo de pagos).
 - **Tests del dominio** ([TDD](tdd.md)): testeá las invariantes del aggregate sin DB, rápido (es donde el dominio puro brilla).
 - **El ángulo IA** (módulo 13): escribí un prompt que use tu lenguaje ubicuo para que un LLM extienda el modelo, y notá cómo un modelo rico produce mejor código que un CRUD anémico.
+- **Migrá un CRUD legacy** (módulos 5, 9, 13): tomá un módulo anémico existente y sacá un aggregate rico del barro —poné el comportamiento en la entity, meté un ACL hacia lo que no controlás, reconstituí el aggregate desde la DB sin filtrar el ORM— justificando **qué NO tocás** (lo trivial que no lo amerita). Es el escenario de entrevista más frecuente.
 
 ---
 
@@ -641,6 +686,28 @@ El ejercicio que cierra el módulo —y que mostrás en una entrevista de arquit
     comportamiento (no podés sumar USD+EUR, ni pasar un clienteId donde va un pedidoId). No conviene para
     cada string: reservalo para conceptos con reglas o significado (dinero, email, cantidades, ids).
 ```
+```ts
+// 7.5
+class Dinero {
+  private constructor(readonly monto: number, readonly moneda: string) {}
+  static crear(monto: number, moneda: string): Dinero {
+    if (monto < 0) throw new Error("El monto no puede ser negativo");
+    return new Dinero(monto, moneda);
+  }
+  static cero(moneda: string): Dinero {              // semilla neutra para sumar (la usa Pedido.total(), módulo 8)
+    return new Dinero(0, moneda);
+  }
+  sumar(otro: Dinero): Dinero {
+    if (this.moneda !== otro.moneda) {
+      throw new Error(`No se puede sumar ${this.moneda} + ${otro.moneda}`);
+    }
+    return new Dinero(this.monto + otro.monto, this.moneda);
+  }
+  equals(otro: Dinero): boolean {                    // igualdad por VALOR
+    return this.monto === otro.monto && this.moneda === otro.moneda;
+  }
+}
+```
 
 ### Módulo 8
 ```
@@ -656,6 +723,21 @@ El ejercicio que cierra el módulo —y que mostrás en una entrevista de arquit
 8.4 Cada transacción modifica un solo aggregate; la consistencia entre aggregates es eventual (vía
     eventos), no inmediata. Ej.: confirmar pedido (un aggregate) NO descuenta stock (otro aggregate) en
     la misma transacción: el Pedido emite PedidoConfirmado y un handler descuenta el stock después.
+```
+```ts
+// 8.5 — la invariante nueva en agregarLinea:
+agregarLinea(producto: ProductoId, cantidad: number, precio: Dinero): void {
+  if (this.estado === "confirmado") throw new Error("Un pedido confirmado no acepta nuevas líneas");
+  if (cantidad <= 0) throw new Error("La cantidad debe ser positiva");
+  if (this.lineas.length >= 20) throw new Error("Un pedido no puede superar las 20 líneas (límite de picking)"); // ← invariante de negocio
+  this.lineas.push(new LineaPedido(producto, cantidad, precio));
+}
+
+it("rechaza la línea número 21", () => {
+  const pedido = Pedido.crear(new PedidoId("p1"), new ClienteId("c1"));
+  for (let i = 0; i < 20; i++) pedido.agregarLinea(new ProductoId(`x${i}`), 1, Dinero.crear(10, "USD"));
+  expect(() => pedido.agregarLinea(new ProductoId("x21"), 1, Dinero.crear(10, "USD"))).toThrow();
+});
 ```
 
 ### Módulo 9
@@ -673,6 +755,16 @@ El ejercicio que cierra el módulo —y que mostrás en una entrevista de arquit
 9.4 Modelo anémico = entities que son bolsas de datos con getters/setters y cero comportamiento, con toda
     la lógica en services gordos. Es antipatrón porque parece DDD pero es procedural disfrazado. Un modelo
     rico pone el comportamiento donde están los datos (Pedido sabe confirmarse, Cuenta sabe debitar).
+9.5 Lo coordina una saga (process manager): ejecuta los pasos vía eventos y, ante un fallo, corre
+    acciones de COMPENSACIÓN (cobro falla después de reservar stock → liberar el stock, cancelar el
+    pedido). No hay transacción ACID distribuida: hay consistencia eventual con compensación. Coreografía
+    = cada aggregate reacciona a eventos sin coordinador central (simple, flujo implícito); orquestación
+    = un process manager explícito dirige los pasos (más visible y testeable cuando el flujo es complejo).
+9.6 Con dos vías de construcción: crear() valida invariantes (pedido nuevo) y reconstituir()
+    rehidrata desde la DB SIN re-validar (esos datos ya fueron válidos), ambas sin setters públicos. El ORM
+    no se filtra porque un mapper en infraestructura traduce entre las filas/DTOs y el aggregate; el dominio
+    no lleva decoradores de TypeORM ni conoce la DB. La concurrencia sobre el mismo aggregate se maneja con
+    optimistic locking (campo version).
 ```
 
 ### Módulo 10
@@ -690,6 +782,23 @@ El ejercicio que cierra el módulo —y que mostrás en una entrevista de arquit
 10.4 Porque no tiene dependencias de infraestructura (DB, framework): se testea con unit tests rápidos sin
      levantar nada, y ahí vive la lógica jugosa (las invariantes). Conecta con TDD (el dominio rico que el
      test-first empuja, y la base de la pirámide).
+```
+```ts
+// 10.5
+class CancelarPedidoHandler {
+  constructor(
+    private readonly pedidos: PedidoRepository,
+    private readonly bus: EventBus,
+  ) {}
+
+  async ejecutar(cmd: CancelarPedido): Promise<void> {
+    const pedido = await this.pedidos.obtenerPorId(cmd.pedidoId);
+    if (!pedido) throw new PedidoNoEncontrado(cmd.pedidoId);
+    pedido.cancelar();                                    // la REGLA vive en el dominio (aggregate)
+    await this.pedidos.guardar(pedido);                   // una transacción = un aggregate
+    await this.bus.publicar(pedido.eventosPendientes());  // eventos → consistencia eventual
+  }
+}
 ```
 
 ### Módulo 11
