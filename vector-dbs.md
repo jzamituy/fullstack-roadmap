@@ -28,7 +28,8 @@ uv add faiss-cpu numpy voyageai anthropic
 9. Metadata filtering y multi-tenant en bases dedicadas
 10. RAG en Python end-to-end: ingest + query con Voyage y Claude
 11. El framework layer: LangChain y LlamaIndex (cuándo sí y cuándo no)
-12. El criterio de cierre: elegir la herramienta y el puente a agentes
+12. Arquitecturas de RAG: cuándo subir de complejidad (naive → corrective → graph → agentic)
+13. El criterio de cierre: elegir la herramienta y el puente a agentes
 
 Las soluciones de **todos** los ejercicios están al final, en la sección "Soluciones".
 
@@ -453,7 +454,7 @@ Para producción, este mismo flujo se expone como endpoint con [FastAPI](fastapi
 **La diferencia de carácter entre las dos:**
 
 - **LlamaIndex** es **RAG/indexing-first**. Su mundo es: documentos → *nodes* (chunks) → *index* → *query engine*. Si lo tuyo es "ingestar datos y responder preguntas sobre ellos", LlamaIndex es el que está pensado exactamente para eso y te lo deja en pocas líneas.
-- **LangChain** es **orquestación general** de apps LLM: componer pasos con **LCEL** (LangChain Expression Language), muchísimas integraciones, y —clave para el próximo módulo— **LangGraph** para flujos con estado y agentes (eso lo vemos en [AI Agents](ai-agents-python.md), no acá). LangChain también hace RAG, pero su ambición es más amplia que el retrieval.
+- **LangChain** es **orquestación general** de apps LLM: componer pasos con **LCEL** (LangChain Expression Language), muchísimas integraciones, y —clave para el track de agentes— **LangGraph** para flujos con estado y agentes (eso lo vemos en [AI Agents](ai-agents-python.md), no acá). LangChain también hace RAG, pero su ambición es más amplia que el retrieval.
 
 Un RAG con LlamaIndex, para que veas la **densidad** (forma de la API a 2026 — estos paquetes cambian seguido, verificá versiones):
 
@@ -515,7 +516,54 @@ La frase mental: **LangChain/LlamaIndex automatizan el cableado del RAG y te dan
 
 ---
 
-## Módulo 12 — El criterio de cierre: elegir la herramienta y el puente a agentes
+## Módulo 12 — Arquitecturas de RAG: cuándo subir de complejidad (corrective, graph, agentic)
+
+**Teoría.** El RAG del módulo 10 es el **piso**: embeddear la pregunta, traer top-k, generar grounded. Resuelve la mayoría de los casos. Pero circula una zoología de "arquitecturas RAG" —Naive, Advanced, Modular, Corrective (CRAG), Self-RAG, GraphRAG, Agentic— que en blogs y entrevistas casi siempre te presentan **mal**: como seis cajas entre las que elegís una. No lo son. Son **dos ejes ortogonales más una técnica que va aparte**, y entender eso es lo que separa al que razona del que memorizó la lista.
+
+**Primer eje — cuán sofisticado es el pipeline de retrieval** (la taxonomía del survey de Gao et al., 2023/2024 — arXiv 2312.10997):
+
+- **Naive RAG**: el del módulo 10. Un solo paso de retrieval, sin pre ni post-procesado. El default sensato.
+- **Advanced RAG**: agrega pasos *antes* y *después* del retrieval para subir recall y precisión —pero el flujo sigue siendo **fijo**—. Las piezas (varias ya vistas en [RAG](rag.md) y en este módulo) se combinan a la carta:
+  - *Pre-retrieval*: **query transformation** —reescribir la pregunta, **HyDE** (embeddear una *respuesta hipotética* generada por el LLM en vez de la pregunta cruda), multi-query (varias reformulaciones), descomposición de preguntas complejas— y **routing** (mandar la query al índice/fuente correcto).
+  - *Retrieval*: **búsqueda híbrida** (denso + sparse/BM25; la combinación de rankings se hace típicamente con **RRF**, Reciprocal Rank Fusion).
+  - *Post-retrieval*: **reranking** con cross-encoder ([RAG](rag.md) mód. 6) y **compresión/filtrado** del contexto.
+- **Modular RAG**: el pipeline deja de ser una tubería fija y pasa a ser **reconfigurable** —módulos intercambiables, múltiples fuentes (vector store + SQL + web + API), bucles— (el framing "reconfigurable / LEGO-like" viene del paper *Modular RAG*, Gao et al., 2024). Es la base sobre la que se montan los patrones de abajo.
+
+**Segundo eje — cuánto control le delegás al modelo sobre el propio retrieval** (el mismo eje "control explícito vs emergente" de [AI Agents](ai-agents-python.md)): de un flujo **estático** (vos decidís siempre buscar, una vez, antes de generar) a uno **adaptativo/agéntico** (el modelo decide *si* buscar, *qué* buscar, *cuándo* parar, y puede **iterar y autocorregirse**). Sobre este eje viven los patrones "avanzados", que **no son categorías excluyentes sino conductas que se apilan**:
+
+| Patrón | Qué problema resuelve | Qué agrega | Costo | Se combina con |
+|---|---|---|---|---|
+| **Corrective RAG (CRAG)** | el retrieval a veces trae basura y generás sobre basura | un **evaluador de relevancia** califica los docs recuperados; si son malos, dispara una **acción correctiva** (re-query, fallback a web) | +1 paso de evaluación + ramas | Advanced, Agentic |
+| **Self-RAG** | no siempre hace falta buscar, y a veces la respuesta no se sostiene en el contexto | el modelo **se autoevalúa**: decide si recuperar, y critica relevancia y *si la respuesta está fundamentada* (reflexión) | +llamadas de auto-crítica | CRAG, Agentic |
+| **GraphRAG** | preguntas **multi-hop** o **globales** ("¿qué temas atraviesan todo el corpus?", "¿cómo se relaciona X con Y?") que la similitud vectorial sola no contesta | un **grafo de conocimiento** (entidades+relaciones) + resúmenes de comunidades construidos en el ingest; se **recorre** el grafo, no solo se buscan vecinos | ingest caro (muchas llamadas LLM) + grafo a mantener | retrieval vectorial (híbrido) |
+| **Agentic RAG** | el caso necesita **decidir dinámicamente** qué fuente usar, iterar, combinar herramientas y verificar | un **agente** (loop tool-use) donde "buscar" es una herramienta más; absorbe los comportamientos de CRAG/Self-RAG como conducta emergente | la más alta (varias llamadas, latencia) | todo lo anterior; es el techo del eje |
+
+La clave conceptual que la lista de "seis arquitecturas" erra: **CRAG, Self-RAG y Agentic no son tres productos distintos, son puntos del mismo eje de "cuánto razonamiento de control le delegás al modelo".** Un agente capaz hace CRAG y Self-RAG *sin que los programes aparte* —emergen del loop—. (Ojo con la tabla: para estos tres, la columna "se combina con" no significa que sean módulos que enchufás juntos, sino **intensidades crecientes del mismo eje** —Agentic absorbe a los anteriores—; y el orden CRAG↔Self-RAG es **aproximado**: atacan momentos distintos del flujo —corregir lo recuperado vs decidir si recuperar—, no es que uno tenga "más control" que el otro.) Y **GraphRAG es de otro eje** (el enfoque de Microsoft, Edge et al., 2024 — de ahí los "resúmenes de comunidades"): no es "más control", es una **estructura de índice distinta** para una **forma de pregunta distinta** (global/multi-hop), y **convive** con el RAG vectorial, no lo reemplaza.
+
+**El árbol de decisión honesto.** La regla es la de todo el temario: **subís un escalón solo cuando una falla *medida* lo exige** (recall@k, faithfulness — [evals](evals.md)), no porque el patrón suene serio.
+
+1. Arrancá en **Naive** (mód. 10). Medí.
+2. ¿Recall bajo, la pregunta se redacta distinto a los docs? → **query transformation + híbrido** (Advanced).
+3. ¿El contexto trae ruido y baja la precisión? → **reranking** (Advanced).
+4. ¿A veces el retrieval es irrelevante y responder mal sale caro? → paso de **relevancia/corrección (CRAG)** con fuente de fallback.
+5. ¿Las preguntas son **multi-hop o globales** sobre todo el corpus? → evaluá **GraphRAG**, *solo* si probaste que el RAG vectorial no las contesta (construir y mantener el grafo es caro).
+6. ¿El sistema debe **decidir y orquestar** el retrieval (múltiples fuentes, iterar, verificar)? → **Agentic RAG** ([AI Agents](ai-agents-python.md)). El escalón más caro y el último.
+
+Cada escalón suma **latencia y llamadas al modelo** (= plata). Por eso ninguno se agrega "por las dudas": se agrega cuando mueve un número. Un Naive bien hecho —con buen chunking— resuelve más casos de los que la lista de arquitecturas sugiere.
+
+**Stack y honestidad.** Los patrones correctivos/agénticos se *implementan* con un orquestador de estado —en Python, típicamente **LangGraph** ([AI Agents](ai-agents-python.md))—: no son una API nueva, son **control-flow** alrededor de las mismas piezas (retrieve, rerank, generate) del módulo 10. "CRAG" (Yan et al., 2024) y "Self-RAG" (Asai et al., 2023) son métodos publicados concretos, y conviene no confundir el paper con lo que vas a escribir vos: **Self-RAG en su forma original es un modelo *fine-tuneado*** que emite *reflection tokens* (Retrieve / IsRel / IsSup / IsUse) durante el decoding, no un patrón de prompting; en la práctica casi siempre implementás *la idea* (grading de relevancia, autoevaluación) como **prompt + ramas**, no el método entrenado al pie de la letra. Y dónde **parar de subir** es decisión de producto: cada escalón compra calidad con latencia, costo y **no-determinismo** —y esto último pega fuerte en el perfil AI QA—: un loop agéntico se evalúa por su **trayectoria**, no solo por el output final ([evals](evals.md), [AI Agents](ai-agents-python.md)), y es bastante más difícil de testear que un pipeline fijo (ángulo AI QA de [API testing](api-testing.md) y [Playwright](playwright.md)).
+
+La frase mental: **las "arquitecturas RAG" no son seis cajas para elegir una: son dos ejes —sofisticación del pipeline (naive→advanced→modular) y control delegado al modelo (estático→corrective→self→agentic)— más GraphRAG, que es otra cosa (índice de grafo para preguntas globales/multi-hop). Apilás técnicas escalón por escalón y solo subís cuando una falla medida lo justifica.**
+
+**Ejercicios 12**
+12.1 La lista popular presenta "6 arquitecturas RAG" como opciones paralelas. ¿Por qué es una taxonomía engañosa? Reordenala en los dos ejes + la técnica que va aparte.
+12.2 Diferenciá query transformation (incluí HyDE) de reranking: ¿cuál actúa antes y cuál después del retrieval, y qué métrica mejora cada uno (recall vs precisión)?
+12.3 ¿En qué se diferencian CRAG, Self-RAG y Agentic RAG, sobre qué eje viven los tres, y por qué un agente capaz los "absorbe"?
+12.4 ¿Qué forma de pregunta justifica GraphRAG, por qué la similitud vectorial no la cubre y por qué no reemplaza al RAG vectorial? Además: tenés un Naive sobre 50k chunks, respuestas fieles pero se pierde info cuando la pregunta usa sinónimos de los docs — ¿qué escalón agregás y por qué no saltás directo a Agentic?
+
+---
+
+## Módulo 13 — El criterio de cierre: elegir la herramienta y el puente a agentes
 
 **Teoría.** El cierre, que ata las internas con la decisión de arquitectura. La pregunta de entrevista no es "¿sabés usar Pinecone?" sino "**¿por qué esta vector DB, este índice y estos parámetros para este caso?**". El árbol de decisión completo:
 
@@ -541,11 +589,11 @@ Y el principio que es el alma de todo el temario, una vez más: **escalá la her
 
 La frase mental: **elegí la vector DB y el índice justificando escala, filtros, operación y métrica —no por moda—, medí la decisión con recall y latencia, y recordá que la base vectorial es un componente: en un agente, buscar es solo una herramienta más en el loop.**
 
-**Ejercicios 12**
-12.1 Recorré el árbol de decisión para: (a) 30.000 chunks de apuntes, ya usás Postgres, multi-tenant; (b) 80 millones de vectores de imágenes, RAM acotada, sin filtros; (c) corpus mediano estático, read-heavy, sin servidor, sin filtros.
-12.2 ¿Por qué "elegir mal la base óptima" no es el error caro, y cuál sí lo es? Dá los dos extremos.
-12.3 ¿Cómo se "mide" una decisión de vector DB en vez de adivinarla? (qué métricas, contra qué)
-12.4 ¿Qué rol cumple la búsqueda vectorial dentro de un agente, y cómo cambia respecto a un RAG clásico quién dispara el retrieval?
+**Ejercicios 13**
+13.1 Recorré el árbol de decisión para: (a) 30.000 chunks de apuntes, ya usás Postgres, multi-tenant; (b) 80 millones de vectores de imágenes, RAM acotada, sin filtros; (c) corpus mediano estático, read-heavy, sin servidor, sin filtros.
+13.2 ¿Por qué "elegir mal la base óptima" no es el error caro, y cuál sí lo es? Dá los dos extremos.
+13.3 ¿Cómo se "mide" una decisión de vector DB en vez de adivinarla? (qué métricas, contra qué)
+13.4 ¿Qué rol cumple la búsqueda vectorial dentro de un agente, y cómo cambia respecto a un RAG clásico quién dispara el retrieval?
 
 ---
 
@@ -779,19 +827,48 @@ El ejercicio que cierra el módulo y que mostrás en una entrevista de AI/ML Eng
 
 ### Módulo 12
 ```
-12.1 (a) 30k chunks + Postgres + multi-tenant → pgvector: la escala es chica y el filtro por
+12.1 Mezcla dos ejes y una técnica como si fueran una sola lista. Eje A (sofisticación del pipeline,
+     survey de Gao et al. 2023/2024): Naive → Advanced (query transformation/HyDE, routing, híbrido, reranking) → Modular
+     (reconfigurable, multi-fuente). Eje B (control delegado al modelo): estático → CRAG → Self-RAG
+     → Agentic. Aparte: GraphRAG, que no es "más control" sino otra estructura de índice (grafo)
+     para preguntas globales/multi-hop. No elegís una de seis: apilás técnicas sobre los ejes.
+12.2 Query transformation actúa ANTES del retrieval y mejora el RECALL: reformula la pregunta para
+     que matchee los docs (multi-query, descomposición) o, en HyDE, embeddéa una respuesta
+     hipotética generada por el LLM —que se parece más a los docs que la pregunta cruda—. Reranking
+     actúa DESPUÉS y mejora la PRECISIÓN: un cross-encoder reordena los candidatos y descarta ruido.
+     Uno ensancha el embudo, el otro lo afina.
+12.3 Los tres viven sobre el mismo eje: cuánto razonamiento de control le delegás al modelo. CRAG =
+     evaluar los docs recuperados y corregir si son malos (re-query/fallback). Self-RAG = el modelo
+     decide si buscar y critica si la respuesta se sostiene (reflexión). Agentic = un loop tool-use
+     donde buscar es una tool más y el modelo decide todo dinámicamente. Un agente capaz los
+     "absorbe" porque evaluar relevancia y decidir si re-buscar son conductas que emergen del loop,
+     sin programarlas como etapas aparte.
+12.4 GraphRAG sirve para preguntas MULTI-HOP ("¿cómo se conecta X con Y a través de varios docs?")
+     y GLOBALES/temáticas ("¿qué temas atraviesan el corpus?"). La similitud vectorial trae los
+     chunks más parecidos a la pregunta, pero esas preguntas no tienen un chunk "parecido":
+     requieren recorrer relaciones o resumir el todo, no recuperar vecinos. No reemplaza al RAG
+     vectorial porque es caro de construir/mantener y peor para Q&A factual puntual; conviven
+     (híbrido). // Sobre 50k chunks con respuestas fieles pero pérdida por sinónimos: el síntoma es
+     RECALL (no precisión ni control) → agregás query transformation (multi-query/HyDE) + híbrido
+     (Advanced). No saltás a Agentic porque sería sumar latencia, costo y no-determinismo para algo
+     que un paso de pre-retrieval resuelve: escalá la herramienta al problema.
+```
+
+### Módulo 13
+```
+13.1 (a) 30k chunks + Postgres + multi-tenant → pgvector: la escala es chica y el filtro por
      permisos en la misma query es la ventaja decisiva. (b) 80M vectores, RAM acotada, sin filtros
      → dedicada con IVFPQ: la cuantización hace entrar los vectores en RAM; sin filtros, no perdés
      nada por no tener filtered search rico. (c) corpus mediano estático read-heavy sin servidor ni
      filtros → FAISS (HNSW o Flat): máximo control y velocidad in-process.
-12.2 No es caro porque varias opciones sirven y la diferencia de rendimiento entre dos razonables
+13.2 No es caro porque varias opciones sirven y la diferencia de rendimiento entre dos razonables
      suele ser chica. El error caro es de escala de herramienta: montar infraestructura
      innecesaria (Pinecone para 20k chunks que pgvector servía) o quedarse en fuerza bruta con 50M
      de vectores y la latencia por las nubes.
-12.3 Se mide corriendo un set de prueba (golden set) y calculando recall@k (contra la verdad
+13.3 Se mide corriendo un set de prueba (golden set) y calculando recall@k (contra la verdad
      exacta de un índice Flat) y latencia p95 end-to-end, comparando índices/parámetros. La
      decisión sale del número, no de la moda (es eval-driven, como el resto del temario).
-12.4 En un agente, la búsqueda vectorial es UNA herramienta más que el modelo decide invocar dentro
+13.4 En un agente, la búsqueda vectorial es UNA herramienta más que el modelo decide invocar dentro
      de su loop de razonamiento/acción, según la necesite. En un RAG clásico el retrieval lo
      disparás vos siempre, antes de generar; en el agente lo dispara el modelo cuando lo juzga
      necesario.
@@ -801,4 +878,4 @@ El ejercicio que cierra el módulo y que mostrás en una entrevista de AI/ML Eng
 
 ## Siguientes pasos
 
-Con este módulo entendés qué hay **debajo** de la búsqueda semántica: por qué la fuerza bruta no escala y aparece ANN, las métricas de distancia y la normalización, los dos grandes algoritmos (IVF y HNSW) con sus perillas y trade-offs, la cuantización (PQ/IVFPQ) que hace viable la escala masiva, FAISS al desnudo en Python, el panorama de bases (FAISS / pgvector / Pinecone / Qdrant) con su criterio de elección, el filtrado por metadata y multi-tenant en bases dedicadas, un RAG end-to-end en Python con Voyage y Claude, y la capa de frameworks ([LangChain y LlamaIndex](#)) con el criterio de cuándo usarla y cuándo quedarte con los SDKs nativos. Todo con la regla que recorre el temario: **escalá la herramienta al problema y medí la decisión, no la adivines.** Lo que sigue en el track Python AI: [AI Agents](ai-agents-python.md) —donde la búsqueda vectorial pasa a ser una herramienta más en el loop del modelo—, [Voice AI](voice-ai.md), y [Deploy de aplicaciones de IA](deploy-ai.md). Y atravesando todo, [evals](evals.md), que es lo que convierte cada una de estas decisiones en un número que podés defender.
+Con este módulo entendés qué hay **debajo** de la búsqueda semántica: por qué la fuerza bruta no escala y aparece ANN, las métricas de distancia y la normalización, los dos grandes algoritmos (IVF y HNSW) con sus perillas y trade-offs, la cuantización (PQ/IVFPQ) que hace viable la escala masiva, FAISS al desnudo en Python, el panorama de bases (FAISS / pgvector / Pinecone / Qdrant) con su criterio de elección, el filtrado por metadata y multi-tenant en bases dedicadas, un RAG end-to-end en Python con Voyage y Claude, y la capa de frameworks ([LangChain y LlamaIndex](#)) con el criterio de cuándo usarla y cuándo quedarte con los SDKs nativos, el espectro de arquitecturas de RAG —de naive a corrective, graph y agentic— y cuándo subir cada escalón. Todo con la regla que recorre el temario: **escalá la herramienta al problema y medí la decisión, no la adivines.** Lo que sigue en el track Python AI: [AI Agents](ai-agents-python.md) —donde la búsqueda vectorial pasa a ser una herramienta más en el loop del modelo—, [Voice AI](voice-ai.md), y [Deploy de aplicaciones de IA](deploy-ai.md). Y atravesando todo, [evals](evals.md), que es lo que convierte cada una de estas decisiones en un número que podés defender.
