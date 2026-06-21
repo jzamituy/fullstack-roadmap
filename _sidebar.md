@@ -44,6 +44,7 @@
   - [🛠️ AWS hands-on con CDK](aws-practica.md)
 
 - **Arquitectura**
+  - [🧱 Domain-Driven Design](ddd.md)
   - [🔀 Event-driven aplicada](event-driven.md)
 
 - **Inteligencia Artificial**
