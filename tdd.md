@@ -12,7 +12,7 @@
 npm i -D vitest   # o jest; la mecánica ya la viste en el módulo de Testing
 ```
 
-> Nota: las herramientas (Vitest/Jest) y versiones cambian; lo de este módulo es **metodología**, que es estable. Los nombres de autores y libros (Beck, Khorikov, Khononov, Fowler) son referencias para profundizar.
+> Nota: las herramientas (Vitest/Jest) y versiones cambian; lo de este módulo es **metodología**, que es estable. Los snippets usan **Vitest** (`vi.fn()`); en Jest reemplazá `vi` por `jest` (la API es casi idéntica, módulo de Testing). Los nombres de autores y libros (Beck, Khorikov, Khononov, Fowler, Feathers) son referencias para profundizar.
 
 **Índice de módulos**
 1. Qué es TDD (y qué no es): una disciplina de diseño
@@ -65,7 +65,7 @@ Suena rígido y al principio lo es; el punto es que te fuerza a trabajar en **pa
 
 - **🔴 Red — escribí un test que falla.** Definís el siguiente comportamiento más chico que querés, lo expresás como test, y lo corrés para verlo **fallar** (rojo). Ver el rojo confirma dos cosas: que el test efectivamente prueba algo, y que ese algo todavía no existe. Si el test pasa en rojo, el test está mal.
 
-- **🟢 Green — hacelo pasar lo más rápido posible.** Escribís **el mínimo código** para que el test pase (verde). Acá *se permite* hacer trampa: hardcodear el valor, devolver una constante. El objetivo de esta fase **no es código elegante, es volver a verde rápido**. ¿Por qué permitir trampa? Porque te mantiene en pasos chicos y te obliga a escribir *otro* test para forzar el caso general (si hardcodeaste `return 5`, el siguiente test con otra entrada te obliga a generalizar). Es la técnica de "triangulación".
+- **🟢 Green — hacelo pasar lo más rápido posible.** Escribís **el mínimo código** para que el test pase (verde). Acá *se permite* hacer trampa: hardcodear el valor, devolver una constante. El objetivo de esta fase **no es código elegante, es volver a verde rápido**. ¿Por qué permitir trampa? Porque te mantiene en pasos chicos y te obliga a escribir *otro* test para forzar el caso general (si hardcodeaste `return 5`, el siguiente test con otra entrada te obliga a generalizar). Esa es la **triangulación** — una de las **tres tácticas que describe Beck** para llegar a verde: *implementación obvia* (si la solución es trivial, escribila directo), *fake it* (hardcodeá y generalizá después) y *triangulación* (dejá que un segundo test con otros datos te fuerce el caso general). Usás la más chica que te dé confianza.
 
 - **🔵 Refactor — limpiá, con la red de seguridad puesta.** Ahora que está verde, mejorás el diseño **sin cambiar el comportamiento**: renombrás, extraés funciones, eliminás duplicación, mejorás nombres. Los tests en verde son tu **red de seguridad**: si un refactor rompe algo, un test se pone rojo al instante. Esta es **la fase que casi todo el mundo se saltea**, y saltársela es la causa #1 de que TDD "no funcione" para la gente: sin refactor, acumulás los parches feos de la fase green y el diseño se pudre. **El refactor no es opcional; es donde TDD paga el diseño.**
 
@@ -95,6 +95,26 @@ La regla de oro del ciclo: **nunca refactorices en rojo.** Refactor y agregar co
 
 **Teoría.** Hagamos TDD de verdad sobre una regla de la Task API: **"una tarea no puede asignarse a un usuario que no es miembro del proyecto"**. Vamos ciclo por ciclo, en baby steps.
 
+El andamiaje mínimo que comparten los ciclos (compila en `--strict`); a `Task` le vamos agregando `assignTo` *con* el ciclo:
+
+```ts
+class NotProjectMemberError extends Error {
+  constructor(userId: number, projectId: number) {
+    super(`El usuario ${userId} no es miembro del proyecto ${projectId}`);
+  }
+}
+class Project {
+  constructor(private readonly props: { id: number; memberIds: number[] }) {}
+  get id() { return this.props.id; }
+  get memberIds() { return this.props.memberIds; }
+}
+class Task {
+  assigneeId?: number;
+  constructor(private readonly props: { id: number; projectId: number }) {}
+  // assignTo: lo diseñamos abajo, ciclo a ciclo
+}
+```
+
 **Ciclo 1 — 🔴** El test más chico: asignar a un miembro válido funciona.
 
 ```ts
@@ -107,14 +127,12 @@ it('asigna la tarea si el usuario es miembro del proyecto', () => {
 });
 ```
 
-No compila → es rojo (ley 2: no compilar es fallar). **🟢** Mínimo para pasar:
+No compila → es rojo (ley 2: no compilar es fallar). **🟢** Mínimo para pasar — agregamos el método a `Task`:
 
 ```ts
-class Task {
-  assigneeId?: number;
-  assignTo(userId: number, _project: Project) {
-    this.assigneeId = userId;            // lo mínimo: ignoramos el proyecto por ahora
-  }
+// dentro de class Task:
+assignTo(userId: number, _project: Project) {
+  this.assigneeId = userId;            // lo mínimo: ignoramos el proyecto por ahora
 }
 ```
 
@@ -167,6 +185,7 @@ Corro los tests: siguen verdes. El refactor mejoró el diseño (cada objeto resp
 3.2 En el ciclo 2, fase green, ¿por qué la implementación quedó "completa" sin trampa esta vez? (pista: ya había dos tests)
 3.3 El refactor movió `isMember` de `Task` a `Project`. ¿Qué principio de diseño mejoró y cómo supiste que no rompiste nada?
 3.4 ¿Qué quiere decir que "el diseño emergió del ciclo" en este ejemplo?
+3.5 **Hacelo vos** (este es el ejercicio que importa). Regla nueva de la Task API: *"un proyecto no puede tener más de 5 tareas abiertas"*. Hacé el ciclo completo en código: (a) escribí el primer test y verificá que **falla/no compila** (rojo); (b) escribí el **mínimo** green —vale hardcodear—; (c) escribí un segundo test que te **fuerce a generalizar** (triangulación); (d) refactorizá si emerge una responsabilidad mal ubicada. Pegá tu ciclo. (No mires la solución hasta tener tu intento.)
 
 ---
 
@@ -199,14 +218,14 @@ El consenso pragmático de la industria (y la posición de Vladimir Khorikov en 
 
 **Teoría.** El error más caro en TDD —y el que hace que mucha gente termine odiando sus tests— es **sobre-mockear**: reemplazar por dobles cosas que no hacía falta, hasta que el test deja de verificar *comportamiento* y pasa a verificar *implementación*. Cuando eso pasa, tu suite se vuelve un ancla en vez de una red.
 
-Mirá el síntoma. Test sobre-mockeado del `TaskService`:
+Mirá el síntoma (asumí el setup del módulo de Testing: un `beforeEach` arma el `service` con un repo en memoria, p.ej. `const repo = new InMemoryTaskRepo(); const service = new TaskService(repo)`). Test sobre-mockeado del `TaskService`:
 
 ```ts
 // ❌ Sobre-mockeado: verifica CÓMO trabaja por dentro, no QUÉ logra
 it('asigna la tarea', () => {
   const project = { isMember: vi.fn().mockReturnValue(true) };  // colaborador propio, mockeado
   const repo = { save: vi.fn() };
-  service.assign(task, 4521, project as any);
+  service.assign(task, 4521, project as any);  // el `as any` ya es un olor: el mock no cumple el tipo real
 
   expect(project.isMember).toHaveBeenCalledWith(4521);    // verifica una interacción interna
   expect(repo.save).toHaveBeenCalledTimes(1);             // verifica otra interacción interna
@@ -231,6 +250,8 @@ it('asigna la tarea a un miembro y la persiste', async () => {
 
 La regla, simple y poderosa: **verificá el resultado observable (el estado final, el valor devuelto, el efecto visible), no las interacciones internas.** Las únicas interacciones que vale la pena verificar son las que cruzan un borde que te importa y *no podés observar de otra forma* —ej. que efectivamente mandaste el email, que publicaste el evento a la cola—. Verificar que tu objeto llamó a su propio colaborador interno es testear la implementación, no el comportamiento.
 
+En la taxonomía de dobles que viste en Testing, esto es literal: lo que verifica **interacción** es un **mock**; lo que solo provee datos es un **stub**; un colaborador real-pero-liviano (el `Project` real, un repo en memoria) es un **fake**. "Sobre-mockear" es, exactamente, usar un **mock** (verificación de interacción) donde alcanzaba un **stub** o un **fake** (verificación de estado). De eso trata, justamente, el ensayo de Fowler que da nombre a la distinción: *"Mocks Aren't Stubs"*.
+
 **Ejercicios 5**
 5.1 ¿Qué significa que un test "verifica implementación en vez de comportamiento"? Dá el síntoma concreto que aparece al refactorizar.
 5.2 En el ejemplo sobre-mockeado, ¿cuál fue el error de raíz (qué se mockeó que no hacía falta)?
@@ -251,7 +272,7 @@ La regla, simple y poderosa: **verificá el resultado observable (el estado fina
 
 4. **Mantenibilidad** (*maintainability*): ¿qué tan fácil es leer y mantener el test? Tests con setup enorme, mocks por todos lados y asserts crípticos cuestan más de lo que valen.
 
-La idea más importante de Khorikov es que **estos cuatro están en tensión y no podés tener los cuatro al máximo** —tenés que elegir—. En particular: **protección contra regresiones y resistencia al refactor son lo que define un test valioso, y feedback rápido es lo que sacrificás cuando subís la otra**. El cuadrante que se desprende:
+La idea más importante de Khorikov es que **los tres primeros** (protección, resistencia y feedback rápido) están en **tensión mutua: no podés maximizar los tres a la vez**, tenés que sacrificar uno. La **mantenibilidad es un eje aparte —siempre querés maximizarla—** y no entra en ese trade-off. Y modela el **valor de un test como el _producto_ de los tres primeros**: si alguno es cero, el test no vale nada (por eso un test trivialmente resistente pero sin protección es inútil). En la práctica sostenés **protección + resistencia** y sacrificás **feedback rápido** cuando hace falta —por eso los tests de integración contra Postgres real, más lentos, igual valen la pena—. El cuadrante que se desprende (sobre los dos ejes que definen un test valioso):
 
 - **Mucha protección + poca resistencia** = los **tests frágiles** del módulo 5 (sobre-mockeados): atrapan bugs pero también saltan ante refactors legítimos. Peor de lo que parece, porque entrenan a ignorar la suite.
 - **Mucha resistencia + poca protección** = tests **triviales** (testear un getter): nunca se rompen pero tampoco atrapan nada. Inútiles.
@@ -295,19 +316,21 @@ La matización honesta (Khononov, *Learning Domain-Driven Design*, y el pragmati
 
 **Teoría.** Dos usos de TDD que van más allá del feature nuevo y que un equipo senior aplica por reflejo.
 
-**1. Reproducir un bug con un test que falla (regression-first).** Llega un reporte: "asignar una tarea a un usuario eliminado del proyecto no tira error, la asigna igual". El reflejo amateur es ir al código a arreglarlo. **El reflejo TDD es escribir primero un test que reproduzca el bug** —y verlo fallar (rojo)—:
+**1. Reproducir un bug con un test que falla (regression-first).** Llega un reporte: "si saco del proyecto a un usuario que ya tenía una tarea asignada, la tarea lo sigue mostrando como responsable —queda un *assignee* huérfano—". Es un caso que el diseño actual **no** contempla: validamos al *asignar*, no *después*. El reflejo amateur es ir al código a arreglarlo. **El reflejo TDD es escribir primero un test que reproduzca el bug** —y verlo fallar (rojo)—:
 
 ```ts
-it('no asigna a un usuario que fue removido del proyecto (bug #412)', () => {
-  const project = new Project({ id: 7, memberIds: [] });   // el user 4521 fue removido
+it('detecta un assignee que dejó de ser miembro (bug #412)', () => {
+  const project = new Project({ id: 7, memberIds: [4521] });
   const task = new Task({ id: 99, projectId: 7 });
-  expect(() => task.assignTo(4521, project)).toThrow(NotProjectMemberError);
+  task.assignTo(4521, project);            // asignación válida en su momento
+  project.removeMember(4521);              // luego el usuario sale del proyecto
+  expect(task.hasValidAssignee(project)).toBe(false); // ← comportamiento NUEVO que el bug pide
 });
 ```
 
 Tres ventajas enormes: (a) el rojo **confirma que reprodujiste el bug** —si pasa de una, no entendiste el bug—; (b) cuando lo arreglás y se pone verde, **probaste que lo arreglaste** de verdad, no que creés que sí; (c) el test queda para siempre como **protección contra esa regresión** —si alguien reintroduce el bug, salta—. Por eso los bugs son la mejor materia prima del golden set... y acá conecta literal con el [módulo 2 de Evaluations](evals.md): un fallo de producción se convierte en un caso de test permanente, en código y en evals.
 
-**2. El test como especificación ejecutable.** Un buen nombre de test es una frase de spec: `it('lanza si el usuario no es miembro del proyecto')`. Leídos en conjunto, los nombres de tus tests **son la documentación viva** de qué hace el sistema —y, a diferencia de un doc en Confluence, no se desactualizan, porque si el comportamiento cambia, el test rojo te obliga a actualizarlos—. Por eso en TDD se cuida tanto el nombre del test: no es burocracia, es la especificación. La práctica relacionada es **BDD** (Behavior-Driven Development), que lleva esto al extremo escribiendo los tests en lenguaje de negocio (`given/when/then`) para que los lea gente no técnica.
+**2. El test como especificación ejecutable.** Un buen nombre de test es una frase de spec: `it('lanza si el usuario no es miembro del proyecto')`. Leídos en conjunto, los nombres de tus tests **son la documentación viva** de qué hace el sistema —y, a diferencia de un doc en Confluence, no se desactualizan, porque si el comportamiento cambia, el test rojo te obliga a actualizarlos—. Por eso en TDD se cuida tanto el nombre del test: no es burocracia, es la especificación. La práctica relacionada es **BDD** (Behavior-Driven Development), que lleva esto al extremo escribiendo los tests en lenguaje de negocio (`given/when/then`) para que los lea gente no técnica. Con criterio, eso sí: el `given/when/then` rinde cuando un PO/QA **de verdad** valida esas reglas; si el equipo es solo técnico, el costo de Gherkin/Cucumber muchas veces no se paga (el mismo "escalá la herramienta al problema" del módulo 9).
 
 La frase mental que une los dos usos: **en TDD, antes de escribir el código que arregla o implementa algo, escribís la prueba de que hace falta. El rojo es la evidencia de que el trabajo todavía no está hecho; el verde, de que sí.**
 
@@ -331,18 +354,21 @@ Dónde TDD **paga claramente**:
 
 Dónde TDD **estorba o no aporta**:
 
-- **Spikes y exploración** (acá conecta con el [módulo de spike del flujo de trabajo, si lo usás]): cuando estás *aprendiendo* cómo funciona una librería o explorando si una idea es viable, todavía **no sabés qué querés** —y TDD necesita que sepas el *qué* para escribir el test—. Hacé el spike sin tests, aprendé, **tirá el código del spike**, y *después* implementá con TDD lo que decidiste. Forzar TDD en un spike es ponerle test a algo que vas a borrar.
+- **Spikes y exploración**: cuando estás *aprendiendo* cómo funciona una librería o explorando si una idea es viable, todavía **no sabés qué querés** —y TDD necesita que sepas el *qué* para escribir el test—. Hacé el spike sin tests, aprendé, **tirá el código del spike**, y *después* implementá con TDD lo que decidiste. Forzar TDD en un spike es ponerle test a algo que vas a borrar.
 - **Código trivial sin lógica**: un getter, un DTO, un mapeo directo de campos, configuración. Testearlo da el cuadrante "mucha resistencia, cero protección" del módulo 6 —no atrapa nada—. No es que esté prohibido; es que no rinde.
 - **Glue code / wiring de infraestructura**: el código que solo cablea piezas (un controller que delega directo a un service, un módulo de Nest). Se cubre mejor con un test e2e/integración ([módulos 6-7 de Testing](testing.md)) que con unit tests test-first.
 - **UI muy visual / exploratoria**: el feedback ahí es mirar la pantalla, no un assert.
 
 La regla de criterio: **TDD donde el diseño y la corrección importan y son conocibles de antemano (dominio); test-after o tests de mayor nivel donde el valor está en que funcione integrado (glue, infra); sin tests donde estás explorando (spike, tirás el código).** Y el antipatrón a evitar: el dogmático que hace TDD del getter y del mapeo de un DTO "porque hay que tener cobertura" —ese gasta esfuerzo en tests del peor cuadrante mientras a veces deja sin testear la regla de negocio jugosa—.
 
+**El caso real más frecuente: TDD sobre legacy sin tests.** En un trabajo real rara vez arrancás de cero; lo habitual es "tengo que cambiar este código que no tiene un solo test y nadie entiende del todo". TDD test-first no aplica directo —no podés escribir el test de un diseño que ya existe y querés *preservar*—. La técnica es el **characterization test** (o *golden master* / *approval test*): antes de tocar nada, escribís tests que **capturan lo que el código hace HOY** (aunque parezca raro o incluso mal), corrés, y los dejás en verde. Esa es tu red de seguridad. *Recién entonces* refactorizás o arreglás test-first, con los characterization tests avisándote si cambiaste un comportamiento que no querías tocar. Es exactamente el "cambiar sin miedo" del módulo 11, aplicado a código que heredaste. La referencia es Michael Feathers, *Working Effectively with Legacy Code* (de ahí también la idea de las *seams*: los puntos donde insertás una interfaz para poder inyectar un doble y romper dependencias que impiden testear).
+
 **Ejercicios 9**
 9.1 Nombrá dos tipos de código donde TDD paga claramente y dos donde estorba o no aporta.
 9.2 ¿Por qué TDD y un spike de exploración no se llevan bien? ¿Qué hacés en su lugar y qué hacés con el código del spike?
 9.3 Testear un getter con TDD: ¿en qué cuadrante de Khorikov cae y por qué no rinde?
 9.4 Un dev del equipo presume "100% de cobertura, TDD en todo, hasta los DTOs". ¿Qué le señalarías como antipatrón?
+9.5 Heredás un módulo de 800 líneas sin un solo test y tenés que cambiarle una regla. ¿Por qué no podés arrancar test-first y qué hacés primero? ¿Cómo se llama esa técnica?
 
 ---
 
@@ -372,7 +398,7 @@ La regla de criterio: **TDD donde el diseño y la corrección importan y son con
 
 Los principios de criterio que tenés que poder defender:
 
-1. **TDD es una disciplina de diseño, no una de cobertura.** El producto valioso de TDD es el *diseño* (acoplamiento bajo, interfaces chicas, código que nace testeable) y la *confianza para refactorar*. Los tests son el subproducto. Quien mide TDD por % de cobertura entendió el medio y se perdió el fin —y termina en el peor cuadrante del módulo 6, mucha cobertura de tests que no protegen ni resisten—.
+1. **TDD es una disciplina de diseño, no una de cobertura.** El producto valioso de TDD es el *diseño* (acoplamiento bajo, interfaces chicas, código que nace testeable) y la *confianza para refactorar*. Los tests son el subproducto. Quien mide TDD por % de cobertura entendió el medio y se perdió el fin —y termina en el peor cuadrante del módulo 6, mucha cobertura de tests que no protegen ni resisten—. La prueba de que tus tests valen no es la cobertura sino si **detectan bugs reales**, y eso lo mide el **mutation testing** (ej. Stryker en JS/TS): introduce mutaciones en tu código —cambia un `>` por un `>=`, niega una condición— y mira si **algún test se pone rojo**; un "mutante sobreviviente" es una línea cubierta pero **no verificada**. Es el termómetro real de calidad de la suite que la cobertura no te da.
 
 2. **El objetivo de todo esto es poder cambiar el código sin miedo.** Un sistema con una suite confiable es un sistema que podés evolucionar; uno sin ella se congela ("no toques eso que anda y nadie entiende"). Esa capacidad de cambiar con confianza es lo que TDD compra, y es lo que más vale en un sistema que vive años. Conecta con el "medí antes de optimizar" de [NestJS senior](nestjs-senior.md) y [Redis](redis.md): primero la red de seguridad y la medición, después el cambio.
 
@@ -412,6 +438,32 @@ El cierre y el puente con el rol: TDD es la **disciplina que conecta testear con
 3.2 Porque ya había **dos tests** que acorralaban el comportamiento desde dos lados (miembro → asigna; no-miembro → lanza). Una trampa (hardcodear) no puede satisfacer ambos a la vez, así que el mínimo código que pasa los dos es ya la implementación general —la triangulación cerró el caso—.
 3.3 Mejoró el **encapsulamiento / responsabilidad única**: que `Project` responda por su propia pertenencia (`isMember`) en vez de que `Task` meta mano en `project.memberIds`. Supiste que no rompiste nada porque **los tests siguieron verdes** después del movimiento (la red de seguridad de la fase refactor).
 3.4 Que no diseñaste `Project.isMember()` por adelantado: apareció en el refactor, cuando el código ejercitado por los tests mostró que esa responsabilidad estaba mal ubicada. El diseño fue una *consecuencia* del ciclo, no un plan previo.
+3.5 Un ciclo de referencia (hay variantes válidas; lo que importa es el orden rojo→verde→refactor y los baby steps):
+
+```ts
+// 🔴 Ciclo 1: el primer test (no compila → rojo)
+it('permite abrir una tarea si hay menos de 5 abiertas', () => {
+  const project = new Project({ id: 7, memberIds: [4521] });
+  expect(() => project.openTask(/* ... */)).not.toThrow();   // openTask no existe aún
+});
+// 🟢 mínimo (vale hardcodear): // dentro de class Project
+//   private openCount = 0;
+//   openTask() { this.openCount++; }            // pasa, sin la regla todavía
+
+// 🔴 Ciclo 2: el caso que importa (triangulación)
+it('lanza al abrir la 6ta tarea', () => {
+  const project = new Project({ id: 7, memberIds: [4521] });
+  for (let i = 0; i < 5; i++) project.openTask();
+  expect(() => project.openTask()).toThrow(TooManyOpenTasksError);
+});
+// 🟢 el hardcode ya no alcanza → generalizás:
+//   openTask() {
+//     if (this.openCount >= 5) throw new TooManyOpenTasksError(this.props.id);
+//     this.openCount++;
+//   }
+// 🔵 refactor: extraé el 5 a una constante con nombre (MAX_OPEN_TASKS) y, si la
+//    regla crece, considerá una política de proyecto. Tests siguen verdes.
+```
 
 ### Módulo 4
 4.1 **Classicist**: la unidad es **un comportamiento**; mockea **solo** las dependencias incómodas/out-of-process (DB, red, reloj), usando reales las demás. **Mockist**: la unidad es **una clase**; mockea **todas** sus colaboradoras y verifica interacciones.
@@ -448,6 +500,7 @@ El cierre y el puente con el rol: TDD es la **disciplina que conecta testear con
 9.2 Porque TDD necesita que sepas *qué* querés (para escribir el test), y en un spike justamente **todavía no lo sabés** —estás aprendiendo/explorando—. En su lugar hacés el spike sin tests, aprendés, y **tirás el código del spike**; después implementás con TDD lo que decidiste.
 9.3 Cae en **mucha resistencia, cero protección** (el cuadrante trivial): nunca se rompe pero tampoco atrapa ningún bug, porque un getter no tiene lógica que pueda fallar. El esfuerzo no rinde.
 9.4 Que está gastando esfuerzo de TDD en el **peor cuadrante** (tests de DTOs/getters que no protegen) persiguiendo la métrica equivocada (cobertura) —y muy probablemente, mientras tanto, dejando reglas de negocio jugosas con tests pobres—. La cobertura total no es señal de buen testing.
+9.5 No podés test-first porque el diseño ya existe y querés *preservarlo*, no inventarlo. Primero escribís **characterization tests** (golden master / approval): tests que capturan lo que el código hace HOY (aunque esté raro), para tener una red de seguridad. Recién con esa red en verde refactorizás o cambiás la regla test-first, sabiendo que si rompés un comportamiento existente, un test te avisa. (Feathers, *Working Effectively with Legacy Code*.)
 
 ### Módulo 10
 10.1 Porque imponer TDD estricto en cada línea genera el **dogmatismo** del módulo 9 (TDD de los DTOs) y resentimiento en el equipo. En su lugar sostiene: **todo lo que se mergea tiene tests confiables, y el equipo sabe hacer TDD donde rinde** (dominio, bugs); el *cómo* (test-first puro vs test-after disciplinado) importa menos que el resultado.
