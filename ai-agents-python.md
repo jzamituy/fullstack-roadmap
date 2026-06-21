@@ -14,7 +14,7 @@ uv add langgraph langchain-anthropic langgraph-checkpoint-sqlite
 # export ANTHROPIC_API_KEY=...
 ```
 
-> Nota sobre datos volátiles: los frameworks de agentes son de las APIs que **más cambian** del ecosistema (LangGraph evoluciona rápido; AutoGen tuvo una reescritura grande de la v0.2 a la v0.4). Los ejemplos muestran la **forma** de cada API a 2026; verificá nombres de paquetes, clases y firmas en la doc oficial antes de implementar. Datos de modelos Claude (IDs, precios, thinking), con la skill `claude-api`.
+> Nota sobre datos volátiles: los frameworks de agentes son de las APIs que **más cambian** del ecosistema (LangGraph evoluciona rápido; AutoGen tuvo una reescritura grande de la v0.2 a la v0.4). Los ejemplos muestran la **forma** de cada API a 2026; verificá nombres de paquetes, clases y firmas en la doc oficial antes de implementar. Cuando un ejemplo no compile, la fuente de verdad es la doc de LangGraph (publican guía de migración entre versiones) y el paquete `langchain-anthropic` —`create_react_agent`, por caso, cambió de paquete y de firma entre versiones—. Datos de modelos Claude (IDs, precios, thinking), con la skill `claude-api`.
 
 **Índice de módulos**
 1. Por qué un framework de agentes en Python (el puente desde el loop a mano)
@@ -63,7 +63,7 @@ Y el criterio, idéntico al del framework layer de RAG ([Vector Databases](vecto
 
 - **AutoGen** (Microsoft). Modela el problema como **agentes que conversan** entre sí para resolver una tarea (multi-agente por diálogo). Más orientado a investigación y a la coordinación emergente. Tuvo una **reescritura grande** (v0.2 → v0.4, ahora async y event-driven). Filosofía: *una sociedad de agentes que dialogan.* (Módulo 6.)
 
-- **CrewAI**. Multi-agente **basado en roles**: definís un "crew" de agentes con rol, objetivo y backstory, y tareas. Opinado y rápido de arrancar; menos control fino que LangGraph. Filosofía: *un equipo con roles que ejecuta un proceso.*
+- **CrewAI**. Multi-agente **basado en roles**: definís un "crew" de agentes con rol, objetivo y backstory, y tareas. Opinado y rápido de arrancar; menos control fino que LangGraph. Filosofía: *un equipo con roles que ejecuta un proceso.* (No le damos ejemplo propio a propósito: es muy opinado y de bajo techo de control, y si dominás el grafo explícito de LangGraph y el diálogo de AutoGen, CrewAI se aprende en una tarde. Aparece en avisos, así que conviene reconocerlo —no profundizarlo.)
 
 - **Los SDKs de proveedores**:
   - **Claude Agent SDK** (Anthropic, también en Python): el harness de producción de [Agentes](agentes.md) módulo 10 —loop + tools built-in + contexto + subagentes + MCP—, atado al modelo de Anthropic.
@@ -168,13 +168,13 @@ grafo.add_edge("tools", "agente")                      # ← EL CICLO: tras las 
 app = grafo.compile()
 
 app.invoke({"messages": [HumanMessage("¿Qué dice la política de vacaciones?")]},
-           {"recursion_limit": 25})   # el tope de iteraciones de Agentes módulo 3, ahora como config
+           {"recursion_limit": 25})   # el tope contra loops infinitos de Agentes módulo 8, ahora como config
 ```
 
 Dos piezas listas para usar que conviene conocer:
 - **`ToolNode`**: el nodo que ejecuta las tools pedidas (te ahorra escribir el "para cada tool_call, ejecutá y armá el tool_result" del loop a mano).
 - **`tools_condition`**: la función de routing estándar que mira si el último mensaje trae tool calls.
-- Y el **`recursion_limit`**: el tope de pasos del grafo —el guardarraíl contra loops infinitos de [Agentes](agentes.md) módulo 8, ahora un parámetro—. Si el agente lo supera, LangGraph corta con error en vez de quemar tokens para siempre.
+- Y el **`recursion_limit`**: el tope de pasos del grafo —el guardarraíl contra loops infinitos de [Agentes](agentes.md) módulo 8, ahora un parámetro—. Si el agente lo supera, LangGraph corta con error en vez de quemar tokens para siempre. Ojo con la cuenta: cuenta **super-steps del grafo**, no turnos del modelo —cada vuelta `agente → tools → agente` consume ~2 super-steps—, así que `recursion_limit=25` permite ~12 vueltas, no 25. Dimensionalo en ≈ 2× la profundidad de pasos que esperás, no como número mágico.
 
 Para el caso común hay un atajo que arma todo este grafo por vos:
 
@@ -210,8 +210,11 @@ config = {"configurable": {"thread_id": "usuario-7"}}   # el "hilo" de esta conv
 
 app.invoke({"messages": [HumanMessage("Me llamo Jorge.")]}, config)
 r = app.invoke({"messages": [HumanMessage("¿Cómo me llamo?")]}, config)
+print(r["messages"][-1].content)
 # → "Jorge": recuerda, porque el checkpointer guardó el estado del thread "usuario-7"
 ```
+
+**`MemorySaver` es para demos; en producción el checkpointer es persistente y el `thread_id` es por-usuario.** `MemorySaver` guarda en RAM: se pierde al reiniciar el proceso y no se comparte entre workers. Cuando servís el agente detrás de una API ([FastAPI](fastapi.md)) con varios requests concurrentes, dos cosas cambian: (1) el checkpointer va a **`SqliteSaver`/`PostgresSaver`** para que el estado sobreviva a un reinicio y lo vean todos los workers; (2) el `thread_id` se **deriva de la sesión/usuario** (`f"user-{user_id}-{conv_id}"`), no es una constante global —si todos comparten `"usuario-7"`, las conversaciones se pisan—. Esa es la diferencia entre el demo que anda en tu consola y el endpoint multiusuario que no mezcla a dos personas.
 
 El **human-in-the-loop** es el caso que más rinde, y es el *gating* de acciones irreversibles de [Agentes](agentes.md) módulo 8 vuelto primitiva. Compilás el grafo para que **se interrumpa antes** de un nodo sensible (p. ej. el que ejecuta tools que escriben), inspeccionás qué iba a hacer, y recién entonces reanudás:
 
@@ -244,7 +247,7 @@ Por qué esto es difícil a mano: tendrías que serializar el estado completo de
 Las piezas clásicas del modelo de AutoGen:
 
 - **Agente asistente** (`AssistantAgent`): un agente con LLM y un rol (ej. "escribís código", "criticás código").
-- **Proxy de usuario / ejecutor** (`UserProxyAgent` en la línea clásica): representa al humano y/o **ejecuta código** que los otros proponen —la pieza que *actúa*—.
+- **Proxy de usuario / ejecutor**: la pieza que aporta input externo o *actúa*. Ojo con la versión: en **v0.2** el `UserProxyAgent` representaba al humano **y** llevaba un code executor (ejecutaba el código que los otros proponían). En **v0.4** se separó: `UserProxyAgent` solo **representa al humano** (pide input vía una función de input) y **quien ejecuta código es `CodeExecutorAgent`** (o se modela como una tool). Si leés "el UserProxyAgent ejecuta código", es material de v0.2.
 - **Group chat**: varios agentes en una conversación, con un **manager** que decide quién habla en cada turno.
 - **Condición de terminación**: cuándo para la conversación (un mensaje "TERMINATE", un máximo de turnos, una meta cumplida).
 
@@ -318,7 +321,32 @@ def cerrar_tarea(tarea_id: int) -> str:
     ...
 ```
 
-**RAG como tool del agente** (el cierre con [Vector Databases](vector-dbs.md) y [RAG](rag.md)): el retrieval deja de ser un pipeline fijo y se vuelve **una herramienta que el agente decide usar** —el *agentic retrieval* de [Agentes](agentes.md) módulo 9—. La tool `buscar_en_kb` del módulo 4 es exactamente eso: por dentro corre tu búsqueda vectorial (FAISS/pgvector/Qdrant del módulo de Vector Databases), **filtrada por permisos del usuario**, y devuelve los chunks. El agente decide cuándo buscar, con qué consulta, y si refina y vuelve a buscar. Dos cosas de RAG que se vuelven **más** críticas en un agente (igual que en [Agentes](agentes.md) módulo 9): el **filtrado por permisos** (un agente con búsqueda sin filtro puede filtrar data entre tenants con más libertad que un pipeline fijo) y el **grounding** (responder solo con lo recuperado, citar la fuente).
+**RAG como tool del agente** (el cierre con [Vector Databases](vector-dbs.md) y [RAG](rag.md)): el retrieval deja de ser un pipeline fijo y se vuelve **una herramienta que el agente decide usar** —el *agentic retrieval* de [Agentes](agentes.md) módulo 9—. La tool `buscar_en_kb` del módulo 4 es exactamente eso: por dentro corre tu búsqueda vectorial (FAISS/pgvector/Qdrant del módulo de Vector Databases), **filtrada por permisos del usuario**, y devuelve los chunks. El agente decide cuándo buscar, con qué consulta, y si refina y vuelve a buscar.
+
+El puente concreto entre el retrieval del track y la tool —el andamiaje que el capstone da por sabido—. La tool no abre el cliente vectorial en cada llamada: lo recibe ya instanciado (por *closure* o como variable de módulo), aplica el filtro de permisos **dentro** de la query, y devuelve un string (lo que el modelo lee):
+
+```python
+from langchain_core.tools import tool
+
+# vectordb: el cliente del capstone de Vector Databases, ya conectado (pgvector/Qdrant/FAISS).
+# tenant_id: NO viene del modelo; lo fija el código desde la sesión del usuario (mínimo privilegio).
+def hacer_tool_buscar(vectordb, tenant_id: str):
+    @tool
+    def buscar_en_kb(consulta: str) -> str:
+        """Busca fragmentos en la base de conocimiento. Usala cuando la pregunta
+        requiera información de documentos internos."""
+        # el filtro por tenant va EN la query, no se confía al modelo
+        resultados = vectordb.similarity_search(consulta, k=4, filter={"tenant_id": tenant_id})
+        if not resultados:
+            return "Sin resultados en la base de conocimiento."
+        # devolvemos texto + fuente para el grounding (el agente cita de acá)
+        return "\n\n".join(f"[{d.metadata['fuente']}] {d.page_content}" for d in resultados)
+    return buscar_en_kb
+
+# en el armado del grafo: tool = hacer_tool_buscar(vectordb, tenant_id="acme")
+```
+
+El `tenant_id` se cierra por closure desde la sesión —el modelo nunca lo elige, así que no puede pedir data de otro tenant—. Dos cosas de RAG que se vuelven **más** críticas en un agente (igual que en [Agentes](agentes.md) módulo 9): el **filtrado por permisos** (un agente con búsqueda sin filtro puede filtrar data entre tenants con más libertad que un pipeline fijo) y el **grounding** (responder solo con lo recuperado, citar la fuente).
 
 **MCP en Python.** El estándar de herramientas de [Agentes](agentes.md) módulo 6 (el "USB-C de las tools de IA") tiene SDK de Python y adaptadores para los frameworks: podés exponer un servidor MCP y consumir sus tools desde un agente LangGraph/AutoGen sin escribir un adaptador a medida por cada servicio. El modelo mental no cambia —el agente sigue pidiendo tools y observando resultados—; cambia **de dónde vienen** (un protocolo estándar en vez de funciones de tu repo), y siguen aplicando mínimo privilegio, tratar la salida como no confiable, y cuidar credenciales.
 
@@ -336,7 +364,26 @@ La frase mental: **en Python las tools se declaran con `@tool` y su docstring ES
 **Teoría.** Las defensas de confiabilidad de [Agentes](agentes.md) módulo 8 —topes, manejo de errores de tools, validación, human-in-the-loop, defensa contra prompt injection, mínimo privilegio— **no desaparecen porque uses un framework; cambian de forma**. El riesgo nuevo es creer que el framework "ya se encarga": automatiza el andamiaje, no el criterio. Cómo se expresa cada defensa:
 
 - **Tope de iteraciones**: el `recursion_limit` de LangGraph (módulo 4) / la condición de terminación de AutoGen (módulo 6). Sin él, un agente cicla o quema tokens. El framework te da la perilla; ponerla es tuyo.
-- **Manejo de errores de tools**: una tool puede fallar (timeout, 404, dato inválido). El framework suele capturar la excepción y devolverla al modelo como resultado de error para que se adapte —pero **vos** decidís qué error es recuperable (que el modelo reintente) y cuál debe abortar el grafo. No tragues el error en silencio.
+- **Manejo de errores de tools**: una tool puede fallar (timeout, 404, dato inválido). El framework suele capturar la excepción y devolverla al modelo como resultado de error para que se adapte —pero **vos** decidís qué error es recuperable (que el modelo reintente) y cuál debe abortar el grafo. No tragues el error en silencio. En la práctica hay dos lugares para hacerlo: capturar dentro del cuerpo de la tool y devolver un string de error que el modelo pueda leer, o configurar el `ToolNode` para que maneje las excepciones (la firma exacta cambia entre versiones —verificá la doc—):
+
+  ```python
+  @tool
+  def cerrar_tarea(tarea_id: int) -> str:
+      """Cierra una tarea por su id."""
+      try:
+          api.cerrar(tarea_id)
+          return f"Tarea {tarea_id} cerrada."
+      except TareaNoEncontrada:
+          # error RECUPERABLE: el modelo puede pedir otra id o avisar al usuario
+          return f"Error: no existe la tarea {tarea_id}. Verificá el id."
+      # un error NO recuperable (DB caída, permiso denegado) lo dejás propagar
+      # para abortar el grafo, no lo escondas en un string
+
+  # alternativa: que el nodo capture y reinyecte el error como tool_result
+  # ToolNode([cerrar_tarea], handle_tool_errors=True)  # verificá la firma de tu versión
+  ```
+
+  La regla: un error que el modelo puede sortear cambiando de plan vuelve como `tool_result` de error; uno que no (sin permisos, infra caída) corta el grafo.
 - **Validación de argumentos**: los type hints + Pydantic de la tool validan la *forma* (que `tarea_id` sea int), pero **no la autorización** (que este usuario pueda cerrar esa tarea). La validación de negocio/permisos va en el cuerpo de la tool o en un nodo previo —nunca confíes en que el modelo "pida bien"—.
 - **Human-in-the-loop**: el `interrupt`/`interrupt_before` de LangGraph (módulo 5) es el gating de acciones irreversibles, ya como primitiva. Las acciones difíciles de revertir (borrar, cobrar, mandar, deployar) pasan por una pausa de confirmación.
 - **Prompt injection, peor en un agente**: en [RAG](rag.md) una inyección sesga una respuesta; en un agente con tools puede hacer que **ejecute acciones**. Y en **multi-agente** el riesgo escala: una inyección en la salida de un agente entra como input a otro, propagándose por la conversación. Tratá toda salida externa (y la de otros agentes) como no confiable, separala de las instrucciones, y combiná con mínimo privilegio para acotar el blast radius.
