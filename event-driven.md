@@ -101,12 +101,22 @@ Y un **publisher** (worker o cron) lee lo no enviado y lo publica:
 
 ```ts
 // proceso aparte: lee el outbox y publica (a EventBridge, SQS, Kafka...)
-const pendientes = await db.select().from(outbox).where(eq(outbox.enviado, false)).limit(100);
-for (const ev of pendientes) {
-  await bus.publish(ev.tipo, ev.payload);      // si falla, se reintenta en la próxima vuelta
-  await db.update(outbox).set({ enviado: true }).where(eq(outbox.id, ev.id));
-}
+await db.transaction(async (tx) => {
+  const pendientes = await tx
+    .select()
+    .from(outbox)
+    .where(eq(outbox.enviado, false))
+    .orderBy(outbox.id)                 // orden estable (los eventos se publican en el orden en que se escribieron)
+    .for("update", { skipLocked: true })// cada worker "reclama" sus filas; otro worker saltea las bloqueadas
+    .limit(100);
+  for (const ev of pendientes) {
+    await bus.publish(ev.tipo, ev.payload);   // si falla, se reintenta en la próxima vuelta
+    await tx.update(outbox).set({ enviado: true }).where(eq(outbox.id, ev.id));
+  }
+});
 ```
+
+Dos detalles de producción en ese `SELECT`: **`FOR UPDATE SKIP LOCKED`** es lo que evita que **dos instancias** del publisher lean el mismo lote y publiquen las mismas filas dos veces —cada worker bloquea y reclama sus filas, el otro saltea las ya tomadas—. Sin eso, con más de un worker corriendo, el doble-claim es seguro (una razón más para que los consumidores sean idempotentes, módulo 4). Y el **`ORDER BY`**: el orden de publicación no está garantizado salvo que lo fuerces; si tu consumidor depende del orden, ordená por el `id`/secuencia del outbox.
 
 Dos formas de leer el outbox:
 
@@ -145,13 +155,13 @@ async function manejar(evento: { id: string; tipo: string; payload: unknown }) {
 }
 ```
 
-La clave: registrar el id **y** aplicar el efecto en la **misma transacción**, para que no quede un id registrado sin efecto aplicado (ni al revés). Variantes según el caso:
+La clave: registrar el id **y** aplicar el efecto en la **misma transacción**, para que no quede un id registrado sin efecto aplicado (ni al revés). Y un matiz fino: la garantía real contra el duplicado la da la **restricción `UNIQUE(eventoId)` de la tabla `inbox` bajo la transacción** —es ella la que serializa dos copias del mismo evento procesadas en paralelo (una gana el insert, la otra choca con el unique)—; el `if (yaProcesado.length === 0)` solo **lee el resultado** de ese conflicto, no es lo que previene la concurrencia. Variantes según el caso:
 
 - **Inbox en la base** (lo de arriba): durable, transaccional con el efecto.
 - **Redis `SET NX` con TTL** (del módulo de Redis): más rápido, para efectos no transaccionales con la base.
 - **Operaciones naturalmente idempotentes**: marcar `estado = "confirmado"` dos veces da lo mismo; ahí no hace falta nada extra. El cuidado es para efectos **acumulativos** (cobrar, sumar, enviar).
 
-Junto con el Outbox (módulo 3), el Inbox cierra el círculo de **exactly-once processing** sobre un transporte at-least-once: el productor garantiza "al menos una vez", el consumidor deduplica → efecto neto de "exactamente una vez".
+Junto con el Outbox (módulo 3), el Inbox cierra el círculo de **exactly-once processing** sobre un transporte at-least-once: el productor garantiza "al menos una vez", el consumidor deduplica → efecto neto de "exactamente una vez". **Un límite honesto**: esto vale cuando el efecto es **transaccional con el insert al inbox** (mismo Postgres). Si el efecto es una **llamada externa no transaccional** (cobrar con un proveedor de pagos, mandar un email), no hay exactly-once verdadero: lo mejor alcanzable es at-least-once + deduplicación del lado del receptor, o entregarle una **idempotency key** al proveedor para que él deduplique.
 
 **Ejercicios 4**
 4.1 ¿Por qué un consumidor de eventos debe ser idempotente? ¿Qué patrones/transportes lo obligan?
@@ -247,6 +257,7 @@ Event Sourcing:          [DineroDepositado(100), DineroDepositado(80), DineroRet
 ```ts
 class CuentaBancaria {
   private saldo = 0;
+  private version = 0;                   // versión del aggregate (para optimistic concurrency, ver abajo)
   private nuevosCambios: DomainEvent[] = [];
 
   depositar(monto: number): void {
@@ -267,6 +278,7 @@ class CuentaBancaria {
   private mutar(evento: DomainEvent): void {
     if (evento.tipo === "DineroDepositado") this.saldo += evento.monto;
     if (evento.tipo === "DineroRetirado") this.saldo -= evento.monto;
+    this.version++;                     // cada evento aplicado sube la versión
   }
 
   // reconstruir desde el historial (rehidratación)
@@ -281,7 +293,7 @@ class CuentaBancaria {
 Conceptos:
 
 - **Event store**: la base de los eventos. Una tabla `events(stream_id, version, tipo, payload)` en Postgres alcanza para empezar; o un store dedicado (**EventStoreDB**, rebrandeado a **KurrentDB**).
-- **Optimistic concurrency**: una restricción `UNIQUE(stream_id, version)` evita que dos escrituras concurrentes pisen el mismo aggregate (si las dos intentan la versión N, una falla y reintenta).
+- **Optimistic concurrency**: esa `version` que el aggregate fue subiendo en cada `mutar()` es la que se persiste con cada evento. Al guardar `nuevosCambios`, escribís cada evento con `version = versión_base_al_cargar + i`, y una restricción `UNIQUE(stream_id, version)` evita que dos escrituras concurrentes pisen el mismo aggregate (si las dos parten de la versión N e intentan escribir N+1, una falla por el unique y reintenta rehidratando).
 - **Snapshots**: reproducir miles de eventos en cada lectura es lento; cada N eventos guardás un "snapshot" del estado para no reconstruir desde cero.
 
 Qué ganás: **auditoría perfecta** (sabés *exactamente* qué pasó y cuándo, gratis), poder reconstruir estados pasados, y derivar nuevas vistas reproduciendo el historial. Qué cuesta: complejidad alta, te **obliga a CQRS** (no podés hacer queries ad-hoc sobre eventos), schema evolution para siempre (módulo 10), y problemas como GDPR/"derecho al olvido" sobre un store inmutable (se resuelve con *crypto-shredding*).
@@ -312,6 +324,8 @@ export class SaldosProjection {
   }
 }
 ```
+
+> **Cuidado, este ejemplo es didáctico.** Una projection real tiene que (1) **crear la fila** si no existe (un `upsert`, no un `update` pelado: el primer evento de una cuenta nueva no actualizaría ninguna fila), y (2) ser **idempotente o posicionada**: `saldo + delta` solo es seguro en un **replay completo desde la tabla vacía**; si reprocesás el mismo evento dos veces (recordá at-least-once), el saldo queda mal. La solución de producción es **trackear el último `version`/offset procesado por stream** y descartar lo ya aplicado, o reconstruir siempre desde cero borrando la tabla.
 
 Propiedades clave:
 
@@ -432,6 +446,7 @@ El principio: en EDA, la observabilidad **no es opcional**. En un monolito podé
 12.1 Un equipo quiere arrancar un MVP con Event Sourcing y EDA distribuida "para que escale". ¿Qué recomendás y por qué?
 12.2 ¿Cómo obtenés el desacople de eventos sin pagar el costo de una EDA distribuida, en un monolito?
 12.3 ¿Para qué tipo de subdominio se justifica Event Sourcing y para cuál una simple tabla `audit_log`?
+12.4 **Diseño / síntesis.** Te dan este sistema: una tienda con un monolito modular (Postgres) que ya factura bien, y un nuevo subdominio de **inventario** que el negocio quiere auditar al detalle (quién movió qué stock y cuándo) y que debe avisarle a un servicio de **Envíos** —que corre aparte, mantenido por otro equipo— cuando un pedido se confirma. Decidí qué patrones de este módulo aplicarías (y cuáles NO) y justificá cada decisión con sus trade-offs.
 
 ---
 
@@ -599,6 +614,20 @@ El principio: en EDA, la observabilidad **no es opcional**. En un monolito podé
 12.3 Event Sourcing se justifica en subdominios con auditoría fuerte, temporalidad o lógica
      de dominio rica (finanzas, ledgers, inventario, reservas). Para un CRUD sin esas
      necesidades, una tabla audit_log cubre el 80% sin el costo permanente de ES.
+12.4 Una respuesta razonable (no hay una única): (a) NO romper el monolito: el resto sigue con
+     transacciones ACID, que ya funcionan. (b) Inventario: como el negocio pide auditoría fuerte
+     del historial de movimientos de stock, es un candidato legítimo a Event Sourcing —se gana
+     auditoría perfecta gratis—; pero si "auditar quién movió qué" se satisface con una tabla
+     audit_log, empezá por ahí y reservá ES si la temporalidad/replay se vuelve un requisito real
+     (no pagues schema evolution eterna + CQRS obligatorio sin necesidad). (c) Avisar a Envíos
+     (servicio aparte, otro equipo): esto SÍ cruza un límite de servicio real → publicás un evento
+     PedidoConfirmado de forma confiable con el patrón Outbox (mismo Postgres, misma transacción
+     que el cambio), y Envíos consume idempotente (Inbox). (d) El flujo confirmar→reservar stock→
+     avisar Envíos, si gana pasos y compensaciones, es una saga: coreografía mientras sea simple,
+     orquestación (Step Functions) si se complica. (e) Correlation ID en cada evento + alertar la
+     DLQ desde el día uno (observabilidad no negociable en cuanto hay async cross-servicio).
+     Lo que NO: ni EDA distribuida "por las dudas" dentro del monolito, ni CQRS donde lectura y
+     escritura no divergen.
 ```
 
 ---
