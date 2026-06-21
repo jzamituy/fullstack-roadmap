@@ -234,7 +234,9 @@ async def borrar(id: int) -> None: ...
 
 `status_code` en el decorador fija el código de éxito. Para errores (404, 409, etc.) usás `HTTPException` (módulo 7). Como en Nest, **respetá la semántica HTTP**: 201 al crear, 204 al borrar sin body, 200 por defecto.
 
-Extra útil para listas: `response_model=list[TareaPublica]` para endpoints que devuelven colecciones —tipa y documenta el array entero—.
+Extra útil para listas: `response_model=list[TareaPublica]` para endpoints que devuelven colecciones —tipa y documenta el array entero—. Para listados reales, el mercado espera una **respuesta paginada con envelope**: en vez de devolver el array pelado, un modelo `Pagina[TareaPublica]` con `items: list[TareaPublica]`, `total: int`, `page: int` (otro `response_model`, esta vez envolviendo la lista) —el contrato que un front necesita para paginar—.
+
+Una aclaración sobre la coexistencia de `response_model` y la anotación de retorno (`-> Tarea`): cuando están los dos, **`response_model` manda en la serialización de la respuesta**; el `-> Tarea` queda solo como ayuda para mypy/el type-checker. No se contradicen.
 
 **Ejercicios 5**
 5.1 ¿Qué hace `response_model` y qué rol de Nest cumple? Nombrá tres cosas que aporta.
@@ -260,7 +262,8 @@ async def get_db() -> AsyncSession:
 # Inyectás declarándola como parámetro con Depends
 @app.get("/tareas")
 async def listar(db: Annotated[AsyncSession, Depends(get_db)]) -> list[TareaPublica]:
-    return await db.tareas.all()
+    result = await db.execute(select(Tarea))   # API real de SQLAlchemy 2.0 async (módulo 9)
+    return result.scalars().all()
 ```
 
 Cómo se mapea con Nest:
@@ -432,7 +435,9 @@ async def bueno():
 
 **Acceso a datos.** Para Postgres ([tu DB del track](postgresql.md)), el stack típico es **SQLAlchemy 2.0 async** + `asyncpg`, inyectando la sesión vía `Depends` (módulo 6). Todo tu conocimiento de SQL, transacciones, índices y pooling se transfiere; cambia el cliente. Para que la sesión sea async y no bloquee, usás el engine async de SQLAlchemy y `await` en las queries.
 
-La idea: **FastAPI es async-first; la regla de oro es la misma de Node —I/O async, nunca bloquees el loop—. Si una librería es sync y bloqueante, mandala al thread pool (`def` o `run_in_threadpool`).**
+Un matiz que conviene saber: el thread pool al que van las rutas `def` es **finito** (por defecto ~40 threads en AnyIO). Si abusás de `def` con I/O bloqueante, bajo carga se llenan los threads y la API se degrada igual —por eso, cuando existe una versión async de la librería, `async def` sigue siendo preferible a tirar todo al pool—.
+
+La idea: **FastAPI es async-first; la regla de oro es la misma de Node —I/O async, nunca bloquees el loop—. Si una librería es sync y bloqueante, mandala al thread pool (`def` o `run_in_threadpool`), recordando que el pool es finito.**
 
 **Ejercicios 9**
 9.1 ¿Cuándo usás `async def` y cuándo `def` en una path operation? ¿Qué hace FastAPI con cada una?
@@ -463,7 +468,7 @@ async def preguntar(p: Pregunta) -> dict[str, str]:
     return {"respuesta": msg.content[0].text}
 ```
 
-(Usás el cliente **async** y `await` —módulo 9— porque la llamada al LLM es I/O lento: bloquear el loop acá tumbaría la API bajo carga.)
+(Usás el cliente **async** y `await` —módulo 9— porque la llamada al LLM es I/O lento: bloquear el loop acá tumbaría la API bajo carga. Detalle de robustez: `msg.content` es una **lista de bloques**; acá `content[0].text` funciona porque con el modelo actual el primer bloque es texto, pero en producción conviene chequear `if block.type == "text"` antes de leer `.text`, por si se habilita *thinking* u otros bloques.)
 
 **El problema específico de IA: las respuestas son lentas y largas.** Un LLM puede tardar segundos en completar. Si el usuario espera la respuesta entera, la UX es mala. La solución es el **streaming**: ir mandando tokens a medida que el modelo los genera. FastAPI lo hace con `StreamingResponse` —tu puente con el SSE que viste en [tiempo real](tiempo-real.md)—:
 
@@ -478,9 +483,11 @@ async def preguntar_stream(p: Pregunta):
             messages=[{"role": "user", "content": p.texto}],
         ) as stream:
             async for texto in stream.text_stream:
-                yield texto              # cada chunk sale al cliente al instante
+                yield f"data: {texto}\n\n"   # formato SSE: cada chunk como un evento `data:`
     return StreamingResponse(generar(), media_type="text/event-stream")
 ```
+
+Ojo con el formato: `media_type="text/event-stream"` es **SSE**, y SSE exige que cada chunk vaya como `data: <texto>\n\n` para que un `EventSource` del lado cliente lo parsee (por eso el `yield f"data: {texto}\n\n"`). Si solo querés streamear tokens crudos sin protocolo, usá `media_type="text/plain"` y `yield texto`. Y en producción, **manejá la desconexión del cliente**: si el usuario abandona a mitad de una respuesta larga, conviene cortar el generador (chequeando `await request.is_disconnected()`) para no seguir gastando tokens del LLM —lo retoma [deploy-ai](deploy-ai.md)—.
 
 El `async def generar()` con `yield` es un **generador async**: produce chunks que `StreamingResponse` envía a medida que llegan, sin esperar la respuesta completa. Es exactamente el modelo de SSE/streaming del módulo de tiempo real, aplicado a tokens de un LLM. Casi toda app de chat con IA en producción usa este patrón.
 
@@ -527,7 +534,7 @@ def test_titulo_vacio_da_422():
     assert r.status_code == 422        # la validación Pydantic automática
 ```
 
-Toda tu disciplina se transfiere: tests de endpoint (e2e), `Depends` te deja **sobrescribir dependencias** en los tests (`app.dependency_overrides`) para inyectar una DB de prueba o un LLM mockeado —el equivalente de los `TestingModule` overrides de Nest—. La pirámide, el criterio classicist/mockist, todo igual.
+Toda tu disciplina se transfiere: tests de endpoint (e2e), `Depends` te deja **sobrescribir dependencias** en los tests (`app.dependency_overrides`) para inyectar una DB de prueba o un LLM mockeado —el equivalente de los `TestingModule` overrides de Nest—. La pirámide, el criterio classicist/mockist, todo igual. (El `TestClient` es **síncrono**; si querés testear con `async def` nativo —para ejercitar el mismo loop que producción— usás `httpx.AsyncClient` con `ASGITransport(app=app)`.)
 
 **Producción**:
 - Corrés con **Uvicorn** detrás de un proceso manager. El patrón estándar es **Gunicorn gestionando workers Uvicorn** (varios procesos para usar todos los cores —acordate del GIL del [módulo de Python](python.md): un proceso no usa más de un core para CPU—), o Uvicorn con `--workers`. Es el análogo del `cluster` de Node.
