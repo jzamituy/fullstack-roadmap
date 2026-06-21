@@ -44,7 +44,7 @@ Las responsabilidades núcleo del rol, que los módulos siguientes desarrollan:
 - **Desarrollar a la gente**: review, mentoring, feedback (módulo 8).
 - **De cara afuera**: traducir entre negocio y técnica, defender el tiempo del equipo, decir que no con fundamento.
 
-Una distinción de vocabulario útil: **Tech Lead ≠ Engineering Manager**. El EM es responsable de las *personas* (carrera, performance, contratación, 1:1s); el TL es responsable de lo *técnico* (arquitectura, calidad, dirección). En equipos chicos a veces es la misma persona, pero son dos trabajos distintos; confundirlos —querer hacer gestión de personas *y* arquitectura *y* seguir codeando a tiempo completo— es la receta del burnout. La frase mental: **dejaste de ser el que resuelve todos los problemas; ahora sos el que se asegura de que los problemas se resuelvan bien, por quien corresponda.**
+Una distinción de vocabulario útil: **Tech Lead ≠ Engineering Manager**. El EM es responsable de las *personas* (carrera, performance, contratación, 1:1s); el TL es responsable de lo *técnico* (arquitectura, calidad, dirección). En equipos chicos a veces es la misma persona, pero son dos trabajos distintos; confundirlos —querer hacer gestión de personas *y* arquitectura *y* seguir codeando a tiempo completo— es la receta del burnout. Por eso este módulo deja **a propósito** fuera los temas puros de *people management* (carrera, 1:1s, contratación, feedback de performance): son del EM. Acá nos centramos en el liderazgo **técnico**. La frase mental: **dejaste de ser el que resuelve todos los problemas; ahora sos el que se asegura de que los problemas se resuelvan bien, por quien corresponda.**
 
 **Ejercicios 1**
 1.1 ¿Cuál es el cambio de "unidad de medida" del impacto al pasar de senior a Tech Lead?
@@ -79,7 +79,7 @@ Conecta directo con todo el track: cada decisión grande que tomaste en los mód
 
 ## Módulo 3 — Cómo se escribe un ADR
 
-**Teoría.** Un ADR es deliberadamente **corto** (una página) y tiene una estructura estándar. La trampa a evitar es el documento de 20 páginas que nadie escribe ni lee: si cuesta más de 20 minutos, no se hace. La plantilla mínima (variante de Nygard):
+**Teoría.** Un ADR es deliberadamente **corto** (una página) y tiene una estructura estándar. La trampa a evitar es el documento de 20 páginas que nadie escribe ni lee: si cuesta más de 20 minutos, no se hace. Hay variantes más elaboradas (**MADR**, o la de **Tyree-Akerman** que agrega las alternativas evaluadas), pero la de Nygard —cuatro secciones— es la más usada justamente por barata. La plantilla mínima (variante de Nygard):
 
 ```markdown
 # ADR-0007: Usar PostgreSQL como base de datos principal
@@ -121,12 +121,13 @@ Reglas prácticas: numerados y secuenciales (`0001`, `0002`...), un archivo por 
 3.2 ¿Cuál es la sección más importante y por qué? ¿Cómo debería escribirse?
 3.3 ¿Por qué la sección de consecuencias debe incluir lo *negativo*? ¿Qué señala que alguien solo liste ventajas?
 3.4 ¿Qué tipo de decisiones ameritan un ADR y cuáles no? Dá un ejemplo de cada lado.
+3.5 **Escribilo vos.** Elegí una decisión real del track —ej. "SNS+SQS vs Kafka para los eventos" o "¿K8s o Fargate?"— y escribí el ADR completo con las cuatro secciones (Estado, Contexto, Decisión, Consecuencias), incluyendo **al menos dos consecuencias negativas**. (Es el entregable concreto del módulo: no alcanza con saber qué es un ADR, hay que poder escribir uno.)
 
 ---
 
 ## Módulo 4 — Medir la entrega: las cuatro métricas DORA
 
-**Teoría.** "¿Cómo sé si mi equipo entrega bien?" La respuesta vaga ("se sienten productivos", "cerramos muchos tickets") no sirve para mejorar. El programa de investigación **DORA** (DevOps Research and Assessment, sintetizado en el libro *Accelerate*) encontró, con datos de miles de equipos, **cuatro métricas** que predicen el rendimiento de entrega de un equipo de software —y que correlacionan con el rendimiento del negocio—. Son el estándar de la industria para medir entrega.
+**Teoría.** "¿Cómo sé si mi equipo entrega bien?" La respuesta vaga ("se sienten productivos", "cerramos muchos tickets") no sirve para mejorar. El programa de investigación **DORA** (DevOps Research and Assessment, sintetizado en el libro *Accelerate*, 2018, investigación **liderada por Nicole Forsgren** con Jez Humble y Gene Kim) encontró, con datos de miles de equipos, **cuatro métricas** que predicen el rendimiento de entrega de un equipo de software —y que correlacionan con el rendimiento del negocio—. Son el estándar de la industria para medir entrega.
 
 Las cuatro, en dos grupos:
 
@@ -136,9 +137,11 @@ Las cuatro, en dos grupos:
 
 **Estabilidad** (¿qué tan bien entregamos?):
 - **Change Failure Rate** (tasa de fallo de cambios): qué % de los deploys causa un fallo en producción que requiere remediación (hotfix, rollback). Élite: **0-15%**.
-- **Failed Deployment Recovery Time** / MTTR (tiempo de recuperación): cuánto tardás en restaurar el servicio cuando un deploy falla. Élite: **menos de una hora**. (Esta métrica es el MTTR que viste en el [módulo 11 de Observabilidad](observabilidad.md): acá se ve por qué la observabilidad es una inversión de liderazgo, no solo técnica —baja directamente esta métrica DORA—.)
+- **Failed Deployment Recovery Time** (tiempo de recuperación): cuánto tardás en restaurar el servicio cuando un deploy falla. Élite: **menos de una hora**. DORA **renombró** esta métrica —antes "Time to Restore" / **MTTR**— porque el MTTR resultó estadísticamente poco fiable como medida. La intuición se conecta con el MTTR del [módulo 11 de Observabilidad](observabilidad.md) (por eso la observabilidad es una inversión de liderazgo, no solo técnica: baja directamente esta métrica), pero no son idénticos —no la llames "MTTR" si querés ser preciso—.
 
 Lo importante del *par* de grupos: DORA mide **velocidad Y estabilidad juntas**, a propósito. Medir solo velocidad incentiva deployar basura rápido; medir solo estabilidad incentiva no deployar nunca ("si no toco nada, no se rompe"). El equipo de alto rendimiento es bueno en **las cuatro a la vez** —y el hallazgo contraintuitivo de DORA (módulo 5) es que eso es posible, que no hay que elegir—.
+
+**Más allá de las cuatro: la quinta dimensión.** Las cuatro miden *entrega*. DORA sumó después una quinta métrica de **fiabilidad / desempeño operacional** (*reliability*): si el equipo cumple sus **objetivos operativos** —disponibilidad, latencia, los SLOs del módulo de Observabilidad— y no solo si entrega rápido y estable. Es el contrapeso al incentivo de optimizar throughput a costa de que el sistema ande mal en producción: de nada sirve deployar 50 veces por día si el servicio se cae. (Como los benchmarks numéricos, la formulación exacta se recalibra entre reportes anuales.)
 
 Para qué las usás como Tech Lead: **para mejorar el sistema de entrega, no para rankear personas.** Si tu lead time es de tres semanas, las métricas te dicen *que* hay un problema; investigás *dónde* (¿el CI tarda horas? ¿los PRs esperan días para review? ¿los deploys son manuales y aterradores?) y atacás esa restricción. Es el "medí antes de optimizar" de [NestJS senior](nestjs-senior.md) aplicado al proceso de entrega del equipo.
 
@@ -164,11 +167,14 @@ La conclusión de liderazgo, y el punto del módulo: **cuando alguien te plantea
 
 El cuidado al usar DORA (la trampa del que las descubre): **son métricas de sistema, no de personas, y son fáciles de gamear si las convertís en objetivo.** Si premiás "más deploys", la gente fragmenta deploys artificialmente; si castigás change failure rate, nadie reporta los fallos. (Es la **ley de Goodhart**: cuando una métrica se vuelve un objetivo, deja de ser una buena métrica.) Las usás para entender y mejorar el *sistema de entrega*, no para un ranking individual.
 
+**La contracara cultural: postmortems sin culpa (blameless).** Si las métricas no son para señalar culpables, la práctica que lo encarna es el **postmortem blameless**: cuando algo falla en producción, el equipo reconstruye *qué pasó y por qué* para arreglar el **sistema** (procesos, alertas, guardas, tests faltantes) **sin buscar a quién culpar**. No es blandura ni "no pasa nada": es lo que hace que la gente **reporte** los fallos y los near-misses en vez de esconderlos —y reportar rápido y con honestidad es lo que de verdad baja el recovery time (la cuarta métrica)—. Es el Goodhart de recién aplicado a personas: si castigás el error, no desaparece el error, desaparece el *reporte* del error (y entonces te enterás peor y más tarde). La cultura blameless es el complemento directo del "medí el sistema, no a las personas", y la práctica que más sostiene la fiabilidad (la quinta dimensión) en el día a día. Un buen postmortem termina en *acciones sobre el sistema* con dueño y fecha, no en "fulano tiene que tener más cuidado".
+
 **Ejercicios 5**
 5.1 ¿Cuál es la creencia tradicional sobre velocidad vs estabilidad y qué encontró DORA al respecto?
 5.2 Explicá con el ejemplo de "lotes chicos" por qué ir rápido puede ser ir más seguro, no menos.
 5.3 ¿Por qué se dice que el track técnico entero (testing, TDD, CI/CD, observabilidad) es "material de liderazgo"?
 5.4 ¿Qué es la ley de Goodhart y cómo se aplica al riesgo de usar mal las métricas DORA? Dá un ejemplo de gaming.
+5.5 ¿Qué es un postmortem *blameless* y por qué *baja* el recovery time en vez de ser solo "ser amable"? Conectalo con la ley de Goodhart aplicada a personas.
 
 ---
 
@@ -240,13 +246,14 @@ Para vos como Tech Lead, esto es directamente accionable: **una de tus tareas es
 **3. Decir que no (y traducir).** El Tech Lead es la interfaz entre la presión del negocio ("¿se puede para el viernes?") y la realidad técnica. Dos habilidades:
 - **Decir que no con fundamento**: no "no se puede" a secas, sino "para el viernes podemos entregar X sin Y; Y requiere dos semanas más por Z —¿qué priorizamos?". Das **opciones y trade-offs**, no un muro ni un sí imposible.
 - **Proteger el tiempo del equipo**: filtrar interrupciones, defender espacio para pagar deuda técnica (módulo 9), no aceptar cada pedido urgente como urgente real.
+- **Cerrar desacuerdos técnicos sin imponer ni eternizarlos** (*disagree and commit*): cuando dos buenos ingenieros discrepan y no hay un ganador claro, el TL no deja el debate abierto para siempre ni decide por jerarquía. Escucha, decide con criterio, lo **registra en un ADR** (con las fuerzas y los trade-offs) y el equipo se compromete con la decisión aunque alguno hubiera elegido distinto. El registro es lo que vuelve sano el "commit": no es "porque lo digo yo", es "por estas razones, que quedan escritas y se pueden revisar si cambian las premisas".
 
 El hilo común de las tres: **tu trabajo es subir el techo del equipo, no ser el techo del equipo.** Si todo pasa por vos —cada decisión, cada review crítico, cada problema difícil—, sos un cuello de botella, no un líder. Multiplicar es distribuir criterio, no centralizarlo.
 
 **Ejercicios 8**
 8.1 ¿Por qué el code review es "herramienta de liderazgo" y no solo caza-bugs? Dá dos prácticas de un buen review.
 8.2 ¿Por qué "explicar el porqué" en un review multiplica más que "decir el qué"?
-8.3 ¿Cómo se dice "no" con fundamento? Reformulá un "no se puede para el viernes" en una respuesta de Tech Lead.
+8.3 **Escribilo vos.** A mitad del sprint, un stakeholder pide sumar una feature grande "porque es urgente". Escribí la respuesta de un Tech Lead: ni un "no" seco ni un "sí" imposible. (Pensá en opciones, trade-offs y qué se desplaza.)
 8.4 Explicá "subí el techo del equipo, no seas el techo del equipo". ¿Qué antipatrón describe?
 
 ---
@@ -273,6 +280,7 @@ La frase de liderazgo: **la deuda técnica es una decisión de negocio disfrazad
 9.2 Describí los dos extremos (el que la ignora y el perfeccionista) y qué hace mal cada uno.
 9.3 ¿Qué deuda hay que priorizar y cuál puede esperar para siempre? ¿Cómo usás observabilidad y DORA para detectarla?
 9.4 ¿Por qué "pagar de a poco" es mejor que el "gran refactor", y qué del track técnico es la red de seguridad que lo hace posible?
+9.5 **Escribilo vos.** Elegí una zona frágil concreta (real o inventada) y escribí su caso de negocio en el formato "esta zona nos cuesta X; pagarla cuesta Y; ¿lo hacemos?", apoyándote en una señal de datos (observabilidad o DORA).
 
 ---
 
@@ -347,6 +355,26 @@ El cierre del track y del perfil: con liderazgo técnico completás **la mitad d
 3.2 El **Contexto**, porque es el "por qué" que el futuro necesita y que el código no guarda. Debe escribirse de forma **neutral** —las fuerzas en juego, no la conclusión— para que se entienda qué problema y qué restricciones había realmente.
 3.3 Porque toda decisión arquitectónica tiene un **precio/trade-off**, y nombrarlo es lo que la hace una decisión meditada y no un acto de fe; además avisa al futuro qué costos asumió. Que alguien liste solo ventajas señala inmadurez o que no pensó los trade-offs (ninguna decisión real es gratis).
 3.4 Ameritan ADR las decisiones **significativas y costosas de revertir** (ej: arquitectura de eventos coreografiada, elección de base de datos principal). No ameritan las triviales o fácilmente reversibles (ej: usar Prettier, el nombre de una variable). El criterio = decisiones difíciles de deshacer.
+3.5 Ejemplo de referencia (hay variantes válidas; lo que importa es que el Contexto sea neutral y las Consecuencias incluyan lo negativo):
+
+```markdown
+# ADR-0012: Eventos vía SNS+SQS en vez de Kafka
+## Estado
+Aceptado
+## Contexto
+Necesitamos comunicación asíncrona entre servicios (notificaciones, proyecciones).
+El volumen es moderado (miles de eventos/día, no millones/seg). El equipo ya opera
+en AWS y no tiene experiencia operando Kafka. No necesitamos reprocesar el log de
+eventos desde el inicio ni retención larga por ahora.
+## Decisión
+Usaremos SNS+SQS (fan-out + colas) como bus de eventos. No introducimos Kafka.
+## Consecuencias
+- (+) Cero operación: son servicios gestionados; encaja con el stack actual.
+- (+) Fan-out y reintentos/DLQ resueltos sin infra propia.
+- (−) No tenemos un log de eventos reproducible (replay) como en Kafka; si más
+      adelante lo necesitamos, habrá que reevaluar (probablemente con un ADR nuevo).
+- (−) El ordering estricto y el throughput masivo no son el fuerte de SQS estándar.
+```
 
 ### Módulo 4
 4.1 **Deployment Frequency** y **Lead Time for Changes** (velocidad/throughput); **Change Failure Rate** y **Failed Deployment Recovery Time/MTTR** (estabilidad).
@@ -359,6 +387,7 @@ El cierre del track y del perfil: con liderazgo técnico completás **la mitad d
 5.2 Lotes chicos = deploys pequeños y frecuentes, cada uno de bajo riesgo (poco código, fácil de revisar y revertir). El deploy gigante mensual (lento) es el *inestable*: 300 cambios juntos, imposible saber cuál rompió qué. Por eso ir rápido con lotes chicos *es* ir más seguro.
 5.3 Porque las prácticas que mejoran las cuatro métricas a la vez (CI/CD, tests confiables, observabilidad) son exactamente el contenido del track técnico. Esas son las palancas con las que un lead mejora velocidad *y* estabilidad: invertir en ellas no es "lujo técnico", es la herramienta de liderazgo para la entrega.
 5.4 **Ley de Goodhart**: cuando una métrica se vuelve objetivo, deja de ser buena métrica (la gente la gamea). Aplicada a DORA: si premiás "más deploys", fragmentan deploys artificialmente; si castigás change failure rate, dejan de reportar fallos. Por eso son para entender el sistema, no para objetivos/rankings individuales.
+5.5 Un postmortem blameless reconstruye qué falló y por qué para arreglar el **sistema** (procesos, alertas, guardas, tests), sin buscar culpable. Baja el recovery time porque hace que la gente **reporte** los fallos rápido y con honestidad en vez de esconderlos —y solo podés recuperarte rápido de lo que se reporta a tiempo—. Es el Goodhart aplicado a personas: si castigás el error, no desaparece el error, desaparece el *reporte* del error (te enterás peor y más tarde).
 
 ### Módulo 6
 6.1 **Ley de Conway**: las organizaciones diseñan sistemas que copian su estructura de comunicación. **Inverse Conway Maneuver**: diseñá los *equipos* con la forma que querés para el *software*. Implica que un TL, al organizar equipos, está diseñando indirectamente la arquitectura —debe hacerlo a propósito—.
@@ -375,7 +404,7 @@ El cierre del track y del perfil: con liderazgo técnico completás **la mitad d
 ### Módulo 8
 8.1 Porque el review es donde se **propaga criterio y se eleva el nivel** del equipo, no solo donde se cazan bugs (eso, en parte, lo hace el linter/los tests). Dos prácticas: revisar **diseño y comportamiento** (no solo estilo), y **explicar el porqué** de cada comentario; (también: distinguir bloqueante de opcional, ser rápido).
 8.2 Porque "decir el qué" ("cambiá esto") arregla un PR puntual; "explicar el porqué" ("porque acopla el test a la implementación y se romperá en el próximo refactor") enseña **criterio que el dev aplica solo la próxima vez** —multiplica, no parchea—.
-8.3 Con **opciones y trade-offs**, no un muro ni un sí imposible. Reformulación: "Para el viernes entregamos X sin Y; Y necesita dos semanas más por Z. ¿Priorizamos X ahora y Y después, o movemos la fecha?". Das información para decidir, no un veto.
+8.3 Con **opciones y trade-offs**, no un muro ni un sí imposible. Ejemplo de respuesta: "Entiendo la urgencia. Esa feature es ~5 días y el sprint ya está comprometido; tengo tres caminos: (a) la metemos ahora y sale del sprint la tarea Z de menor prioridad; (b) la armamos como spike esta semana y la planificamos completa para el próximo sprint; (c) entregamos una versión mínima el viernes y el resto después. ¿Cuál prioriza el negocio?". Das el costo y las opciones con su trade-off; la decisión de prioridad la toma quien corresponde, con información.
 8.4 Significa que tu rol es **elevar la capacidad del equipo** (subir el techo), no ser vos el límite de todo lo que el equipo puede hacer (ser el techo). Describe el antipatrón del lead **cuello de botella**: todo pasa por él (cada decisión, review crítico, problema difícil), así que el equipo no puede superar su capacidad individual.
 
 ### Módulo 9
@@ -383,6 +412,7 @@ El cierre del track y del perfil: con liderazgo técnico completás **la mitad d
 9.2 **El que la ignora** ("no hay tiempo para refactorizar") acumula intereses hasta paralizar al equipo ("no toques eso que anda"). **El perfeccionista** quiere refactorizar todo y deja de entregar valor, pagando deuda que no cobraba intereses (código elegante que el negocio no pidió).
 9.3 Priorizás la deuda en código que **cambiás seguido** o que **concentra bugs/incidentes** (cobra intereses altos, frena al equipo cada semana); la del código que nadie toca puede esperar para siempre. La detectás con datos: la **observabilidad** muestra qué módulo concentra incidentes y **DORA** muestra si el lead time sube por una zona específica.
 9.4 Porque el "gran refactor" de tres meses el negocio no lo aprueba y suele fallar; pagar de a poco (regla del boy scout: dejá el código mejor de como lo encontraste) es sostenible y continuo. La red de seguridad que lo hace posible es la **suite de tests (TDD)**: sin tests no podés refactorizar sin miedo a romper algo.
+9.5 Ejemplo de referencia: "El módulo de facturación concentra el 40% de los incidentes de los últimos dos meses (lo muestra la observabilidad) y cada cambio ahí toma ~3× lo normal (se nota en el lead time de esos PRs). Estabilizarlo —tests de caracterización + extraer la lógica de impuestos— son ~6 días. Costo de no hacerlo: ~1 día/sprint de fricción y riesgo de incidentes en el flujo que factura. Propongo pagarlo el próximo sprint. ¿Lo aprobamos?". La clave: cuantificar el interés con datos (observabilidad/DORA), el costo de pagar, y dejar la decisión priorizada con evidencia, no con miedo.
 
 ### Módulo 10
 10.1 Se corre de **escribir** código a **revisarlo, entenderlo y mantenerlo con confianza** (entra más código más rápido). Se vuelven *más* importantes: el code review riguroso, los tests confiables (TDD) y la observabilidad —el criterio de ingeniería se hace más valioso por escaso, no menos—.
