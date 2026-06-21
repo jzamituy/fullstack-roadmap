@@ -225,6 +225,8 @@ app = grafo.compile(checkpointer=MemorySaver(), interrupt_before=["tools"])
 app.invoke({"messages": [HumanMessage("Borrá los proyectos archivados.")]}, config)
 # el grafo corre hasta el borde de "tools" y PAUSA; acá inspeccionás el estado / pedís confirmación
 estado = app.get_state(config)              # ver qué tool y con qué args iba a llamar
+# inspeccionás estado.values para decidir; si RECHAZÁS, no reanudás (o app.update_state(config, ...)
+# para corregir los args antes de seguir). Solo si APROBÁS:
 app.invoke(None, config)                     # invoke(None) = REANUDAR desde el checkpoint
 ```
 
@@ -551,10 +553,10 @@ El ejercicio que cierra el módulo y que mostrás en una entrevista de AI Engine
 ```
 6.1 LangGraph cablea un grafo explícito que vos diseñás; AutoGen modela agentes que CONVERSAN entre
     sí y el resultado emerge del diálogo (coordinación emergente, no flujo prediseñado).
-6.2 AssistantAgent: agente con LLM y un rol. UserProxyAgent (proxy/ejecutor): representa al humano
-    y/o ejecuta código (la pieza que actúa). Group chat: varios agentes en una conversación con un
-    manager que decide quién habla. Condición de terminación: cuándo para (mensaje TERMINATE, máximo
-    de turnos, meta cumplida).
+6.2 AssistantAgent: agente con LLM y un rol. UserProxyAgent: representa al humano y aporta input
+    externo (en v0.2 además ejecutaba código; en v0.4 eso pasó a CodeExecutorAgent o a una tool).
+    Group chat: varios agentes en una conversación con un manager que decide quién habla. Condición
+    de terminación: cuándo para (mensaje TERMINATE, máximo de turnos, meta cumplida).
 6.3 Con evaluator-optimizer (escribir → criticar → reescribir). El cambio: en vez de cablear vos el
     loop generar/evaluar/iterar, emerge de la conversación entre el agente escritor y el crítico.
 6.4 Porque la coordinación emergente puede no converger (agentes que se repiten o quedan dando
