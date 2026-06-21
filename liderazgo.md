@@ -85,7 +85,7 @@ Conecta directo con todo el track: cada decisión grande que tomaste en los mód
 # ADR-0007: Usar PostgreSQL como base de datos principal
 
 ## Estado
-Aceptado  (otros posibles: Propuesto · Aceptado · Rechazado · Deprecado · Superseded por ADR-00XX)
+Aceptado  (otros posibles: Propuesto · Aceptado · Rechazado · Deprecated · Superseded por ADR-00XX)
 
 ## Contexto
 La Task API necesita persistir usuarios, proyectos y tareas, con relaciones
@@ -141,13 +141,13 @@ Las cuatro, en dos grupos:
 
 Lo importante del *par* de grupos: DORA mide **velocidad Y estabilidad juntas**, a propósito. Medir solo velocidad incentiva deployar basura rápido; medir solo estabilidad incentiva no deployar nunca ("si no toco nada, no se rompe"). El equipo de alto rendimiento es bueno en **las cuatro a la vez** —y el hallazgo contraintuitivo de DORA (módulo 5) es que eso es posible, que no hay que elegir—.
 
-**Más allá de las cuatro: la quinta dimensión.** Las cuatro miden *entrega*. DORA sumó después una quinta métrica de **fiabilidad / desempeño operacional** (*reliability*): si el equipo cumple sus **objetivos operativos** —disponibilidad, latencia, los SLOs del módulo de Observabilidad— y no solo si entrega rápido y estable. Es el contrapeso al incentivo de optimizar throughput a costa de que el sistema ande mal en producción: de nada sirve deployar 50 veces por día si el servicio se cae. (Como los benchmarks numéricos, la formulación exacta se recalibra entre reportes anuales.)
+**Más allá de las cuatro: la quinta dimensión.** Las cuatro miden *entrega*. DORA sumó después (en los reportes anuales desde ~2021) una quinta métrica de **fiabilidad / desempeño operacional** (*reliability*): si el equipo cumple sus **objetivos operativos** —disponibilidad, latencia, los SLOs del módulo de Observabilidad— y no solo si entrega rápido y estable. Es el contrapeso al incentivo de optimizar throughput a costa de que el sistema ande mal en producción: de nada sirve deployar 50 veces por día si el servicio se cae. (Como los benchmarks numéricos, la formulación exacta se recalibra entre reportes anuales.)
 
 Para qué las usás como Tech Lead: **para mejorar el sistema de entrega, no para rankear personas.** Si tu lead time es de tres semanas, las métricas te dicen *que* hay un problema; investigás *dónde* (¿el CI tarda horas? ¿los PRs esperan días para review? ¿los deploys son manuales y aterradores?) y atacás esa restricción. Es el "medí antes de optimizar" de [NestJS senior](nestjs-senior.md) aplicado al proceso de entrega del equipo.
 
 **Ejercicios 4**
 4.1 Nombrá las cuatro métricas DORA y agrupalas en velocidad vs estabilidad.
-4.2 ¿Cuál de las cuatro es el MTTR del módulo de Observabilidad, y qué dice eso sobre por qué la observabilidad es una inversión de liderazgo?
+4.2 ¿Cuál de las cuatro se *relaciona* con el MTTR del módulo de Observabilidad (y en qué se diferencia), y qué dice eso sobre por qué la observabilidad es una inversión de liderazgo?
 4.3 ¿Por qué DORA mide velocidad *y* estabilidad juntas? ¿Qué pasa si medís solo una?
 4.4 Tu lead time es de tres semanas. ¿Qué hacés con esa métrica? ¿Para qué NO la usás?
 
@@ -260,7 +260,7 @@ El hilo común de las tres: **tu trabajo es subir el techo del equipo, no ser el
 
 ## Módulo 9 — Deuda técnica: gestionarla con datos, no con miedo
 
-**Teoría.** La **deuda técnica** es la metáfora (Ward Cunningham) de las decisiones de implementación que aceleran ahora pero **cobran intereses después** en forma de mayor costo de cambio. Como la deuda financiera, **no es intrínsecamente mala**: tomar deuda a propósito para llegar a una fecha o validar una hipótesis puede ser una buena decisión de negocio. Lo que la vuelve tóxica es **no gestionarla**: tomarla sin saberlo, no registrarla, y nunca pagarla, hasta que los intereses (cada cambio tarda el triple, cada deploy da miedo) ahogan al equipo.
+**Teoría.** La **deuda técnica** es la metáfora (Ward Cunningham) de las decisiones de implementación que aceleran ahora pero **cobran intereses después** en forma de mayor costo de cambio. (Nota: Cunningham aclaró después que su metáfora original apuntaba a entregar con una **comprensión incompleta del dominio** y no consolidar ese aprendizaje, no a justificar escribir código descuidado a propósito; el encuadre de "atajo deliberado" que usamos acá es la lectura posterior, hoy estándar en la industria.) Como la deuda financiera, **no es intrínsecamente mala**: tomar deuda a propósito para llegar a una fecha o validar una hipótesis puede ser una buena decisión de negocio. Lo que la vuelve tóxica es **no gestionarla**: tomarla sin saberlo, no registrarla, y nunca pagarla, hasta que los intereses (cada cambio tarda el triple, cada deploy da miedo) ahogan al equipo.
 
 El error de los dos extremos, que un Tech Lead evita:
 
@@ -323,7 +323,7 @@ Los principios de criterio que cierran el track:
 
 4. **Escalá la solución al problema** —el eje de criterio de TODO el temario, ahora a nivel organizacional—. No metés Team Topologies de cuatro tipos de equipo en un equipo de tres personas; no escribís un ADR para elegir Prettier; no montás observabilidad de sistema crítico en un side project. La misma pregunta de "¿[K8s o Fargate](kubernetes.md)?", "¿[llamada, workflow o agente](agentes.md)?", "¿[cuánta observabilidad](observabilidad.md)?", "¿[TDD acá o no](tdd.md)?" se vuelve "¿este equipo necesita esta estructura/proceso o es overkill?". La madurez es ajustar la herramienta al contexto, no aplicar la máxima en todos lados.
 
-5. **Liderar es un oficio aparte, no un ascenso por antigüedad técnica.** El mejor IC no es automáticamente buen lead —son habilidades distintas (multiplicar gente vs. resolver problemas)—. Se entrena: como TDD (módulo 11 de ese módulo), los primeros pasos se sienten torpes (te cuesta delegar, querés codear todo vos), y el payoff —un equipo que entrega bien y crece— aparece en el mediano plazo.
+5. **Liderar es un oficio aparte, no un ascenso por antigüedad técnica.** El mejor IC no es automáticamente buen lead —son habilidades distintas (multiplicar gente vs. resolver problemas)—. Se entrena: como con [TDD](tdd.md), es un oficio que se aprende —los primeros pasos se sienten torpes (te cuesta delegar, querés codear todo vos), y el payoff —un equipo que entrega bien y crece— aparece en el mediano plazo.
 
 El cierre del track y del perfil: con liderazgo técnico completás **la mitad del perfil senior que no es código puro**. La otra mitad —entregar software de calidad— la tenés en todo el track técnico; **esta** es la que te deja **dirigir cómo un equipo lo entrega**: decidir y registrar (ADRs), medir y mejorar (DORA), organizar y proteger (Team Topologies, carga cognitiva), desarrollar gente (review, mentoring) y gestionar lo difícil (deuda, decir que no, la IA con criterio). El hilo conductor del temario entero queda cerrado: empezaste pasando de Frontend a backend con Node, y terminás con las dos mitades del perfil contratable senior/Tech Lead/IA Engineer —construir bien y liderar la construcción—. Desde acá el crecimiento ya no es de temario, es de práctica: liderar equipos reales, tomar decisiones reales, y registrar lo que aprendés (volvé a empezar, ahora como mentor de otros).
 
@@ -377,8 +377,8 @@ Usaremos SNS+SQS (fan-out + colas) como bus de eventos. No introducimos Kafka.
 ```
 
 ### Módulo 4
-4.1 **Deployment Frequency** y **Lead Time for Changes** (velocidad/throughput); **Change Failure Rate** y **Failed Deployment Recovery Time/MTTR** (estabilidad).
-4.2 El **Failed Deployment Recovery Time** es el MTTR del módulo de Observabilidad. Dice que la observabilidad es inversión de liderazgo, no solo técnica: baja directamente una de las cuatro métricas DORA (recuperás más rápido porque *ves* y diagnosticás el problema rápido).
+4.1 **Deployment Frequency** y **Lead Time for Changes** (velocidad/throughput); **Change Failure Rate** y **Failed Deployment Recovery Time** (la métrica que sucede al viejo MTTR) (estabilidad).
+4.2 El **Failed Deployment Recovery Time** es la que se relaciona con el MTTR del módulo de Observabilidad —comparten la intuición de "cuánto tardás en recuperarte"—, aunque **no son idénticos**: DORA renombró la métrica justamente porque el MTTR clásico resultó estadísticamente poco fiable, y la suya se acota a la recuperación de un *deploy fallido*. La conexión dice que la observabilidad es inversión de liderazgo, no solo técnica: baja directamente esa métrica DORA (recuperás más rápido porque *ves* y diagnosticás el problema rápido).
 4.3 Para no incentivar un extremo perverso: medir solo velocidad incentiva deployar basura rápido; medir solo estabilidad incentiva no deployar nunca ("si no toco nada, no se rompe"). El alto rendimiento es ser bueno en las cuatro a la vez.
 4.4 La usás para **investigar dónde está la restricción** (CI lento, PRs que esperan días, deploys manuales aterradores) y atacarla —mejorar el *sistema* de entrega—. NO la usás para rankear o culpar personas (es métrica de sistema).
 
