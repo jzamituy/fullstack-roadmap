@@ -66,6 +66,7 @@
 
 - **Track QA / Automation**
   - [🎭 Playwright: E2E de browser](playwright.md)
+  - [🔌 API Testing y Contract Testing](api-testing.md)
 
 - **Enlaces**
   - [Repositorio en GitHub](https://github.com/jzamituy/fullstack-roadmap)
