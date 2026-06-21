@@ -158,6 +158,8 @@ export class TareasService {
 }
 ```
 
+> Detalle de tipos: `model.create(dto)` y `find()` no devuelven tu clase plana sino un **`HydratedDocument<Tarea>`** (la clase + los métodos de Mongoose: `.save()`, `.toObject()`, etc.). Es asignable a `Tarea` —por eso tipar el retorno como `Promise<Tarea>` compila— pero el objeto real trae más. Si querés ser explícito o evitar las ambigüedades de los overloads de `create()` (que acepta uno o varios docs), `new this.tareaModel(dto).save()` es la alternativa directa.
+
 La flexibilidad no te exime de pensar el modelo: te lo *permite posponer*, lo cual es bueno para prototipar y peligroso para mantener. El modelado serio viene en el módulo siguiente.
 
 **Ejercicios 3**
@@ -329,6 +331,10 @@ En código, con el AWS SDK v3 y `lib-dynamodb` (que mapea tipos JS ↔ los tipos
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 
+// new DynamoDBClient({}) apunta a la AWS real (toma región/credenciales del entorno).
+// Para el `dynamodb-local` del setup, pasale el endpoint del contenedor:
+//   new DynamoDBClient({ endpoint: "http://localhost:8000", region: "local",
+//                        credentials: { accessKeyId: "x", secretAccessKey: "x" } })
 const doc = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
 // escribir un ítem
@@ -345,7 +351,7 @@ const { Items } = await doc.send(new QueryCommand({
 }));
 ```
 
-`KeyConditionExpression` solo opera sobre las claves (PK obligatoria; SK opcional con `begins_with`/`>`/`between`): eso es lo que hace barata a la `Query`. Filtrar por un atributo que **no** es clave necesita un `FilterExpression` —que se aplica *después* de leer, así que pagás por lo leído aunque lo descartes— o un GSI.
+`KeyConditionExpression` solo opera sobre las claves (PK obligatoria; SK opcional con `begins_with`/`>`/`between`): eso es lo que hace barata a la `Query`. Filtrar por un atributo que **no** es clave necesita un `FilterExpression` —que se aplica *después* de leer, así que pagás por lo leído aunque lo descartes— o un GSI. Dicho de otra forma: el `FilterExpression` **no reduce el costo de lectura** (las RCU se cobran sobre lo que se leyó antes de filtrar), solo achica el payload que viaja por la red.
 
 **Cuidado con las hot partitions.** La partition key tiene que tener **alta cardinalidad** y repartir el tráfico parejo. Una PK de pocos valores (ej. `STATUS#activo`) concentra todas las lecturas/escrituras en una partición → **throttling**, aunque la tabla tenga capacidad de sobra. Es el error de diseño #1 en Dynamo: la clave se elige para **distribuir**, no solo para identificar.
 
@@ -374,7 +380,7 @@ No podés tener las dos durante una partición: o respondés con data posiblemen
 
 **Consistencia eventual** (eventual consistency): después de una escritura, las lecturas pueden devolver el valor **viejo** por un ratito, hasta que el cambio se propaga a todas las réplicas. "Eventualmente" todos convergen al valor nuevo, pero no instantáneamente. Ejemplo concreto: escribís un ítem en Dynamo y lo leés 10 ms después desde otra réplica — podés recibir la versión anterior. Para un contador de "me gusta" o un feed, da igual (nadie nota 50 ms de retraso). Para el **saldo de una cuenta bancaria**, es inaceptable.
 
-La contracara es la **consistencia fuerte** (strong consistency): toda lectura refleja la última escritura, siempre. Es lo que tu Postgres te da por defecto (ACID, módulo de PostgreSQL). DynamoDB **te deja elegir por lectura**: lecturas eventualmente consistentes (más baratas y rápidas, el default) o fuertemente consistentes (más caras, pero ves siempre lo último — y **solo sobre la tabla base, no sobre un GSI**, módulo 8). Mongo, según la config de réplicas y *read/write concern*, te da un espectro parecido.
+La contracara es la **consistencia fuerte** (strong consistency): toda lectura refleja la última escritura, siempre. Es lo que tu Postgres te da por defecto (ACID, módulo de PostgreSQL). DynamoDB **te deja elegir por lectura**: lecturas eventualmente consistentes (más baratas y rápidas, el default) o fuertemente consistentes (más caras, pero ves siempre lo último — y **solo sobre la tabla base, no sobre un GSI**, módulo 8). El flag concreto es **`ConsistentRead: true`** en la `Query`/`GetCommand` (la lectura fuerte consume ~2× RCU; sin él, leés eventual). Mongo, según la config de réplicas y *read/write concern*, te da un espectro parecido.
 
 **Más allá de CAP: PACELC.** CAP solo describe qué pasa *durante* una partición. El refinamiento moderno es **PACELC**: si hay **P**artición → elegís **A** vs **C** (lo de arriba); **E**lse (operación normal, sin partición) → elegís **L**atencia vs **C**onsistencia. Esa segunda rama explica el día a día de Dynamo: ofrecer lecturas eventuales *más rápidas y baratas* vs. fuertes *más lentas y caras* es exactamente el trade-off Latencia↔Consistencia, sin ninguna partición de por medio. CAP es el caso extremo; PACELC es el que vivís todos los días.
 
@@ -400,6 +406,21 @@ El criterio senior: **la consistencia es una decisión de negocio, no técnica.*
 - Tiene `TransactWriteItems` para transacciones de hasta unos pocos ítems, con límites y costo extra (consume el doble de capacidad). Existe, pero es para casos puntuales, no el modo de operar.
 
 El patrón que reemplaza muchas transacciones en NoSQL: **escrituras condicionales / optimistic concurrency.** En vez de bloquear (lock pesimista, lo de Postgres), guardás un número de versión y escribís "solo si la versión sigue siendo N"; si otro escribió primero, tu condición falla y reintentás. Es la misma idea del *optimistic locking* que puede aparecer en SQL, pero acá es **el** mecanismo, no una opción.
+
+```ts
+import { UpdateCommand } from "@aws-sdk/lib-dynamodb";
+
+// "actualizá solo si la versión sigue siendo la que leí" → optimistic concurrency
+await doc.send(new UpdateCommand({
+  TableName: "app",
+  Key: { PK: "PROYECTO#42", SK: "TAREA#001" },
+  UpdateExpression: "SET estado = :nuevo, version = :next",
+  ConditionExpression: "version = :actual",        // si otro ya escribió, version ya no es :actual
+  ExpressionAttributeValues: { ":nuevo": "hecha", ":actual": 3, ":next": 4 },
+}));
+// Si la condición falla, el SDK tira ConditionalCheckFailedException → recargás y reintentás.
+// Variante para insert-only (no pisar si ya existe): ConditionExpression: "attribute_not_exists(PK)".
+```
 
 El criterio: **diseñá para minimizar la necesidad de transacciones multi-documento/multi-ítem.** En SQL las transacciones son baratas y las usás libremente; en NoSQL son caras o limitadas, así que el buen modelado (embeber lo que cambia junto, claves bien diseñadas) hace que la atomicidad de un solo documento/ítem te alcance para casi todo. Si te encontrás peleando con transacciones distribuidas en NoSQL, muchas veces la respuesta correcta es **reconsiderar el modelo** —o reconocer que el caso pedía un relacional—.
 
@@ -441,7 +462,7 @@ La tabla de criterio:
 
 Y dos verdades senior que cierran el módulo y el criterio del temario:
 
-- **Polyglot persistence**: los sistemas reales **no eligen una sola base**. Usás Postgres para tu data transaccional, Redis para caché, Dynamo para el feed de alto volumen, pgvector para RAG (módulo de RAG). La pregunta no es "¿qué base uso?" sino "¿qué base para *cada* parte del sistema?".
+- **Polyglot persistence**: los sistemas reales **no eligen una sola base**. Usás Postgres para tu data transaccional, Redis para caché, Dynamo para el feed de alto volumen, pgvector para RAG (módulo de RAG). Y según el caso aparecen otras piezas que quedan fuera del alcance de este módulo pero que conviene tener en el radar (salen en entrevistas): **search** (OpenSearch/Elasticsearch) para full-text y faceted search, y **series temporales** (TimescaleDB, ClickHouse) para métricas/analítica de alto volumen. La pregunta no es "¿qué base uso?" sino "¿qué base para *cada* parte del sistema?".
 - **El criterio integrador de todo el temario**, una vez más: **la solución más simple que resuelve el problema real.** Para bases eso significa: empezá con Postgres (cubre casi todo, incluido JSONB para documentos), y adoptá NoSQL solo cuando tengas un problema concreto que lo justifique —un patrón de acceso a escala, una forma de data, una necesidad de serverless— no porque suene moderno. Saber *justificar* la elección con un patrón de acceso real, en vez de con una moda, es exactamente lo que demuestra criterio de Tech Lead.
 
 **Ejercicios 11**
@@ -493,7 +514,10 @@ Y dos verdades senior que cierran el módulo y el criterio del temario:
 ```
 ```ts
 // 3.4
-@Schema({ _id: false }) // sub-documento embebido: no necesita _id propio
+// Sub-schema embebido con _id: false → Mongo no genera un ObjectId por cada comentario
+// (ids basura que no usás). Se prefiere a un objeto inline `@Prop({ type: [{ autor: String,
+// texto: String }] })` porque la clase + SchemaFactory da tipado y validación reutilizables.
+@Schema({ _id: false })
 class Comentario {
   @Prop({ required: true }) autor!: string;
   @Prop({ required: true }) texto!: string;
