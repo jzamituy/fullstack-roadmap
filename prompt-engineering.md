@@ -196,6 +196,9 @@ Por qué los ejemplos son tan potentes: comunican **de forma implícita** lo que
 La forma idiomática en la Messages API: **ejemplos como turnos user/assistant alternados** en el array `messages`, *antes* de la entrada real.
 
 ```python
+import anthropic
+client = anthropic.Anthropic()
+
 client.messages.create(
     model="claude-opus-4-8",
     max_tokens=256,
@@ -252,17 +255,20 @@ Por qué funciona: el modelo genera la respuesta token a token, condicionado por
 ```python
 msg = client.messages.create(
     model="claude-opus-4-8",
-    max_tokens=2048,
-    thinking={"type": "adaptive"},     # el modelo decide cuánto pensar según la dificultad
+    max_tokens=8192,                                  # dale aire: el thinking consume tokens del presupuesto
+    thinking={"type": "adaptive", "display": "summarized"},  # adaptive: el modelo decide cuánto pensar
     messages=[{"role": "user", "content": "Un proyecto tiene 3 miembros..."}],
 )
-# La respuesta trae bloques type=="thinking" (el razonamiento) y type=="text" (la respuesta)
+# La respuesta trae bloques type=="thinking" y type=="text" (la respuesta).
+# OJO: en Opus 4.8 el default de display es "omitted" → los bloques thinking llegan
+# con texto VACÍO. Para ver el resumen del razonamiento hay que pedir display:"summarized".
 ```
 
 Puntos clave del thinking moderno (verificá con la skill `claude-api` al implementar):
 
 - **`thinking: {"type": "adaptive"}`** deja que el modelo decida cuánto razonar según la dificultad. Es lo recomendado para tareas no triviales.
-- El viejo `budget_tokens` (fijar un presupuesto de pensamiento) **está deprecado/removido** en los modelos actuales; se controla la profundidad con `output_config.effort` (`low`/`medium`/`high`/`max`).
+- El viejo `budget_tokens` (fijar un presupuesto de pensamiento) **está removido** en los modelos actuales (Opus 4.8/4.7 y Fable devuelven 400 si lo mandás); se controla la profundidad con `output_config.effort`: `low`/`medium`/`high`/`xhigh`/`max` (en Opus 4.8 el default es `high` si lo omitís; `xhigh` y `max` solo existen en Opus 4.6+/Fable).
+- Por defecto `display` es `"omitted"` (los bloques `thinking` vienen sin texto); pasá `display: "summarized"` si querés mostrar u observar el resumen del razonamiento.
 - Con thinking activado, **no necesitás** el "pensá paso a paso" en el prompt para razonamiento puro —el modelo ya lo hace—. El CoT por prompt sigue siendo útil cuando querés un *formato* de razonamiento específico y parseable, o en modelos sin thinking.
 
 El criterio: **para tareas de razonamiento, dale espacio para pensar** —vía el parámetro `thinking` en Claude moderno, o vía "pensá paso a paso" como técnica de prompt—. No malgastes thinking en tareas triviales (una clasificación simple no lo necesita y agrega latencia/costo). Conecta con el [módulo de LLMs](ia-llms.md), donde viste el thinking, y con [agentes](agentes.md), donde el razonamiento entre tool calls es central.
@@ -326,7 +332,7 @@ La frase mental: **el system prompt es el "contrato de comportamiento" del model
 
 2. **Few-shot del formato** (medio): mostrar ejemplos con la salida exacta que querés (módulo 5). Mejora mucho la consistencia, pero sigue sin ser una garantía dura.
 
-3. **Structured output / JSON Schema** (fuerte, lo recomendado): la API **garantiza** que la salida cumpla un esquema. En Claude se hace con `output_config.format` y un JSON Schema, y el SDK de Python lo integra con **Pydantic** (que viste en [Python](python.md)) vía `client.messages.parse()`:
+3. **Structured output / JSON Schema** (fuerte, lo recomendado): la API **garantiza** que la salida cumpla un esquema. Hay dos rutas, no las confundas: (a) el parámetro crudo `output_config={"format": {"type": "json_schema", "schema": ...}}` en `messages.create()` toma un **dict JSON Schema** y te devuelve texto JSON que vos parseás; (b) el helper `client.messages.parse()` del SDK de Python toma directamente un modelo **Pydantic** (que viste en [Python](python.md)) en `output_format=`, arma el JSON Schema por vos y te devuelve `parsed_output` ya como instancia validada. Para una app Python, (b) es lo idiomático:
 
 ```python
 from pydantic import BaseModel
@@ -344,13 +350,17 @@ resp = client.messages.parse(
     messages=[{"role": "user", "content": "Clasificá: 'No puedo entrar, es urgente, perdí acceso a todo'"}],
     output_format=Ticket,            # el SDK arma el JSON Schema desde el modelo Pydantic
 )
-ticket = resp.parsed_output          # ya es una instancia de Ticket, validada
+ticket = resp.parsed_output          # instancia de Ticket validada... o None
+if ticket is None:
+    # parsed_output es None si hubo refusal (stop_reason == "refusal")
+    # o la salida se truncó (stop_reason == "max_tokens"). Manejalo, no asumas.
+    raise ValueError(f"sin salida estructurada: {resp.stop_reason}")
 print(ticket.categoria, ticket.prioridad, ticket.requiere_humano)
 ```
 
-Esto **garantiza** que `parsed_output` sea un `Ticket` válido —el modelo no puede devolver texto suelto ni un campo de más—. Es el equivalente, para LLMs, de validar los bordes con [Pydantic en FastAPI](fastapi.md): convertís salida no determinista en datos tipados y confiables.
+Cuando hay salida, structured output **garantiza el esquema** —el modelo no puede devolver texto suelto ni un campo de más—. Pero la garantía es del *esquema*, no de que siempre haya salida: `parsed_output` es `None` si el modelo rechazó la tarea (`stop_reason == "refusal"`) o si la respuesta se cortó por `max_tokens`. Por eso el código chequea `None` antes de usar el ticket —asumir que siempre viene un `Ticket` es el bug que rompe en producción ante el primer refusal—. Es el equivalente, para LLMs, de validar los bordes con [Pydantic en FastAPI](fastapi.md): convertís salida no determinista en datos tipados y confiables, pero seguís manejando el caso de "no hubo dato".
 
-Dato importante de la API (verificá con `claude-api`): **structured output reemplazó al viejo "prefill" como forma de forzar formato** —el prefill del assistant ya no se soporta en los modelos actuales (módulo 5)—. Y `output_config.format` es **incompatible con Citations** (no podés usar los dos a la vez). Para *tools* hay un mecanismo paralelo: `strict: true` en la definición de la tool garantiza que los argumentos cumplan el esquema (lo viste en [agentes](agentes.md)).
+Dato importante de la API (verificá con `claude-api`): **structured output reemplazó al prefill *para el caso de forzar formato estructurado*** —el prefill del assistant ya no se soporta en los modelos actuales (módulo 5)—. El prefill se usaba también para otras cosas (saltar preámbulos, continuar una respuesta cortada): esos usos hoy se resuelven con una instrucción en el system prompt, no con structured output. Y `output_config.format` es **incompatible con Citations** (no podés usar los dos a la vez). Para *tools* hay un mecanismo paralelo: `strict: true` en la definición de la tool garantiza que los argumentos cumplan el esquema (lo viste en [agentes](agentes.md)).
 
 La regla de criterio: **si tu código va a consumir la salida, usá structured output (JSON Schema/Pydantic), no "pedile JSON y crucemos los dedos".** Pedir el formato en el prompt es para prototipos o salida que lee un humano.
 
@@ -359,6 +369,7 @@ La regla de criterio: **si tu código va a consumir la salida, usá structured o
 8.2 ¿Cómo se hace structured output en Claude con Python/Pydantic, y qué te devuelve `parsed_output`?
 8.3 ¿Con qué concepto de FastAPI/Pydantic conecta el structured output, y qué problema de los LLMs resuelve?
 8.4 ¿Qué reemplazó structured output, y con qué feature de la API es incompatible?
+8.5 (Práctico) Reescribí este prompt vago aplicando lo de los módulos 3, 4 y 8 —etiquetas XML para separar instrucción de datos, casos borde explícitos y salida estructurada con un modelo Pydantic—. Prompt vago: *"Mirá este correo de un cliente y decime qué quiere y si está enojado."*
 
 ---
 
@@ -374,12 +385,32 @@ El ciclo:
 4. **Cambiá una cosa** del prompt (más específico, un ejemplo nuevo que cubra el fallo, una etiqueta XML) y volvé a medir.
 5. **Repetí** hasta llegar al umbral que tu caso necesita.
 
+El bucle mínimo es un puñado de líneas —correr el prompt sobre el conjunto y contar aciertos—:
+
+```python
+# golden set: representativo + casos borde, cada caso con su salida esperada
+golden = [
+    {"texto": "La app es lenta y se cuelga.", "esperado": "negativo"},
+    {"texto": "Hace justo lo que necesito.", "esperado": "positivo"},
+    # ... 10-50 casos
+]
+aciertos = sum(
+    clasificar_sentimiento(c["texto"]) == c["esperado"]   # tu llamada al LLM, normalizada
+    for c in golden
+)
+print(f"{aciertos}/{len(golden)} = {aciertos / len(golden):.0%}")
+```
+
+Esto es deliberadamente crudo: el harness serio (métricas por capa, LLM-as-judge para salidas sin respuesta única, CI que bloquea regresiones) lo construís en [evals](evals.md) —este bucle es la versión de bolsillo para iterar un prompt—.
+
+Un atajo útil: **meta-prompting**. Pedile al propio modelo que critique y reescriba tu prompt ("acá está mi prompt y los casos donde falla; proponé una versión más específica"). No reemplaza la medición —seguís evaluando la versión nueva contra el golden set—, pero acelera el paso 4.
+
 Por qué medir y no mirar un caso: un prompt no determinista anda en algunos casos y falla en otros, y la mejora **no es monótona** —arreglar un caso puede romper otro—. Solo viéndolo sobre muchos casos sabés si un cambio fue neto positivo. Es exactamente la disciplina de [eval-driven development](evals.md) aplicada a prompts.
 
 **Costo: medilo también.** Cada llamada cuesta tokens (entrada + salida). Dos palancas que aparecen al iterar prompts en producción:
 
 - **Modelo correcto para la tarea** (tiering): no uses Opus 4.8 ($5/$25 por 1M) para una clasificación trivial que Haiku 4.5 ($1/$5) resuelve igual. La eval te dice cuál es el modelo más barato que pasa el umbral.
-- **Prompt caching**: si tu prompt tiene un prefijo grande y estable (system + ejemplos few-shot + instrucciones), Claude lo cachea y pagás **~0.1× por los tokens cacheados** en las llamadas siguientes (la escritura de caché cuesta ~1.25×, así que conviene a partir de pocas reutilizaciones). Por eso el módulo 2 insistió en poner lo estable primero y lo variable al final: maximiza el prefijo cacheable.
+- **Prompt caching**: si tu prompt tiene un prefijo grande y estable (system + ejemplos few-shot + instrucciones), Claude lo cachea y pagás **~0.1× por los tokens cacheados** en las llamadas siguientes (la escritura de caché cuesta ~1.25× con TTL de 5 min, así que el break-even está en ~2 reutilizaciones). Por eso el módulo 2 insistió en poner lo estable primero y lo variable al final: maximiza el prefijo cacheable. **Hay un piso de tokens** y depende del modelo: en Opus 4.8 el prefijo debe llegar a **4096 tokens** (Sonnet 4.6 y Fable: 2048) o **no se cachea, en silencio y sin error** —verificalo con `usage.cache_read_input_tokens`: si da 0 en llamadas repetidas con el mismo prefijo, o no llegás al piso o algo lo está invalidando (un timestamp, un UUID, el orden de las tools)—.
 
 La frase mental: **no preguntés "¿este prompt anda?" mirando un caso; preguntá "¿qué porcentaje pasa, sobre qué casos, a qué costo?" —y movete según el número, no según la corazonada—.**
 
@@ -388,6 +419,7 @@ La frase mental: **no preguntés "¿este prompt anda?" mirando un caso; pregunt�
 9.2 Describí el ciclo de iteración medida de un prompt (los pasos).
 9.3 ¿Por qué la mejora de un prompt "no es monótona" y qué implica para cómo evaluás un cambio?
 9.4 Nombrá dos palancas de costo al llevar un prompt a producción y cómo el orden del prompt (módulo 2) habilita el prompt caching.
+9.5 (Práctico) Diseñá un golden set de 5 casos para el clasificador de sentimiento del módulo 5 (positivo/negativo/neutral). ¿Qué casos borde incluirías y por qué?
 
 ---
 
@@ -400,7 +432,7 @@ La frase mental: **no preguntés "¿este prompt anda?" mirando un caso; pregunt�
 - **Dale permiso explícito de no saber.** Por defecto el modelo tiende a responder *algo*. Decile: "Si la información no está en el contexto provisto, respondé 'No tengo esa información'. No inventes." Esto solo reduce muchísimo las invenciones.
 - **Anclá la respuesta al contexto (grounding).** "Respondé usando SOLO la información del `<documento>`. No uses conocimiento externo." Es la base del [RAG](rag.md): el modelo responde *desde* los datos que le diste, no desde su memoria.
 - **Pedí citas/evidencia.** "Para cada afirmación, citá la parte del documento que la respalda." Forzar a citar reduce las afirmaciones sin sustento. (Claude tiene una feature de Citations nativa —recordá del módulo 8 que es incompatible con structured output—.)
-- **Bajá la temperatura para tareas factuales.** Menos aleatoriedad = respuestas más conservadoras y reproducibles (cuando el modelo expone ese control).
+- **Bajá la temperatura para tareas factuales.** `temperature` controla el trade-off **determinismo ↔ diversidad**: baja (cerca de 0) = respuestas más conservadoras y reproducibles (extracción, clasificación, hechos); alta = más variada y creativa (brainstorming, redacción). Para anti-alucinación querés determinismo. Dato de la API: en los modelos actuales (Opus 4.8/4.7, Fable) `temperature`, `top_p` y `top_k` **fueron removidos** (devuelven 400) —se guía el comportamiento por prompt—; el control sigue disponible en modelos más viejos. Por eso este módulo usa Opus 4.8 sin tocar `temperature`.
 
 **Contra el prompt injection** (el usuario, o un documento que el modelo procesa, mete instrucciones tipo "ignorá todo lo anterior y hacé X"):
 
@@ -493,15 +525,65 @@ El cierre y el puente: el prompt engineering es la habilidad base del track de I
 
 ### Módulo 8
 8.1 De más débil a más fuerte: (1) pedir el formato en el prompt, (2) few-shot del formato, (3) structured output con JSON Schema. La (3) **garantiza** el esquema; las otras dos solo lo hacen probable.
-8.2 Con `client.messages.parse()` (o `output_config.format`) pasando un modelo Pydantic como `output_format`; el SDK arma el JSON Schema y `parsed_output` te devuelve una **instancia validada** del modelo (no texto que tengas que parsear).
+8.2 Con `client.messages.parse()` pasando un modelo Pydantic en `output_format=`; el SDK arma el JSON Schema y `parsed_output` te devuelve una **instancia validada** del modelo (no texto que tengas que parsear), o `None` si hubo refusal/truncamiento. (La ruta cruda `messages.create(output_config={"format": {...}})` es distinta: toma un dict JSON Schema, no un modelo Pydantic, y devuelve texto JSON que parseás vos.)
 8.3 Conecta con validar los bordes con **Pydantic en FastAPI**: convertís entrada/salida no confiable en datos tipados y validados. Resuelve el problema de que la salida de un LLM es texto no determinista que tu código necesita consumir de forma confiable.
-8.4 Reemplazó al **prefill** del assistant (ya no soportado) como forma de forzar el formato. Es **incompatible con Citations** (no se pueden usar a la vez).
+8.4 Reemplazó al **prefill** del assistant (ya no soportado) *para forzar formato estructurado*. Es **incompatible con Citations** (no se pueden usar a la vez).
+8.5 La idea es convertir un pedido ambiguo en una especificación. Una solución posible:
+
+```python
+from pydantic import BaseModel
+from typing import Literal
+import anthropic
+
+class Analisis(BaseModel):
+    intencion: str                                      # qué quiere el cliente, en una frase
+    enojado: bool
+    categoria: Literal["facturacion", "bug", "envio", "cuenta", "otro"]
+
+system = "Analizás correos de clientes de soporte. Sos preciso y objetivo."
+
+user = """\
+Analizá SOLO el correo de abajo. No respondas al cliente; extraé los datos.
+- intencion: qué pide el cliente, en una sola oración.
+- enojado: true solo si hay enojo explícito (insultos, mayúsculas sostenidas, amenazas de irse); el tono firme NO es enojo.
+- categoria: una de [facturacion, bug, envio, cuenta, otro].
+Si el correo está vacío o no es un reclamo, devolvé intencion="" y categoria="otro".
+
+<correo>
+{correo}
+</correo>"""
+
+client = anthropic.Anthropic()
+resp = client.messages.parse(
+    model="claude-opus-4-8",
+    max_tokens=512,
+    system=system,
+    messages=[{"role": "user", "content": user.format(correo=texto_correo)}],
+    output_format=Analisis,
+)
+analisis = resp.parsed_output
+if analisis is None:
+    raise ValueError(f"sin salida: {resp.stop_reason}")
+```
+
+Lo que se aplicó: el correo va dentro de `<correo>` (módulo 4, separa dato de instrucción y mitiga injection), los casos borde están explícitos (qué cuenta como "enojado", correo vacío → módulo 3), y la salida es un modelo Pydantic validado con guarda de `None` (módulo 8). El prompt vago original dejaba todo eso a criterio del modelo.
 
 ### Módulo 9
 9.1 Porque un prompt no determinista anda en algunos casos y falla en otros; un solo ejemplo no te dice el porcentaje real ni los modos de falla. En su lugar **medís sobre un conjunto de casos representativos** (mini golden set) y mirás el % de aciertos.
 9.2 (1) Armar un conjunto de prueba con casos representativos y borde + salida esperada; (2) correr el prompt sobre todos y medir; (3) identificar el patrón de falla; (4) cambiar **una** cosa y volver a medir; (5) repetir hasta el umbral.
 9.3 Porque arreglar un caso puede **romper otro** (las mejoras no se acumulan linealmente). Implica que evaluás un cambio por su efecto **neto sobre todo el conjunto**, no por si arregló el caso que mirabas.
 9.4 (1) **Tiering de modelo** (usar el modelo más barato que pasa el umbral, p. ej. Haiku en vez de Opus para clasificación trivial); (2) **prompt caching** (prefijo estable cacheado a ~0.1×). El orden "estable primero, variable al final" maximiza el prefijo cacheable.
+9.5 Un golden set representativo cubre las clases *y* los modos de falla. Ej.:
+
+| texto | esperado | por qué está |
+|---|---|---|
+| "No puedo creer lo útil que es, la uso a diario." | positivo | caso claro positivo |
+| "Se cuelga constantemente, una basura." | negativo | caso claro negativo |
+| "Funciona; la interfaz podría mejorar." | neutral | mixto / sin carga fuerte |
+| "Ah, bárbaro, otra actualización que rompe todo. 👏" | negativo | **sarcasmo**: las palabras suenan positivas pero el sentido es negativo (donde más fallan los clasificadores) |
+| "" | neutral | **entrada vacía**: caso borde que la instrucción debe cubrir (módulo 3) |
+
+Los casos borde clave son el **sarcasmo** (rompe el matching superficial de palabras) y la **entrada vacía/no-review** (verifica que el prompt maneja lo que no especificaste). Sumá los casos que veas fallar en producción —el golden set crece con los errores reales, como en [evals](evals.md)—.
 
 ### Módulo 10
 10.1 Porque por defecto el modelo tiende a responder *algo* aunque no sepa; darle una salida válida para "no sé" le quita la presión de inventar. Instrucción: "Si la información no está en el contexto provisto, respondé 'No tengo esa información'. No inventes."
