@@ -64,5 +64,8 @@
   - [🎙️ Voice AI: STT, TTS y agentes de voz](voice-ai.md)
   - [🚀 Deploy de aplicaciones de IA](deploy-ai.md)
 
+- **Track QA / Automation**
+  - [🎭 Playwright: E2E de browser](playwright.md)
+
 - **Enlaces**
   - [Repositorio en GitHub](https://github.com/jzamituy/fullstack-roadmap)
