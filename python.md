@@ -37,7 +37,7 @@ Las soluciones de **todos** los ejercicios están al final, en la sección "Solu
 
 ## Módulo 1 — Por qué Python y el cambio de modelo mental
 
-**Teoría.** Si tu stack es TS/Node y te funciona, ¿por qué aprender Python? Por una razón pragmática y específica: **el ecosistema de IA/ML vive en Python**. Los frameworks de agentes serios (LangGraph, AutoGen), las librerías de vectores (FAISS), el tooling de modelos (Whisper, transformers, vLLM), y casi todo paper o tutorial de ML asumen Python. Podés consumir LLMs desde TS perfectamente (lo hiciste en el track Anthropic), pero el día que querés FAISS local, un grafo de agentes con LangGraph, o servir un modelo propio, estás en Python. Para un rol de **AI Engineer / AI QA**, Python no es opcional: es la lingua franca.
+**Teoría.** Si tu stack es TS/Node y te funciona, ¿por qué aprender Python? Por una razón pragmática y específica: **el ecosistema de IA/ML vive en Python**. Los frameworks de agentes (LangGraph, AutoGen, y el propio **SDK oficial de Anthropic**, que también está en Python además de TS), las librerías de vectores (FAISS), el tooling de modelos (Whisper, transformers, vLLM), y casi todo paper o tutorial de ML asumen Python. Podés consumir LLMs desde TS perfectamente (lo hiciste en el track Anthropic), pero el día que querés FAISS local, un grafo de agentes con LangGraph, o servir un modelo propio, estás en Python. Para un rol de **AI Engineer / AI QA**, Python no es opcional: es la lingua franca.
 
 La buena noticia: viniendo de TS, el 80% se traduce directo. Las diferencias de modelo mental que tenés que internalizar primero:
 
@@ -141,6 +141,7 @@ Diferencias clave que tenés que tener presentes:
 - **`None` es el `null`/`undefined` de Python** (hay un solo "vacío", no dos). `str | None` es tu `string | null`. `mypy` en modo estricto te obliga a chequear `None` antes de usar, igual que el `strictNullChecks` de TS.
 - **`Optional[X]` es exactamente `X | None`** —vas a ver ambas formas; la moderna es `X | None`—.
 - **Modo estricto.** `mypy --strict` es tu `"strict": true` del `tsconfig`: activá esto desde el día uno. Sin él, mypy deja pasar demasiado.
+- **No hay un `unknown` exacto.** En la tabla puse `object` como lo más cercano, pero ojo: `object` acepta cualquier valor, pero **no te obliga a estrechar el tipo antes de usarlo** como sí hace `unknown` en TS. Es "lo más parecido", no un equivalente: la disciplina de estrechar antes de usar la ponés vos.
 
 ```python
 def buscar_usuario(id: int) -> "Usuario | None": ...
@@ -305,7 +306,7 @@ Para clases que son **solo datos** (lo más común en backend/IA), escribir `__i
 **`@dataclass`** — genera `__init__`, `__repr__`, `__eq__` automáticamente desde las anotaciones. Es como una clase de datos de TS sin boilerplate:
 
 ```python
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 @dataclass
 class Tarea:
@@ -326,12 +327,14 @@ from pydantic import BaseModel, Field
 class CrearTarea(BaseModel):
     titulo: str = Field(min_length=1, max_length=200)
     prioridad: int = Field(default=1, ge=1, le=5)   # ge=>=, le=<=
-    tags: list[str] = []
+    tags: list[str] = []   # OJO: en Pydantic el default mutable SÍ es seguro (copia por instancia)
 
 # Valida en runtime: esto es lo que hace FastAPI con cada request body
 t = CrearTarea(titulo="Estudiar", prioridad=3)       # ✅
 CrearTarea(titulo="", prioridad=9)                   # ❌ ValidationError (2 errores)
 ```
+
+(Detalle que parece contradecir el módulo 5: acá `tags: list[str] = []` **sí** es seguro. El gotcha del default mutable aplica a funciones y a `@dataclass`; Pydantic, en cambio, **copia el default por cada instancia** al validar, así que cada modelo arranca con su propia lista. Por eso en `@dataclass` necesitás `field(default_factory=list)` y en Pydantic no.)
 
 Pydantic es **central** para lo que viene: FastAPI valida requests/responses con modelos Pydantic, los LLMs devuelven structured output validado con Pydantic, LangGraph tipa su estado con Pydantic. Dominar `BaseModel` es prerrequisito del resto del track. La conexión mental: **Pydantic = Zod, `dataclass` = un type/clase de datos sin validación.**
 
@@ -468,6 +471,8 @@ El mapeo con JS:
 | el runtime arranca el loop solo | `asyncio.run(main())` lo arrancás vos |
 | `setTimeout` | `await asyncio.sleep(s)` |
 
+(Ojo con `Promise.race`: `asyncio.wait` **no** es un drop-in. La constante es `asyncio.FIRST_COMPLETED`, espera *tasks* (no corrutinas peladas) y devuelve dos sets `(done, pending)` —vos sacás el resultado del set `done`—, no el valor directo. Para iterar resultados a medida que terminan, lo idiomático hoy es `asyncio.as_completed`.)
+
 Las diferencias que importan:
 
 - **El loop lo arrancás explícitamente** con `asyncio.run(...)`. En Node, el runtime ya está corriendo el loop; en Python, en un script, vos lo iniciás. (En FastAPI esto lo maneja el framework, igual que en Node.)
@@ -491,7 +496,7 @@ La idea: **si entendés el event loop de Node, entendés asyncio —es el mismo 
 
 ```python
 # test_tareas.py  (pytest descubre archivos test_*.py y funciones test_*)
-from tareas import crear_tarea, NotProjectMemberError
+from tareas import crear_tarea
 import pytest
 
 def test_crea_tarea_con_titulo():
@@ -520,6 +525,7 @@ La pieza distintiva y más potente de pytest: las **fixtures**. En vez de `befor
 ```python
 @pytest.fixture
 def proyecto():                     # provee un objeto listo para varios tests
+    # Project/Task son el mismo dominio del ciclo en vivo de TDD (tdd.md), ahora en Python
     return Project(id=7, member_ids=[4521])
 
 def test_asigna_a_miembro(proyecto):    # pytest "inyecta" la fixture por nombre
