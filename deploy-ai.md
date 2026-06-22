@@ -82,7 +82,7 @@ Y los secretos: la **API key** es un secreto como cualquier otro —va en el sec
 
 **Teoría.** Camino B. Para correr un LLM vos mismo necesitás una **GPU**, y entender por qué cambia todo. Un LLM es básicamente multiplicaciones de matrices gigantes; las GPUs hacen eso **masivamente en paralelo** (miles de núcleos), mientras una CPU lo haría en serie y tardaría una eternidad. Pero la GPU impone una restricción dura que domina todo el self-hosting: **la VRAM (memoria de la GPU)**.
 
-El modelo tiene que **entrar en VRAM**, y su tamaño se calcula: **parámetros × bytes por parámetro**. En precisión `fp16` (16 bits = 2 bytes), un modelo de **7.000 millones de parámetros (7B)** ocupa **~14 GB** solo de pesos; uno de **70B**, **~140 GB** —no entra en una sola GPU, necesitás varias—. Por eso aparece la **cuantización** (la misma idea que en [Vector Databases](vector-dbs.md) módulo 6, ahora sobre los pesos del modelo): bajar la precisión a `int8` (~1 byte/param → ~7 GB para 7B) o `int4` (~0.5 byte → ~3.5 GB), aceptando una pérdida pequeña de calidad para que el modelo entre en menos VRAM o en una GPU más barata.
+El modelo tiene que **entrar en VRAM**, y su tamaño se calcula: **parámetros × bytes por parámetro**. En precisión `fp16` (16 bits = 2 bytes), un modelo de **7.000 millones de parámetros (7B)** ocupa **~14 GB** solo de pesos; uno de **70B**, **~140 GB** —no entra en una sola GPU, necesitás varias—. Por eso aparece la **cuantización** (la misma idea que en [Vector Databases](vector-dbs.md) módulo 6, ahora sobre los pesos del modelo): bajar la precisión a `int8` (~1 byte/param → ~7 GB para 7B) o `int4` (~0.5 byte → ~3.5 GB), aceptando una pérdida pequeña de calidad para que el modelo entre en menos VRAM o en una GPU más barata. Ojo: esos GB son solo los **pesos** —el KV cache (lo que sigue) se suma encima, y cuantizar los pesos **no** lo achica—.
 
 Y un consumo de VRAM que los principiantes olvidan: **el KV cache**. Durante la generación, el modelo guarda en memoria los estados intermedios (claves y valores de atención) de **todos los tokens del contexto**, y eso **crece con la longitud del contexto y con la cantidad de requests concurrentes**. En serving real, el KV cache puede ocupar tanta o más VRAM que los pesos. Por eso "¿entra el modelo?" no es solo `pesos < VRAM`: es `pesos + KV cache de todas las requests en vuelo < VRAM`.
 
@@ -107,8 +107,10 @@ El **serving naïve** (correr el modelo con la librería `transformers` de Huggi
 
 ```bash
 # Servir un modelo open-weight con vLLM, con un endpoint compatible con la API de OpenAI
-vllm serve meta-llama/Llama-3.1-8B-Instruct --quantization awq --max-model-len 8192
+vllm serve meta-llama/Llama-3.1-8B-Instruct --max-model-len 8192
 # expone /v1/chat/completions; tu app FastAPI le pega como si fuera una API más
+# Para cuantizar, apuntá a un checkpoint YA cuantizado (no al fp16 de arriba):
+#   vllm serve <repo>-AWQ --quantization awq   # AWQ/GPTQ requieren pesos pre-cuantizados
 ```
 
 Otros servidores que vas a oír: **TGI** (Hugging Face), **TensorRT-LLM** (NVIDIA, máximo rendimiento, más complejo), y **Ollama** (genial para correr modelos en tu máquina en desarrollo, **no** para servir producción a escala). El detalle de criterio: vLLM suele exponer una **API compatible con la de OpenAI**, así que tu app cambia de proveedor (API gestionada ↔ tu vLLM) tocando casi solo la URL base —la portabilidad del [framework layer](vector-dbs.md)—. La frase mental: **servir un LLM bien es un problema de throughput, no solo de tener GPU; vLLM lo resuelve con continuous batching (la GPU siempre llena, sin esperar lotes fijos) y PagedAttention (KV cache paginado, sin desperdicio de VRAM) —el serving naïve un-request-a-la-vez desaprovecha la GPU—.**
@@ -204,9 +206,9 @@ La regla, otra vez "escalá la herramienta al problema": **bajá en la tabla (ha
 
 - **El crossover API vs self-host.** Una **API** cuesta **por token, con cero costo ocioso** (no usás, no pagás; escala a cero). Una **GPU propia** cuesta **fijo 24/7** sin importar el uso. Entonces self-host **solo sale más barato a partir de un volumen alto y sostenido** que mantenga la GPU bien utilizada; por debajo de ese punto de cruce, la API es más barata *y* más simple. Calcular ese crossover (tu volumen × precio por token vs costo de la GPU/hora × utilización) es la cuenta que justifica —o no— el camino B.
 - **Model tiering.** No uses Opus 4.8 ($5/$25 por 1M) para lo que Haiku ($1/$5) resuelve igual ([LLMs](ia-llms.md), [Prompt Engineering](prompt-engineering.md)). Enrutá: tareas simples al modelo barato, difíciles al caro. La eval te dice el modelo más barato que pasa el umbral.
-- **Caching.** El **prompt caching** ([Prompt Engineering](prompt-engineering.md)): prefijos estables (system + ejemplos + contexto) se cachean a ~0.1×. Y el **semantic caching**: si una pregunta es casi idéntica a una ya respondida (cercanía de embeddings, [Vector Databases](vector-dbs.md)), devolvés la respuesta cacheada sin llamar al LLM. Ambos recortan costo y latencia.
+- **Caching.** El **prompt caching** ([Prompt Engineering](prompt-engineering.md)): prefijos estables (system + ejemplos + contexto) se **leen** a ~0.1×, pero **escribir** la caché cuesta ~1.25× (TTL 5 min) o ~2× (1 h) —así que recién rinde a partir de ~2 lecturas del mismo prefijo, no con una request suelta—. Y el **semantic caching**: si una pregunta es casi idéntica a una ya respondida (cercanía de embeddings, [Vector Databases](vector-dbs.md)), devolvés la respuesta cacheada sin llamar al LLM. Ambos recortan costo y latencia.
 - **Batch API.** Para trabajo no interactivo, muchas APIs ofrecen un modo **batch** con descuento fuerte (del orden del 50%) a cambio de latencia (procesa cuando puede). Ideal para el ingest/procesamiento offline (módulo 2).
-- **Token budgets y límites.** Acotás `max_tokens`, recortás el contexto al presupuesto ([RAG](rag.md) módulo 8), y ponés límites por usuario para que un abuso no te vacíe la cuenta.
+- **Token budgets y límites.** Acotás `max_tokens`, recortás el contexto al presupuesto ([RAG](rag.md) módulo 8), y ponés límites por usuario para que un abuso no te vacíe la cuenta. Y en conversaciones o agentes largos, **compactar el contexto** (resumir o recortar la historia que ya no aporta) frena el crecimiento del costo por turno —cada token de historia se re-paga en **cada** llamada—.
 
 La disciplina, el "medí antes de optimizar" de [observabilidad](observabilidad.md): **medí el costo por request / por usuario / por feature, y optimizá la palanca que más pesa** —no caches todo a ciegas ni saltes a self-host sin la cuenta del crossover—. La frase mental: **en IA el costo es un problema de diseño, no de infra: la API cuesta por token sin ocio y el self-host cuesta fijo 24/7 (hay un crossover de volumen), y lo bajás con tiering, prompt/semantic caching, batch API y token budgets —medido, atacando la palanca que más pesa—.**
 
@@ -224,7 +226,7 @@ La disciplina, el "medí antes de optimizar" de [observabilidad](observabilidad.
 
 - **Uso de tokens** (input/output por request): es a la vez una **métrica de capacidad** y el **driver del costo** (módulo 8). La logueás y la agregás por usuario/feature.
 - **Costo por request / por usuario / por feature**: derivado de los tokens, monitoreado como un golden signal de IA. Una feature que se dispara en costo se ve acá.
-- **Latencia desglosada**: TTFT y TPOT (módulo 5), no solo "latencia total". El p95/p99 de TTFT te dice si la experiencia interactiva se degrada.
+- **Latencia desglosada**: TTFT y TPOT (módulo 5), no solo "latencia total". El p95/p99 de TTFT te dice si la experiencia interactiva se degrada. Y en sistemas con tool-use ([AI Agents](ai-agents-python.md)), instrumentá **spans por paso del agente** (cada tool-use, cada llamada al LLM): un número agregado esconde en qué step se va el costo y la latencia.
 - **Cache hit rate** (prompt y semantic, módulo 8): si cae, el costo sube; es una métrica a vigilar.
 - **Calidad en producción (online evals)**: lo más específico de IA. La salida es no determinista, así que no alcanza con que "no haya errores 500" —la respuesta puede ser un `200 OK` y ser **mala**—. Muestreás un porcentaje del tráfico real y lo evaluás (con **LLM-as-judge** y/o feedback de usuarios), midiendo en vivo lo que en [evals](evals.md) medías offline. Es la extensión natural de las evals al runtime.
 - **Versiones de modelo y prompt**: registrás qué versión de prompt y qué modelo atendió cada request, para correlacionar un cambio de calidad con un cambio de prompt/modelo (un deploy de prompt es un deploy).
@@ -245,22 +247,32 @@ Un cuidado que viene directo de [observabilidad](observabilidad.md) módulo 10 (
 **Teoría.** Un sistema de IA en producción depende de piezas que **fallan de formas propias**, y la confiabilidad ([Docker](docker-deploy.md) healthchecks, [AWS](aws.md) resiliencia) se extiende con defensas específicas:
 
 - **El proveedor se cae o se degrada.** Si tu LLM es una API externa, su outage es tu outage. Defensa: **fallback multi-modelo / multi-proveedor** —si Claude no responde, caés a otro modelo (o a una versión más chica, o a una respuesta cacheada)—. Diseñá el cliente para que el modelo sea **configurable**, no hardcodeado.
-- **Rate limits (`429`).** La API tiene límites por minuto; bajo carga los vas a tocar. Defensa: **backoff exponencial con jitter** y reintentos, más una **cola** que suavice los picos para no martillar la API.
+- **Rate limits (`429`).** La API tiene límites por minuto; bajo carga los vas a tocar. Lo primero, antes de escribir una línea: **el SDK `anthropic` ya reintenta 429 y 5xx solo**, con backoff y respetando el header `retry-after` (`max_retries=2` por defecto, configurable) —no lo reimplementes a ciegas—. Para el caso común subís `max_retries` y listo. El bucle manual es solo para **control fino** (encolar, idempotencia, métricas propias), y entonces **desactivás el retry del SDK** (`max_retries=0`) para no apilar reintento-sobre-reintento (5 manuales × 3 del SDK = 15 llamadas reales). Las defensas al gestionarlo vos: respetar **`retry-after`** cuando viene, **backoff exponencial con jitter** (sin jitter, todos los clientes reintentan en los mismos instantes → *thundering herd*), y una **cola** que suavice los picos.
 
 ```python
-import anthropic, time
+import anthropic, random, time
+
+# Caso común: dejá que el SDK reintente solo (respeta retry-after y hace backoff)
+client = anthropic.Anthropic(max_retries=5)
+client.messages.create(model="claude-opus-4-8", max_tokens=1024, messages=[...])
+
+# Control fino (cola, idempotencia): gestionás vos → desactivá el retry del SDK
+# (max_retries=0) para no apilarlos
+client_manual = anthropic.Anthropic(max_retries=0)
 
 def llamar_con_reintentos(client, intentos=5, **kwargs):
     for i in range(intentos):
         try:
             return client.messages.create(**kwargs)
-        except anthropic.RateLimitError:          # 429: esperá y reintentá
+        except anthropic.RateLimitError as e:           # 429
             if i == intentos - 1:
                 raise
-            time.sleep(2 ** i)                      # backoff exponencial (sumale jitter en prod)
+            espera = e.response.headers.get("retry-after")   # respetá retry-after si viene;
+            time.sleep(float(espera) if espera             # si no, backoff exponencial + jitter
+                       else 2 ** i + random.uniform(0, 1))
         except anthropic.APIStatusError as e:
             if e.status_code >= 500 and i < intentos - 1:
-                time.sleep(2 ** i)                  # error transitorio del servidor: reintentá
+                time.sleep(2 ** i + random.uniform(0, 1))    # transitorio del servidor: backoff + jitter
             else:
                 raise
 ```
@@ -476,8 +488,10 @@ El ejercicio que cierra el módulo —y el track—: **desplegar de verdad** el 
 ```
 10.1 Fallback multi-modelo / multi-proveedor: si Claude no responde, caés a otro modelo (o uno más
      chico, o una respuesta cacheada). Diseñás el cliente con el modelo configurable, no hardcodeado.
-10.2 Backoff exponencial (con jitter) y reintentos ante el 429, más una cola que suavice los picos
-     para no martillar la API.
+10.2 Lo primero: el SDK anthropic ya reintenta 429/5xx solo (max_retries, respeta retry-after);
+     subís el límite y alcanza para el caso común. Si gestionás a mano (cola, idempotencia),
+     desactivás el del SDK (max_retries=0) y aplicás: respetar retry-after si viene, backoff
+     exponencial con jitter (para no provocar thundering herd) y una cola que suavice los picos.
 10.3 Degradar en vez de romper: ante un fallo, devolver una respuesta cacheada, usar un modelo más
      simple, o un mensaje honesto ("no puedo procesar esto ahora"). Un sistema más tonto pero
      disponible es mejor que uno caído.
