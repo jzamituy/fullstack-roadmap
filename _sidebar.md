@@ -47,6 +47,9 @@
   - [🧱 Domain-Driven Design](ddd.md)
   - [🔀 Event-driven aplicada](event-driven.md)
 
+- **Mobile**
+  - [📱 Mobile System Design](mobile-system-design.md)
+
 - **Inteligencia Artificial**
   - [🤖 IA Generativa y LLMs](ia-llms.md)
   - [📚 RAG: responder con tu data](rag.md)
