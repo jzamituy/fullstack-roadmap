@@ -67,7 +67,7 @@ La frase mental: **un voice agent es STT→LLM→TTS en un loop; en cascada (tre
 
 **Teoría.** No hace falta ser ingeniero de audio, pero unos pocos conceptos son la diferencia entre que tu pipeline ande o tire ruido. El audio es una onda continua (analógica) que se **digitaliza** muestreándola:
 
-- **Sample rate (frecuencia de muestreo)**: cuántas muestras por segundo. **16 kHz es el estándar para voz** (Whisper y la mayoría de los STT esperan 16 kHz); **8 kHz** es telefonía (banda angosta, peor calidad); 44.1/48 kHz es música. El teorema de **Nyquist**: para capturar frecuencias hasta `f`, necesitás muestrear a `2f` —la voz humana vive bajo ~8 kHz, por eso 16 kHz alcanza—. *Gotcha clásico*: pasarle a un modelo audio a un sample rate distinto del que espera produce transcripciones basura; siempre **resampleás** a lo que el modelo pide.
+- **Sample rate (frecuencia de muestreo)**: cuántas muestras por segundo. **16 kHz es el estándar para voz** (Whisper y la mayoría de los STT esperan 16 kHz); **8 kHz** es telefonía (banda angosta, peor calidad; además suele venir codificada en **μ-law/G.711**, no PCM lineal —hay que decodificarla y resamplear a 16 kHz antes de pasarla al STT—); 44.1/48 kHz es música. El teorema de **Nyquist**: para capturar frecuencias hasta `f`, necesitás muestrear a `2f` —la voz humana vive bajo ~8 kHz, por eso 16 kHz alcanza—. *Gotcha clásico*: pasarle a un modelo audio a un sample rate distinto del que espera produce transcripciones basura; siempre **resampleás** a lo que el modelo pide.
 - **Bit depth**: bits por muestra; **16-bit PCM** es lo típico para voz.
 - **Canales**: para voz usás **mono** (un canal), no estéreo —menos datos, y no necesitás espacialidad—.
 - **PCM**: las muestras crudas, sin comprimir. Los **contenedores/códecs** las empaquetan: **WAV** (PCM crudo, simple, pesado), **MP3** (comprimido), y **Opus** —el códec de **tiempo real** por excelencia: baja latencia, buena calidad a poco bitrate, el que usan WebRTC y los pipelines de voz en vivo—.
@@ -101,6 +101,8 @@ La distinción que define si sirve para un agente conversacional:
 - **Batch (por lotes)**: le das un audio completo (o un chunk cerrado) y te devuelve la transcripción. Whisper es fundamentalmente batch. Perfecto para transcribir un archivo; **malo para una conversación en vivo**, porque esperás a que el usuario termine de hablar antes de tener una sola palabra.
 - **Streaming**: el STT te devuelve **resultados parciales** (interim) a medida que la persona habla, y los va corrigiendo. Esto es lo que necesitás para baja latencia: empezás a procesar antes de que termine la frase. Los proveedores de streaming (Deepgram, etc.) lo dan; con Whisper "streaming" se simula procesando chunks solapados, con sus límites.
 
+**Criterio práctico**: Whisper local cuando priorizás **batch, costo o privacidad** (el audio no sale de tu máquina); un STT de **streaming gestionado** (Deepgram, AssemblyAI) cuando la **latencia conversacional manda** y no querés pelear con chunks solapados a mano. No es "Whisper siempre"; es qué prioriza el caso.
+
 La métrica de calidad es el **WER (Word Error Rate)**:
 
 ```
@@ -125,6 +127,7 @@ La frase mental: **el STT (Whisper el open-weight de referencia) transcribe voz 
 
 - **Streaming TTS**: igual que el STT, podés **generar audio a medida que el texto llega**, sin esperar la respuesta completa del LLM. Es **clave para la latencia**: en cuanto el LLM emite la primera frase (o cláusula), el TTS ya empieza a hablar. La métrica acá es el **time-to-first-byte / first-audio** (cuánto tarda en salir el primer sonido), que pesa más en la percepción que el tiempo total.
 - **SSML** (*Speech Synthesis Markup Language*): marcado para controlar la salida —pausas, énfasis, pronunciación, números/fechas, prosodia—. Ej.: `<break time="500ms"/>`, deletrear una sigla, decir "1/2" como "un medio". Sin SSML, el TTS adivina y a veces erra (lee "Dr." como "doctor" o "drive" según contexto).
+- **Normalización de texto (text normalization)**: antes de sintetizar, el texto se *normaliza* a su forma hablada —números, fechas, montos, símbolos y siglas—: `$1.000` → "mil pesos", `Dr.` → "doctor", `12/3` → "doce de marzo", `API` → "a-pe-i" o "api" según convenga. La mayoría de los TTS lo hacen solos, pero erran con dominio/idioma/jerga; SSML ayuda a forzar casos puntuales pero **no siempre alcanza**, y la normalización mal hecha es una fuente real de errores *audibles* en producción (que no aparecen en el texto, solo al escucharlo).
 - **Voice cloning / voces custom**: clonar una voz a partir de muestras. Potente y **delicado**: requiere **consentimiento** —clonar la voz de alguien sin permiso es un problema legal y ético, además del riesgo de deepfakes—.
 - **Naturalidad y el valle inquietante**: la prosodia (entonación, ritmo) es lo que hace humana o robótica a una voz. Una voz casi-humana pero con prosodia rara cae en el *uncanny valley* y molesta más que una claramente sintética.
 
@@ -135,6 +138,7 @@ La frase mental: **el TTS neural convierte texto en voz natural; el streaming (e
 4.2 ¿Para qué sirve SSML? Dá dos ejemplos de algo que controlás con él.
 4.3 ¿Qué cuidado ético/legal tiene la clonación de voz?
 4.4 ¿Qué es la prosodia y qué tiene que ver con el "valle inquietante"?
+4.5 ¿Qué es la normalización de texto para TTS y por qué SSML no siempre alcanza? Dá un ejemplo de algo que se normaliza.
 
 ---
 
@@ -154,7 +158,7 @@ Si cada etapa tarda "poco", la suma en serie te saca de presupuesto fácil. La t
 - No esperes la respuesta completa del LLM para hablar: **streameá los tokens** y arrancá el TTS con la primera cláusula (módulos 4 y de [FastAPI](fastapi.md), streaming).
 - **Solapá las etapas**: mientras el TTS dice la primera frase, el LLM ya está generando la segunda.
 
-El insight clave de percepción: lo que el usuario siente como "lag" es sobre todo el **time-to-first-token** del LLM y el **time-to-first-audio** del TTS —cuánto tarda en **empezar** a responder—, no el tiempo total. Por eso dos palancas concretas: **streaming en cada etapa**, y **model tiering** —usar un modelo rápido (ej. Haiku) como cerebro conversacional para minimizar el time-to-first-token, reservando uno más pesado solo si la tarea lo exige (criterio de costo/latencia de [LLMs](ia-llms.md) y [Prompt Engineering](prompt-engineering.md))—. Y un costo que se olvida: el **endpointing** (decidir que el usuario terminó, módulo 6) **agrega latencia a propósito** —hay que esperar para estar seguro—, y es parte del presupuesto.
+El insight clave de percepción: lo que el usuario siente como "lag" es sobre todo el **time-to-first-token** del LLM y el **time-to-first-audio** del TTS —cuánto tarda en **empezar** a responder—, no el tiempo total. Por eso dos palancas concretas: **streaming en cada etapa**, y **model tiering** —como el **time-to-first-token del LLM domina el lag percibido**, el cerebro conversacional debería ser el modelo **más rápido** (Haiku 4.5, el más veloz y barato) justamente para minimizar ese TTFT, reservando uno más pesado (Opus) solo si la tarea lo exige (criterio de costo/latencia de [LLMs](ia-llms.md) y [Prompt Engineering](prompt-engineering.md))—. No es "Haiku porque es barato"; es "Haiku porque el lag que sentís es cuánto tarda en *empezar* a hablar, y eso lo manda el TTFT". Y un costo que se olvida: el **endpointing** (decidir que el usuario terminó, módulo 6) **agrega latencia a propósito** —hay que esperar para estar seguro—, y es parte del presupuesto.
 
 La frase mental: **la voz se siente rota arriba de ~1 s, y la latencia se apila por todo el pipeline; la solución es streamear y solapar cada etapa (parciales de STT, tokens del LLM, primer audio del TTS) y elegir un modelo rápido —porque lo que se percibe como lag es el tiempo en *empezar* a responder, no el total—.**
 
@@ -172,9 +176,9 @@ La frase mental: **la voz se siente rota arriba de ~1 s, y la latencia se apila 
 
 - **VAD (Voice Activity Detection)**: detectar si en un chunk de audio **hay voz o silencio**. Es barato y rápido (modelos chicos como Silero VAD). Es el primer filtro: no mandás silencio al STT, y sabés cuándo alguien está hablando.
 
-- **Endpointing / turn detection (detección de fin de turno)**: decidir que el usuario **terminó su turno** y le toca al agente. Suena trivial y es **muy difícil**: la gente hace pausas en medio de una idea ("quiero pedir… mmm… una pizza"). Si endpointeás muy rápido, **cortás al usuario** en medio de la frase; si esperás demasiado, la conversación se siente lenta. El enfoque básico es por **silencio** (X ms sin voz = fin de turno), pero el silencio fijo es tosco. La frontera es el **endpointing semántico**: usar un modelo para decidir si lo que dijo es una frase *completa* (si pidió "quiero una…", claramente no terminó, aunque haya silencio).
+- **Endpointing / turn detection (detección de fin de turno)**: decidir que el usuario **terminó su turno** y le toca al agente. Suena trivial y es **muy difícil**: la gente hace pausas en medio de una idea ("quiero pedir… mmm… una pizza"). Si endpointeás muy rápido, **cortás al usuario** en medio de la frase; si esperás demasiado, la conversación se siente lenta. El enfoque básico es por **silencio** (X ms sin voz = fin de turno), pero el silencio fijo es tosco (un umbral corto corta a quien piensa en voz alta; uno largo demora a todos). Una mejora intermedia es el **timeout adaptativo**: ajustar el umbral al ritmo del hablante o al contexto, en vez de un número fijo. Y la frontera es el **endpointing semántico**: usar un modelo para decidir si lo que dijo es una frase *completa* (si pidió "quiero una…", claramente no terminó, aunque haya silencio).
 
-- **Barge-in (interrupción)**: si el usuario **empieza a hablar mientras el agente está hablando**, hay que **cortar el TTS inmediatamente** y ponerse a escuchar —como en una conversación real, donde interrumpir es normal—. Requiere audio **full-duplex** (capturar y reproducir a la vez) y poder **cancelar** la reproducción en curso. Un agente sin barge-in que te sigue hablando encima mientras intentás corregirlo es insufrible.
+- **Barge-in (interrupción)**: si el usuario **empieza a hablar mientras el agente está hablando**, hay que **cortar el TTS inmediatamente** y ponerse a escuchar —como en una conversación real, donde interrumpir es normal—. Requiere audio **full-duplex** (capturar y reproducir a la vez) y poder **cancelar** la reproducción en curso. Y un detalle duro que se subestima: con **altavoz abierto** (manos libres, no auriculares) el micrófono recaptura el propio TTS del agente, así que el barge-in fiable depende de **cancelación de eco acústico (AEC)** —separar la voz del usuario del eco del parlante—. La AEC es justo una de las cosas que **WebRTC trae de fábrica** (módulo 8) y el WebSocket crudo no, otra razón concreta para preferir WebRTC en clientes con altavoz. Un agente sin barge-in que te sigue hablando encima mientras intentás corregirlo es insufrible.
 
 Estos tres juntos son la "máquina de turnos" de la conversación, y hacerla bien (sin cortar al usuario, sin demorar, manejando interrupciones) es donde se va la mayor parte del esfuerzo de ingeniería de un voice agent —y por qué casi nadie lo escribe a mano—. La frase mental: **el turno de habla es la parte difícil: VAD detecta voz vs silencio, el endpointing decide cuándo el usuario terminó (tosco por silencio, mejor semántico), y el barge-in corta al agente cuando lo interrumpen —manejar esto bien, no el STT/TTS, es lo que hace usable a un voice agent—.**
 
@@ -197,11 +201,11 @@ Por qué son atractivos:
 
 Por qué **no** son siempre la respuesta:
 - **Menos control y observabilidad**: no hay texto en el medio por defecto (aunque suelen emitir una transcripción), así que loguear, auditar y debuggear es más difícil que en la cascada.
-- **Tools / RAG más nuevos**: el function calling y el retrieval sobre S2S existen pero son menos maduros que sobre un LLM de texto.
+- **Menos control del cerebro (no menos tools)**: ojo con un malentendido común —los modelos S2S (OpenAI Realtime, Gemini Live) **sí soportan function calling/tools**; lo que se pierde no es la capacidad de llamar herramientas, sino el **control fino del cerebro**: no podés poner a **Claude** específicamente, el prompting y la orquestación son más cerrados, y el ecosistema de RAG/retrieval sobre S2S es más nuevo que sobre un LLM de texto.
 - **Lock-in del proveedor y del cerebro**: usás el modelo de audio de ese proveedor —no podés poner a Claude de cerebro—. La elección de arquitectura es también una elección de proveedor.
 - **Costo por minuto de audio** en vez de por token: otro modelo mental de costos.
 
-El criterio cascada vs S2S, que es la decisión central del campo: **S2S cuando la prioridad es latencia mínima y naturalidad y aceptás menos control** (un asistente de conversación casual, un compañero de voz); **cascada cuando necesitás control, observabilidad, tools/RAG maduros, o específicamente a Claude de cerebro** (un agente de soporte que ejecuta acciones, donde querés el texto logueado y el razonamiento auditible). No es "uno es mejor"; es qué prioriza tu caso. La frase mental: **speech-to-speech (OpenAI Realtime, Gemini Live) es audio→audio sin texto en el medio: latencia mínima, prosodia natural e interrupciones nativas, a cambio de menos control/observabilidad, tools/RAG más nuevos y lock-in al proveedor (sin Claude de cerebro) —elegís S2S por naturalidad y cascada por control—.**
+El criterio cascada vs S2S, que es la decisión central del campo: **S2S cuando la prioridad es latencia mínima y naturalidad y aceptás menos control** (un asistente de conversación casual, un compañero de voz); **cascada cuando necesitás control, observabilidad, tools/RAG maduros, o específicamente a Claude de cerebro** (un agente de soporte que ejecuta acciones, donde querés el texto logueado y el razonamiento auditible). No es "uno es mejor"; es qué prioriza tu caso. La frase mental: **speech-to-speech (OpenAI Realtime, Gemini Live) es audio→audio sin texto en el medio: latencia mínima, prosodia natural e interrupciones nativas, a cambio de menos control del cerebro/observabilidad y lock-in al proveedor (soporta tools, pero no podés usar Claude y el RAG es más nuevo) —elegís S2S por naturalidad y cascada por control—.**
 
 **Ejercicios 7**
 7.1 ¿Qué es un modelo speech-to-speech y en qué se diferencia de la cascada?
@@ -218,21 +222,26 @@ El criterio cascada vs S2S, que es la decisión central del campo: **S2S cuando 
 - **WebSockets**: un canal full-duplex sobre una conexión persistente. Más **simple** y suficiente para muchos casos (server-a-server, o clientes controlados). Vos manejás el *chunking* del audio, el buffering y el formato. Va sobre **TCP**, que garantiza orden y entrega pero sufre *head-of-line blocking* (un paquete perdido frena los siguientes) —tolerable en redes buenas, problemático en redes con pérdida—. La telefonía suele entrar por acá: **Twilio Media Streams** manda el audio de una llamada (8 kHz) por WebSocket.
 
 ```python
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 app = FastAPI()
 
 @app.websocket("/voz")
 async def voz(ws: WebSocket):
     await ws.accept()
-    while True:
-        chunk = await ws.receive_bytes()      # audio entrante en chunks (PCM/Opus)
-        # pipeline: VAD → STT(parcial) → al terminar turno → LLM(stream) → TTS(stream)
-        async for audio_out in pipeline(chunk):
-            await ws.send_bytes(audio_out)     # audio saliente, también en streaming
+    try:
+        while True:
+            chunk = await ws.receive_bytes()      # audio entrante en chunks (PCM/Opus)
+            # pipeline: VAD → STT(parcial) → al terminar turno → LLM(stream) → TTS(stream)
+            async for audio_out in pipeline(chunk):
+                await ws.send_bytes(audio_out)     # audio saliente, también en streaming
+    except WebSocketDisconnect:
+        return    # el cliente cerró: es el camino de salida ESPERADO, no un error
 ```
 
-- **WebRTC**: el protocolo **pensado para media en tiempo real** (lo que usan las videollamadas). Va sobre **UDP**, y trae de fábrica lo que para voz en vivo es oro: **jitter buffer** (suaviza la variación de latencia de la red), **cancelación de eco** (que el micrófono no recapture lo que dice el parlante), tolerancia a **pérdida de paquetes**, y *NAT traversal* (conectar clientes detrás de routers). Es más complejo de operar, pero es lo correcto para audio **navegador↔servidor o teléfono↔servidor** de verdad.
+> Sin el `try/except WebSocketDisconnect`, cada cierre del cliente te loguea un stack trace —la desconexión es el final normal de la conexión, no un fallo—. (Igual que cuidaste la desconexión en el streaming SSE de [FastAPI](fastapi.md).)
+
+- **WebRTC**: el protocolo **pensado para media en tiempo real** (lo que usan las videollamadas). Va sobre **UDP**, y trae de fábrica lo que para voz en vivo es oro: **jitter buffer** (suaviza la variación de latencia de la red), **cancelación de eco** (que el micrófono no recapture lo que dice el parlante, clave para el barge-in del módulo 6), tolerancia a **pérdida de paquetes**, y *NAT traversal* (conectar clientes detrás de routers). Es más complejo de operar, pero es lo correcto para audio **navegador↔servidor o teléfono↔servidor** de verdad. Importante: en la práctica **casi nadie implementa WebRTC a mano** —el navegador no habla WebRTC directo contra tu lógica Python—; lo adoptás vía un **SFU/servidor de medios** (el que provee LiveKit) o una librería como `aiortc`. Es decir, WebRTC casi siempre llega **dentro de un framework** (módulo 9), no como un transporte que cableás vos —otro caso del criterio build-vs-framework—.
 
 La regla: **WebSocket cuando controlás los extremos y la red es buena** (server-server, telefonía vía un proveedor que ya hace el WebRTC del lado del usuario); **WebRTC cuando el cliente es un navegador/teléfono en una red impredecible** y necesitás cancelación de eco y robustez a pérdida —cosas que a mano sobre WebSocket reimplementarías mal—. La frase mental: **el audio en vivo necesita transporte de tiempo real bidireccional; WebSocket (TCP, simple, vos manejás chunks; bueno server-server y telefonía) o WebRTC (UDP, con jitter buffer/cancelación de eco/tolerancia a pérdida; lo correcto para navegador o teléfono en redes reales)—.**
 
@@ -251,6 +260,7 @@ La regla: **WebSocket cuando controlás los extremos y la red es buena** (server
 Pero la voz **agrega exigencias** que el agente de texto no tenía:
 - **La latencia de las tools ahora se nota.** En texto, que una tool tarde 2 s es invisible; en voz, son 2 s de silencio incómodo. Solución conversacional: rellenar ("dejame chequear eso…") mientras la tool corre, o streamear un acuse antes del resultado.
 - **Las respuestas tienen que ser "para escuchar", no "para leer".** Un párrafo con bullets y markdown es horrible dicho en voz. El prompt del cerebro debe pedir respuestas **cortas, habladas, sin formato visual** —es [prompt engineering](prompt-engineering.md) específico para voz—.
+- **No todo lo que el LLM emite se habla.** El agente alterna entre **hablar** y **llamar tools**, y el loop tiene dos canales distintos: el "para actuar" (los `tool_use`, sus argumentos JSON, el razonamiento intermedio) y el "para hablar" (la respuesta al usuario). **Solo este último va al TTS** —si streameás al sintetizador el JSON de una llamada a herramienta o el texto intermedio, el usuario escucha basura—. Tenés que filtrar: al TTS van las cláusulas de respuesta, no las llamadas a tools ni el pensamiento.
 - **Los turnos y el barge-in** (módulo 6) son parte del agente, no un detalle de UI.
 
 Y como pasó en RAG y en agentes, hay una **capa de frameworks** que arma el pipeline de voz y —sobre todo— resuelve las partes difíciles de tiempo real (VAD, endpointing, barge-in, transporte) que no querés escribir a mano:
@@ -277,6 +287,7 @@ El criterio build vs framework es **más fuerte que en RAG**: las partes difíci
 9.1 ¿Qué del agente de [AI Agents](ai-agents-python.md) sigue valiendo tal cual en un voice agent, y qué le cambia la voz?
 9.2 Nombrá dos exigencias nuevas que la voz le agrega al agente, y cómo las resolvés.
 9.3 ¿Qué resuelve un framework como Pipecat y por qué el criterio build-vs-framework es más fuerte acá que en RAG?
+9.4 ¿Por qué no todo lo que emite el LLM se manda al TTS? ¿Qué dos canales separás y qué va a cada uno?
 
 ---
 
@@ -292,6 +303,13 @@ El criterio build vs framework es **más fuerte que en RAG**: las partes difíci
 
 La disciplina, igual que en RAG y agentes: **evaluá cada etapa por separado Y de punta a punta**, porque un fallo de voz puede estar en cualquier capa (mal WER → el LLM razona sobre basura; buen WER pero respuesta larga → el TTS la dice eterna; todo bien pero endpointing lento → se siente trabado). Sin desglosar, "optimizás el prompt" cuando el problema era el sample rate.
 
+**QA de un pipeline de voz (el ángulo AI QA).** Medir no es lo mismo que **testear de forma reproducible**, y acá está el corazón del QA de sistemas de IA: el **no-determinismo** —el mismo audio puede dar distinta transcripción y, con un LLM detrás, distinta respuesta—, que rompe el `assert salida == esperada` clásico. Cómo se testea cada parte:
+
+- **STT → golden set de transcripción.** Un dataset de audios etiquetados con su texto correcto; corrés el STT y medís WER contra esas etiquetas. Es tu **test de regresión de los oídos**: cuando cambiás de modelo o de proveedor, lo volvés a correr y ves si el WER subió. Incluí audios con la jerga de tu dominio (es donde más se degrada).
+- **Respuesta del agente → testing por contrato, no por igualdad.** Como la salida no es determinista, no afirmás string exacto: fijás semilla/parámetros donde se pueda y evaluás por **contrato** (¿la respuesta contiene el dato correcto?, ¿llamó la tool correcta?) o con un **LLM-juez** ([evals](evals.md)), no por `==`. Es el mismo patrón de QA de IA de [Playwright](playwright.md)/[API testing](api-testing.md): separar lo determinista (¿el cableado funciona?) de lo no determinista (¿la respuesta es buena? → evals).
+- **Turnos → fixtures de audio sintético.** Para testear barge-in y endpointing **de forma repetible** (no "a oído"), armás audios de prueba: uno con una **interrupción** (verificás que el TTS se corta) y uno con una **pausa en medio de una frase** (verificás que el endpointing NO corta antes de tiempo). Los turnos se testean con fixtures, igual que cualquier otro comportamiento.
+- **Harness reproducible.** Audio de entrada fijo + parámetros fijos = test repetible en CI. Sin eso, "QA" es escuchar el demo y opinar —que no es QA—.
+
 Producción suma sus propios temas: **costo** (la voz es **cara por conversación** —STT por minuto + TTS por carácter/minuto + tokens del LLM—, mucho más que una llamada de texto), **telefonía** (integración con Twilio para llamadas reales), **idiomas y acentos** (el WER varía por idioma), **accesibilidad** (la voz es una herramienta de accesibilidad enorme), y **observabilidad** (loguear el audio, la transcripción y la trayectoria del agente —módulo 10 de [AI Agents](ai-agents-python.md)— para poder debuggear qué pasó). La frase mental: **un sistema de voz se mide por capas (WER, latencia p95 por etapa, MOS de naturalidad) y de punta a punta (task completion, calidad de turnos); evaluás cada etapa por separado para saber dónde falla, y en producción pesan el costo por minuto, la telefonía y la observabilidad del audio+trayectoria—.**
 
 **Ejercicios 10**
@@ -299,6 +317,7 @@ Producción suma sus propios temas: **costo** (la voz es **cara por conversació
 10.2 ¿Por qué se mira el p95 de latencia y no el promedio, y por qué desglosada por etapa?
 10.3 ¿Por qué hay que evaluar cada etapa por separado además de punta a punta? Dá un ejemplo de un fallo mal diagnosticado.
 10.4 ¿Por qué la voz es cara en producción y qué compone su costo?
+10.5 ¿Por qué el no-determinismo rompe el `assert` clásico en QA de voz, y cómo testeás de forma reproducible (a) el STT, (b) la respuesta del agente y (c) los turnos?
 
 ---
 
@@ -315,6 +334,8 @@ Producción suma sus propios temas: **costo** (la voz es **cara por conversació
 **3. ¿Build o framework?** (módulo 9) Para cualquier cosa en tiempo real, **framework** (Pipecat/LiveKit): las partes difíciles (interrupción, endpointing, transporte, sincronización) son justo las que harías mal a mano. Build solo para el caso batch más simple.
 
 **4. ¿Qué modelo en cada etapa?** El criterio de tiering del track: el **STT** según WER/latencia/privacidad (Whisper local vs proveedor streaming); el **cerebro** un modelo **rápido** para minimizar el time-to-first-token (Haiku conversacional, Opus si la tarea lo exige); el **TTS** según naturalidad/latencia/costo.
+
+**Y dos ejes que cruzan todas las decisiones: costo y privacidad.** El **costo por conversación** es de primera clase, no un detalle de después: la cascada con Whisper local es **barata pero pelea la latencia**; el S2S es **fluido pero caro por minuto** de audio. Ese trade-off entra en la decisión de arquitectura misma. Y el audio es **dato sensible**: una grabación de voz es **PII**, exige consentimiento (más allá del *voice cloning*), una política de **retención** clara y cuidado de compliance —qué se loguea, por cuánto tiempo y quién accede es parte del diseño, no un agregado—.
 
 El principio que cierra el track de IA, una última vez: **la mejor solución es la más simple que resuelve el problema real, y la decisión se mide.** En voz: "¿de verdad necesito voz? y si sí, ¿priorizo control (cascada) o naturalidad (S2S)?".
 
@@ -345,6 +366,7 @@ El ejercicio que cierra el módulo y que mostrás cuando te piden "¿armaste alg
 - [ ] El agente decide cuándo buscar (agentic retrieval) y responde **solo** con lo recuperado, en frases cortas aptas para escuchar.
 - [ ] El TTS **empieza a hablar antes** de que el LLM termine de generar (streaming) — medí el time-to-first-audio.
 - [ ] Medís y mostrás la **latencia de punta a punta** y por etapa (módulos 5 y 10).
+- [ ] Maneja **entrada degradada** sin romperse: silencio total, ruido, audio cortado o un STT que devuelve vacío → responde con una recuperación ("no te escuché, ¿podés repetir?"), no con un crash ni una respuesta inventada. (Es el ángulo QA: testealo a propósito.)
 
 **Extensiones (suben el nivel).**
 - Agregá **barge-in**: si empezás a hablar mientras el asistente habla, corta el TTS y te escucha (módulo 6).
@@ -414,6 +436,11 @@ El ejercicio que cierra el módulo y que mostrás cuando te piden "¿armaste alg
 4.4 La prosodia es la entonación, el ritmo y el énfasis del habla. Una voz casi-humana pero con
     prosodia rara cae en el "valle inquietante" (uncanny valley) y molesta más que una claramente
     sintética; la prosodia es lo que hace sonar natural o robótico al TTS.
+4.5 La normalización de texto convierte el texto a su forma hablada antes de sintetizar: números,
+    fechas, montos, símbolos y siglas ("$1.000" → "mil pesos", "12/3" → "doce de marzo", "Dr." →
+    "doctor"). SSML no siempre alcanza porque el TTS adivina por contexto/idioma y erra (sobre todo
+    con jerga de dominio), y son errores AUDIBLES que no se ven en el texto —se notan solo al
+    escuchar—. Ej. típico: un monto o una sigla leídos mal.
 ```
 
 ### Módulo 5
@@ -453,9 +480,10 @@ El ejercicio que cierra el módulo y que mostrás cuando te piden "¿armaste alg
     tres modelos (STT→LLM→TTS) con texto entre ellos.
 7.2 (1) Latencia mínima (un salto, no tres). (2) Prosodia y emoción (escucha y responde el cómo, no
     solo el qué). (3) Manejo nativo de interrupciones/turnos.
-7.3 (Tres de) más control y observabilidad (hay texto que loguear/auditar/debuggear); tools y RAG
-    más maduros sobre un LLM de texto; poder usar Claude de cerebro; y un modelo de costos por token
-    en vez de por minuto de audio. Evita además el lock-in al proveedor de audio.
+7.3 (Tres de) más control del cerebro y observabilidad (hay texto que loguear/auditar/debuggear);
+    poder usar Claude de cerebro con orquestación/RAG más maduros (el S2S sí soporta tools, pero su
+    ecosistema de RAG es más nuevo); y un modelo de costos por token en vez de por minuto de audio.
+    Evita además el lock-in al proveedor de audio.
 7.4 S2S: un compañero/asistente de conversación casual donde la naturalidad y la baja latencia
     mandan. Cascada: un agente de soporte que ejecuta acciones, donde querés control, texto logueado,
     tools/RAG maduros y a Claude razonando de forma auditable.
@@ -487,6 +515,10 @@ El ejercicio que cierra el módulo y que mostrás cuando te piden "¿armaste alg
     (VAD, endpointing, barge-in, transporte, sincronización de streams). El criterio se inclina más
     al framework que en RAG porque esas partes son justo las que a mano harías mal y lento; salvo el
     caso batch más simple, el framework casi siempre paga.
+9.4 Porque el loop del agente tiene dos canales: el "para actuar" (las llamadas a tools, sus
+    argumentos JSON, el razonamiento intermedio) y el "para hablar" (la respuesta al usuario). Solo
+    el segundo va al TTS. Si streameás al sintetizador el JSON de un tool_use o el texto intermedio,
+    el usuario escucha basura; hay que filtrar y mandar al TTS solo las cláusulas de respuesta.
 ```
 
 ### Módulo 10
@@ -502,6 +534,14 @@ El ejercicio que cierra el módulo y que mostrás cuando te piden "¿armaste alg
      usuario la siente lenta → no es el LLM, es el endpointing demasiado conservador.
 10.4 Porque paga por capa: STT por minuto de audio + TTS por carácter/minuto + tokens del LLM, mucho
      más caro por conversación que una interacción de solo texto.
+10.5 Porque el mismo audio puede dar distinta transcripción y distinta respuesta del LLM, así que
+     "salida == esperada" falla aunque el sistema esté bien. Se testea: (a) STT con un golden set de
+     audios etiquetados → WER contra esas etiquetas (regresión de los oídos al cambiar de modelo);
+     (b) la respuesta del agente por CONTRATO (¿contiene el dato?, ¿llamó la tool correcta?) o con
+     LLM-juez, fijando semilla/parámetros donde se pueda, no por igualdad exacta; (c) los turnos con
+     fixtures de audio sintético (un audio con interrupción → verificar que corta; uno con pausa en
+     medio de frase → verificar que el endpointing NO corta antes). Todo con entrada y parámetros
+     fijos para que sea repetible en CI.
 ```
 
 ### Módulo 11
