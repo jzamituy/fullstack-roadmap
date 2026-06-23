@@ -157,7 +157,7 @@ La Fase 1 te deja **contratable**. La Fase 2 es lo que te lleva de "sé entregar
 - [PostgreSQL nivel senior](postgresql.md) — aislamiento/locks, MVCC, índices/EXPLAIN, paginación keyset, pooling, JSONB.
 - [Node.js por dentro](nodejs.md) — event loop a fondo, thread pool de libuv, streams, cluster, escalado.
 - [Redis: caché, colas y jobs](redis.md) — cache-aside, stampede, BullMQ, idempotencia, rate limiting atómico.
-- [Testing práctico](testing.md) y, próximamente, **TDD como disciplina** (red-green-refactor).
+- [Testing práctico](testing.md) y [TDD como disciplina](tdd.md) (red-green-refactor).
 - [Patrones de diseño en NestJS](nestjs-patrones.md) y [NestJS nivel Senior](nestjs-senior.md).
 
 **Operación y nube (perfil Tech Lead):**
@@ -167,16 +167,33 @@ La Fase 1 te deja **contratable**. La Fase 2 es lo que te lleva de "sé entregar
 - [Observabilidad práctica](observabilidad.md) — OpenTelemetry, los 3 pilares, SLO/error budgets, alerting por burn rate.
 - [Arquitectura event-driven aplicada](event-driven.md) — event sourcing, CQRS, saga, outbox/CDC.
 - [Tiempo real (WebSockets) y Swagger](tiempo-real.md) — features en vivo + documentación de API.
-- Próximamente: **liderazgo técnico** (ADRs, métricas DORA, Team Topologies).
+- [De senior a Tech Lead](liderazgo.md) — ADRs, métricas DORA, Team Topologies, la IA en el rol.
 
-**Track de IA (el diferenciador 2026 — perfil IA Engineer):**
+**Track de IA — conceptos (stack Claude/TS, el diferenciador 2026):**
 - [IA Generativa y LLMs](ia-llms.md) — fundamentos de integrar LLMs (Claude/SDK) en tu backend.
 - [RAG: responder con tu data](rag.md) — embeddings, pgvector sobre Postgres, retrieval híbrido, reranking.
 - [Agentes (loop, MCP, Claude Agent SDK)](agentes.md) — de un workflow a un sistema que decide su camino.
 - [Evaluations](evals.md) — medir un sistema de IA: golden set, LLM-as-judge, tracing.
 - Bases NoSQL: [MongoDB / DynamoDB](nosql.md).
 
-> El hilo conductor del track de IA es el mismo sistema que crece: una llamada simple → un extractor → RAG sobre tus propios apuntes → un agente → evals. Y conecta con el resto: el tracing de un sistema de IA es el mismo concepto que la observabilidad de microservicios; pgvector vive sobre el Postgres que ya sabés operar.
+**Track Python AI (perfil AI app developer / AI QA — el ecosistema Python):** una segunda dirección, abierta en 2026, para apuntar a roles de IA en stack Python. Complementa el track conceptual de arriba, no lo reemplaza.
+- [Python para quien viene de TS/Node](python.md) y [FastAPI](fastapi.md) — el lenguaje y el framework de APIs del ecosistema de IA.
+- [Prompt Engineering](prompt-engineering.md) — especificar el modelo con medición, no a ojo.
+- [Vector Databases y RAG en Python](vector-dbs.md) — internals de ANN (FAISS/HNSW) y RAG con clientes nativos.
+- [AI Agents en Python](ai-agents-python.md) — LangGraph/AutoGen, multi-agente, MCP y A2A.
+- [Voice AI](voice-ai.md) — STT/TTS y agentes de voz; [IA multimodal y visión](multimodal.md) — VLMs y Document AI.
+- [Seguridad de IA y red-teaming](seguridad-ia.md) — jailbreaks, prompt injection, OWASP LLM Top 10, guardrails.
+- [Fine-tuning y adaptación](fine-tuning.md) — cuándo y cómo (LoRA/QLoRA, DPO/RLVR, distillation) y cuándo NO.
+- [Ingeniería de software asistida por IA](ai-assisted-coding.md) — dirigir agentes de coding con criterio.
+- [Deploy de aplicaciones de IA](deploy-ai.md) — servir modelos, GPU/cuantización, inferencia local, costos.
+
+**Track QA / Automation (perfil AI QA):**
+- [Playwright: E2E de browser](playwright.md) y [API Testing y Contract Testing](api-testing.md) — testing en Python, con el ángulo de **testear features de IA** (no determinismo, contrato, red-teaming).
+
+**ML clásico / Predictivo (frontera con el rol ML Engineer):**
+- [ML clásico y recomendadores](ml-recommenders.md) — cuándo NO es un LLM la respuesta: gradient boosting, recommenders de dos etapas, y la frontera AI Engineer vs ML Engineer.
+
+> El hilo conductor del track de IA es el mismo sistema que crece: una llamada simple → un extractor → RAG sobre tus propios apuntes → un agente → evals → desplegado y asegurado. Conecta con el resto: el tracing de un sistema de IA es la misma observabilidad de microservicios; pgvector vive sobre el Postgres que ya sabés operar. El **track Python AI + QA** es la especialización hacia roles de **AI app developer / AI QA** en stack Python, validado por el panel de revisión del temario.
 
 ---
 
@@ -184,4 +201,4 @@ La Fase 1 te deja **contratable**. La Fase 2 es lo que te lleva de "sé entregar
 
 **Fase 1 — camino más corto a "full stack contratable" (junior / semi-senior):** **TypeScript + NestJS + PostgreSQL + Drizzle/Prisma + Redis + Docker**, con **JWT/OAuth** para auth y **arquitectura en capas evolucionando a hexagonal**. Empezá por un monolito modular bien hecho, no por microservicios. Construí 4-5 proyectos desplegados (uno aprovechando tu React Native) y prepará system design básico. En ~2-3 meses intensivos (a buen ritmo) eso te deja en condiciones reales de postular.
 
-**Fase 2 — de full stack a senior / Tech Lead / IA Engineer (sin plazo fijo):** profundizás el core (Postgres/Node/Redis senior, TDD), sumás la mitad operativa (AWS+CDK, Kubernetes, observabilidad, event-driven, CI/CD real) y el **track de IA** (LLMs, RAG, agentes+MCP, evaluations) que hoy es el mayor diferenciador. El camino no termina en "contratable": sigue hacia "el que diseña y opera el sistema".
+**Fase 2 — de full stack a senior / Tech Lead / IA Engineer (sin plazo fijo):** profundizás el core (Postgres/Node/Redis senior, TDD), sumás la mitad operativa (AWS+CDK, Kubernetes, observabilidad, event-driven, CI/CD real) y el **track de IA** (LLMs, RAG, agentes+MCP, evaluations) más la especialización **Python AI / AI QA** (FastAPI, prompt engineering, agentes en Python, voz, multimodal, seguridad de IA, fine-tuning, deploy y testing de IA) que hoy es el mayor diferenciador. El camino no termina en "contratable": sigue hacia "el que diseña y opera el sistema".
