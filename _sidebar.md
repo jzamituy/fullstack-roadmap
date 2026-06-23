@@ -74,5 +74,8 @@
   - [🎭 Playwright: E2E de browser](playwright.md)
   - [🔌 API Testing y Contract Testing](api-testing.md)
 
+- **ML clásico / Predictivo**
+  - [📊 ML clásico y recomendadores](ml-recommenders.md)
+
 - **Enlaces**
   - [Repositorio en GitHub](https://github.com/jzamituy/fullstack-roadmap)
