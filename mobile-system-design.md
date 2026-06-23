@@ -156,14 +156,16 @@ async function fetchWithRetry(url: string, opts: RequestInit, max = 4): Promise<
       if (res.status < 500) return res;        // 4xx no se reintenta
       if (attempt >= max) return res;
     } catch (err) {
-      if (attempt >= max) throw err;            // red caída
+      if (attempt >= max) throw err;            // red caída tras agotar reintentos
     }
     const base = Math.min(1000 * 2 ** attempt, 16_000);
-    const jitter = Math.random() * base;        // evita el thundering herd
+    const jitter = Math.random() * base;        // "full jitter": evita el thundering herd
     await new Promise((r) => setTimeout(r, jitter));
   }
 }
 ```
+
+> El `jitter` de arriba es **full jitter** (esperás un random entre 0 y `base`). Es la variante que recomienda AWS y la más usada; en el peor caso puede dar esperas cercanas a 0 repetidas. Existen alternativas — **equal jitter** (`base/2 + random(0, base/2)`) y **decorrelated jitter** (la espera siguiente depende de la anterior) — que suavizan ese extremo. En una entrevista, nombrarlas suma.
 
 ### Subir archivos grandes: resumable uploads
 
@@ -290,6 +292,14 @@ Puntos finos que distinguen a un senior:
 1. **Listas largas sin virtualizar.** Renderizar 10.000 filas mata la memoria. Solución: virtualización — **FlashList** (RN, mejor que `FlatList`), `LazyColumn` (Compose), `UICollectionView` con prefetch (iOS).
 2. **Trabajo pesado en el hilo principal.** Parseo/imagen/crypto en el UI thread. Movelo a workers/hilos de fondo.
 
+### Tamaño de la app (importa antes de que la instalen)
+
+El peso del binario es una métrica de producto, no solo técnica: **cada MB extra baja la tasa de conversión de instalación** (más aún en redes lentas o con datos contados) y muchas stores avisan antes de descargar sobre celular pasando cierto umbral.
+
+- **Android App Bundle (AAB)** + **dynamic feature modules**: Google Play sirve solo el código/recursos que ese dispositivo necesita (densidad, ABI, idioma) y permití descargar features pesadas *on-demand*, no en la instalación inicial.
+- **iOS**: *app thinning* (slicing por dispositivo) y **on-demand resources** para assets que no hacen falta en el primer arranque.
+- En RN, el bundle JS y los assets también suman; **Hermes** (bytecode precompilado) reduce tamaño y mejora el arranque, y va de la mano con el diffing de updates OTA (Módulo 8).
+
 ### Ejecución en background y batería
 
 El SO **defiende la batería de tu app**:
@@ -310,6 +320,14 @@ En un feed, **las imágenes son el 80% de los bytes y de la memoria**. Diseñar 
 - **Placeholders**: *blurhash*/thumbnail diminuto mientras carga → percepción de velocidad.
 - **Prefetch** de las próximas imágenes del feed mientras el usuario lee las actuales.
 
+### Descarga de media para consumo offline
+
+Distinto del caché efímero: acá el usuario **elige** descargar (canciones, episodios, mapas) para usarlos sin red. Cambia el problema:
+
+- **Cuota de almacenamiento**: definís un presupuesto de disco y una política de **evicción LRU** (lo menos usado se borra primero) para no llenar el dispositivo. El SO también puede reclamar ese espacio.
+- **Expiración / licencia**: el contenido descargado puede tener vencimiento (DRM, suscripción que caduca); validás la licencia al reproducir, no solo al descargar.
+- **Descarga resiliente**: igual que los uploads (Módulo 2), las descargas grandes son *resumables* y se hacen en background con `WorkManager`/`BGTaskScheduler` (Módulo 5), solo en WiFi si el usuario lo pide.
+
 ---
 
 ## Módulo 7 — Push notifications y tiempo real
@@ -324,7 +342,7 @@ En un feed, **las imágenes son el 80% de los bytes y de la memoria**. Diseñar 
 
 ### Tiempo real
 
-**WebSocket** (bidireccional) para chat y presencia; **SSE** (solo server→cliente, y en RN normalmente necesitás un polyfill de `EventSource`) para streams de solo lectura como precios en vivo; **long-poll** como fallback. En mobile, lo difícil **no es abrir el socket, es mantenerlo**: reconexión con backoff, heartbeats, y soltar/recuperar la conexión cuando la app va a background (el SO te la corta). Conecta directo con tu módulo de **Tiempo real (WebSockets)**.
+**WebSocket** (bidireccional) para chat y presencia; **SSE** (solo server→cliente, y en RN normalmente necesitás un polyfill de `EventSource` — `react-native-sse` es la opción de facto, corre sobre `XMLHttpRequest`/`fetch`) para streams de solo lectura como precios en vivo; **long-poll** como fallback. En mobile, lo difícil **no es abrir el socket, es mantenerlo**: reconexión con backoff, heartbeats, y soltar/recuperar la conexión cuando la app va a background (el SO te la corta). Conecta directo con tu módulo de **Tiempo real (WebSockets)**.
 
 ---
 
@@ -388,7 +406,7 @@ Premisa: **el binario de tu app está en manos del atacante.** Se puede descompi
 - **Secure storage** para tokens: Keychain/Keystore (`expo-secure-store`), nunca en texto plano.
 - **Tokens**: access token corto + refresh token; el refresh en secure storage.
 - **Certificate / public-key pinning**: la app solo confía en *tu* certificado → frena man-in-the-middle con un proxy. Ojo: hay que poder rotarlo o brickeás la app.
-- **Attestation**: **App Attest** (iOS) y **Play Integrity API** (Android) le prueban al servidor que la request viene de una app genuina en un dispositivo no comprometido (anti-bots, anti-tampering).
+- **Attestation**: **App Attest** (iOS) y **Play Integrity API** (Android) le prueban al servidor que la request viene de una app genuina en un dispositivo no comprometido (anti-bots, anti-tampering). El token de attestation **se valida en el servidor, no en el cliente**: verificarlo en el dispositivo no vale nada, porque el binario está en manos del atacante.
 - **Biometría**: `LocalAuthentication` (iOS) / `BiometricPrompt` (Android) para gatear acciones sensibles.
 - **Ofuscación**: R8/ProGuard (Android) sube el costo de reversear; no es seguridad por sí sola.
 - **Marco de referencia**: **OWASP MASVS / MASTG** — el checklist estándar de seguridad móvil. Citálo en una entrevista.
@@ -470,7 +488,7 @@ Cuando te tiran "diseñá el feed de Instagram" / "diseñá WhatsApp" / "diseñ�
 
 ## Ejercicios
 
-> Resolvé primero, después mirá las **Soluciones** al final. Son de diseño: no hay una única respuesta correcta, sino trade-offs bien justificados. Los **ejercicios 11-14** (puente full stack y offline) cierran su solución con una **🚩 red flag** — el error que delataría a un junior — para que te autoevalúes.
+> Resolvé primero, después mirá las **Soluciones** al final. Son de diseño: no hay una única respuesta correcta, sino trade-offs bien justificados. Cada solución cierra con una **🚩 red flag** — el error que delataría a un junior — para que te autoevalúes.
 
 **1.** Tu API móvil recibe el reporte de que usuarios con la app de hace un año empezaron a recibir errores 400 tras un deploy. ¿Qué violaste y cómo lo arreglás sin romper a nadie?
 
@@ -500,29 +518,31 @@ Cuando te tiran "diseñá el feed de Instagram" / "diseñá WhatsApp" / "diseñ�
 
 **14.** *(Offline)* Elegí y justificá la estrategia de conflicto para tres dominios: (a) el contador de likes de un post, (b) un mensaje de chat, (c) un documento de texto colaborativo. Decidí entre LWW, contador conmutativo, append-only o CRDT — sin caer en "CRDT para todo".
 
+**15.** *(Degradación elegante)* Tomá la home con BFF del ejercicio 12, donde la sección "recomendados" falla pero el resto responde. Diseñá los **estados de UI** de esa pantalla: qué muestra mientras carga, qué hace con la sección caída, y cómo cierra el lazo cliente↔servidor con la respuesta parcial (`200` con secciones `null`) que devuelve el BFF.
+
 ---
 
 ## Soluciones
 
-**1 — Backward compatibility.** Rompiste un contrato del que dependen apps viejas que **no podés actualizar**. Probablemente hiciste un cambio *breaking* (campo obligatorio nuevo, tipo cambiado, endpoint removido) sin versionar. Arreglo con **Expand–Contract**: revertí el breaking en la versión actual del endpoint, hacé el cambio nuevo *aditivo* (campo opcional o `/v2`), dejá conviviendo ambas, y recién retirá la vieja cuando la telemetría muestre que casi nadie la usa. Lección: en mobile, **toda API es para siempre** hasta que las métricas digan lo contrario.
+**1 — Backward compatibility.** Rompiste un contrato del que dependen apps viejas que **no podés actualizar**. Probablemente hiciste un cambio *breaking* (campo obligatorio nuevo, tipo cambiado, endpoint removido) sin versionar. Arreglo con **Expand–Contract**: revertí el breaking en la versión actual del endpoint, hacé el cambio nuevo *aditivo* (campo opcional o `/v2`), dejá conviviendo ambas, y recién retirá la vieja cuando la telemetría muestre que casi nadie la usa. Lección: en mobile, **toda API es para siempre** hasta que las métricas digan lo contrario. 🚩 **Red flag:** "que actualicen la app" — no podés forzar a nadie a actualizar, y hay apps de hace 18 meses vivas en producción.
 
-**2 — BFF + composición.** Metés un **Backend for Frontend** que hace las 5 llamadas en paralelo *server-side* y devuelve un solo payload a medida de esa pantalla → 1 round-trip en vez de 5, menos latencia y batería. Trade-off: un servicio más para mantener y el riesgo de filtrar lógica de negocio al BFF (debe solo agregar/adaptar). Alternativa si ya tenés GraphQL: una sola query con los 5 campos. Bonus: lo no crítico (recomendados) puede venir *lazy* o degradar si falla.
+**2 — BFF + composición.** Metés un **Backend for Frontend** que hace las 5 llamadas en paralelo *server-side* y devuelve un solo payload a medida de esa pantalla → 1 round-trip en vez de 5, menos latencia y batería. Trade-off: un servicio más para mantener y el riesgo de filtrar lógica de negocio al BFF (debe solo agregar/adaptar). Alternativa si ya tenés GraphQL: una sola query con los 5 campos. Bonus: lo no crítico (recomendados) puede venir *lazy* o degradar si falla. 🚩 **Red flag:** dejar que el cliente haga las 5 llamadas y las orqueste — multiplicás round-trips, batería y latencia en el peor lugar posible (el dispositivo).
 
-**3 — Outbox / mutation queue.** Componentes: (a) **optimistic update** que pinta el like al instante; (b) **outbox persistente en SQLite** con la mutación + **idempotency key** generada por el cliente + `createdAt`; (c) un **drainer** que se dispara cuando vuelve la conectividad y manda en orden con la key (así un reintento no duplica el like). Si el server responde **409** (el post ya no existe): es un error **permanente** → sacás la mutación de la outbox, hacés **rollback** del optimistic update y, si corresponde, avisás al usuario suavemente. Los 5xx/timeouts, en cambio, se reintentan con backoff.
+**3 — Outbox / mutation queue.** Componentes: (a) **optimistic update** que pinta el like al instante; (b) **outbox persistente en SQLite** con la mutación + **idempotency key** generada por el cliente + `createdAt`; (c) un **drainer** que se dispara cuando vuelve la conectividad y manda en orden con la key (así un reintento no duplica el like). Si el server responde **409** (el post ya no existe): es un error **permanente** → sacás la mutación de la outbox, hacés **rollback** del optimistic update y, si corresponde, avisás al usuario suavemente. Los 5xx/timeouts, en cambio, se reintentan con backoff. 🚩 **Red flag:** guardar la outbox en memoria — el SO mata el proceso y la mutación se pierde; tiene que ir en SQLite.
 
-**4 — LWW vs CRDT.** Para un **documento colaborativo**, LWW está mal: si gana "el último timestamp", **perdés las ediciones del otro** sin avisar. Elegí **CRDT** (Yjs/Automerge): las dos ediciones convergen al mismo estado sin perder caracteres, que es justo lo que un editor colaborativo necesita. LWW sería aceptable solo para datos donde la última intención reemplaza a la anterior (ej. "toggle de notificaciones"), no para texto que se *fusiona*.
+**4 — LWW vs CRDT.** Para un **documento colaborativo**, LWW está mal: si gana "el último timestamp", **perdés las ediciones del otro** sin avisar. Elegí **CRDT** (Yjs/Automerge): las dos ediciones convergen al mismo estado sin perder caracteres, que es justo lo que un editor colaborativo necesita. LWW sería aceptable solo para datos donde la última intención reemplaza a la anterior (ej. "toggle de notificaciones"), no para texto que se *fusiona*. 🚩 **Red flag:** proponer LWW para texto colaborativo — perdés ediciones del otro usuario en silencio.
 
-**5 — Realm Sync está EOL.** Le decís que **Atlas Device Sync llegó a End-of-Life el 30 de septiembre de 2025**: el SDK local sigue como open source, pero **el sync en la nube ya no existe**, así que no es opción para un proyecto nuevo. Proponés un sync engine vigente: **PowerSync** (SQLite ↔ Postgres/Mongo, con SOC2/HIPAA desde ene-2026), **ElectricSQL**, o **WatermelonDB** si querés algo nativo de RN; **Couchbase Lite** es el camino de migración que recomienda el propio ecosistema Realm.
+**5 — Realm Sync está EOL.** Le decís que **Atlas Device Sync llegó a End-of-Life el 30 de septiembre de 2025**: el SDK local sigue como open source, pero **el sync en la nube ya no existe**, así que no es opción para un proyecto nuevo. Proponés un sync engine vigente: **PowerSync** (SQLite ↔ Postgres/Mongo, con SOC2/HIPAA desde ene-2026), **ElectricSQL**, o **WatermelonDB** si querés algo nativo de RN; **Couchbase Lite** es el camino de migración que recomienda el propio ecosistema Realm. 🚩 **Red flag:** seguir un tutorial sin verificar fechas y arrancar un proyecto nuevo sobre un servicio que ya está apagado.
 
-**6 — Jank en el feed.** Causa 1: **lista no virtualizada** renderizando todas las filas → usá **FlashList** en vez de `FlatList`/`ScrollView` (recicla vistas, menos memoria). Causa 2: **trabajo pesado en el JS/UI thread** (parseo, decodificación de imágenes grandes, cálculos en `render`) → mové la decodificación a la librería de imágenes (Expo Image, off-thread), memoizá, y sacá cómputo del render. Verificás con el profiler de la New Architecture mirando frames que pasan los 16,6 ms.
+**6 — Jank en el feed.** Causa 1: **lista no virtualizada** renderizando todas las filas → usá **FlashList** en vez de `FlatList`/`ScrollView` (recicla vistas, menos memoria). Causa 2: **trabajo pesado en el JS/UI thread** (parseo, decodificación de imágenes grandes, cálculos en `render`) → mové la decodificación a la librería de imágenes (Expo Image, off-thread), memoizá, y sacá cómputo del render. Verificás con el profiler de la New Architecture mirando frames que pasan los 16,6 ms. 🚩 **Red flag:** "le pongo `ScrollView` con un `.map`" — renderiza todas las filas de una y revienta memoria y frames con listas largas.
 
-**7 — Pipeline de release con escape hatch.** La feature nace detrás de un **feature flag apagado** en prod. La activás primero para una **cohorte interna**, después **staged rollout** 1% → 10% → 50% → 100% mirando crash-free rate y errores entre escalones. Si algo explota, **kill switch**: apagás el flag desde Remote Config y la feature desaparece **en minutos, sin pasar por la store**. El flag te da el apagado instantáneo que un release normal no puede dar.
+**7 — Pipeline de release con escape hatch.** La feature nace detrás de un **feature flag apagado** en prod. La activás primero para una **cohorte interna**, después **staged rollout** 1% → 10% → 50% → 100% mirando crash-free rate y errores entre escalones. Si algo explota, **kill switch**: apagás el flag desde Remote Config y la feature desaparece **en minutos, sin pasar por la store**. El flag te da el apagado instantáneo que un release normal no puede dar. 🚩 **Red flag:** confiar en "subo un hotfix a la store" como plan de rollback — el review puede tardar días mientras la feature rota está al 100%.
 
-**8 — Secure storage y binario abierto.** El access token va en **Keychain (iOS) / Keystore (Android)** vía `expo-secure-store`, no en AsyncStorage/UserDefaults, que son texto plano accesibles en un device rooteado/con backup. Y una "API key secreta" embebida **no es secreta** porque el binario se puede descompilar y extraerla: todo lo que viaja en la app es público. Los verdaderos secretos viven en el servidor; la app se autentica y, si necesitás probar que es genuina, usás **App Attest / Play Integrity**.
+**8 — Secure storage y binario abierto.** El access token va en **Keychain (iOS) / Keystore (Android)** vía `expo-secure-store`, no en AsyncStorage/UserDefaults, que son texto plano accesibles en un device rooteado/con backup. Y una "API key secreta" embebida **no es secreta** porque el binario se puede descompilar y extraerla: todo lo que viaja en la app es público. Los verdaderos secretos viven en el servidor; la app se autentica y, si necesitás probar que es genuina, usás **App Attest / Play Integrity**. 🚩 **Red flag:** "la ofusco y ya está segura" — la ofuscación sube el costo del ataque, no esconde un secreto que igual viaja en el binario.
 
-**9 — SLI/SLO de estabilidad.** **SLI**: `crash-free sessions` (% de sesiones sin crash). **SLO**: ≥ 99,5% (ejemplo). Cómo gobierna el rollout: definís que cada escalón del staged rollout solo avanza si el crash-free de esa cohorte se mantiene ≥ SLO; si baja (regresión introducida por la nueva versión), el rollout **se frena o revierte automáticamente** antes de llegar al 100%. El SLO convierte "parece que anda" en una compuerta objetiva.
+**9 — SLI/SLO de estabilidad.** **SLI**: `crash-free sessions` (% de sesiones sin crash). **SLO**: ≥ 99,5% (ejemplo). Cómo gobierna el rollout: definís que cada escalón del staged rollout solo avanza si el crash-free de esa cohorte se mantiene ≥ SLO; si baja (regresión introducida por la nueva versión), el rollout **se frena o revierte automáticamente** antes de llegar al 100%. El SLO convierte "parece que anda" en una compuerta objetiva. 🚩 **Red flag:** medir solo "promedio de crashes" sin normalizar por sesiones/usuarios ni atar un umbral al rollout — sin SLI/SLO no hay compuerta, hay corazonada.
 
-**10 — OTA legítimo vs prohibido.** **Legítimo**: arreglar un bug en JS, cambiar textos/estilos, togglear features ya revisadas — todo lo que sea **JS y assets**. **Te rechazan/banean** si por OTA cambiás **código nativo** o **alterás el propósito de la app** respecto a lo que la store aprobó (regla de Apple/Google). Herramienta 2026: **EAS Update** (con rollouts y republish/rollback desde Expo SDK 55), o **CodePush self-hosteado** ahora que App Center se retiró (31-mar-2025).
+**10 — OTA legítimo vs prohibido.** **Legítimo**: arreglar un bug en JS, cambiar textos/estilos, togglear features ya revisadas — todo lo que sea **JS y assets**. **Te rechazan/banean** si por OTA cambiás **código nativo** o **alterás el propósito de la app** respecto a lo que la store aprobó (regla de Apple/Google). Herramienta 2026: **EAS Update** (con rollouts y republish/rollback desde Expo SDK 55), o **CodePush self-hosteado** ahora que App Center se retiró (31-mar-2025). 🚩 **Red flag:** meter código nativo o cambiar el propósito de la app por OTA "para ir más rápido" — es causa de baneo de la store.
 
 **11 — El lado servidor del like (NestJS + delta sync).** El endpoint (`POST /likes`) recibe la mutación con la **idempotency key** del cliente en un header (`Idempotency-Key`). En el server guardás esa key en una tabla con índice único (o en Redis con TTL): si llega repetida, devolvés el resultado ya guardado en vez de re-ejecutar → el reintento del cliente es seguro. Para el **delta sync**, el cliente manda su último cursor (`?since=<updatedAt>`) y devolvés solo las filas con `updated_at > since` (más los *tombstones* de lo borrado) y un cursor nuevo. En Postgres, índice en `(updated_at)` para que el delta sea barato. 🚩 **Red flag:** un endpoint que no es idempotente "porque el cliente ya no reintenta" — en mobile *siempre* reintenta.
 
@@ -531,6 +551,8 @@ Cuando te tiran "diseñá el feed de Instagram" / "diseñá WhatsApp" / "diseñ�
 **13 — Mutation queue con dependencias.** Cada mutación tiene estado (`pending → sending → done | failed`), `createdAt` para ordenar, `retries` y backoff. El drenado es **secuencial y FIFO** para preservar la causalidad. El caso difícil (comentar un post aún no sincronizado) se resuelve con **IDs de cliente**: el post offline nace con un UUID local, el comentario referencia ese UUID, y cuando el post sincroniza el server devuelve el ID real y **remapeás** las referencias pendientes (o el server acepta el UUID de cliente como idempotency key y resuelve el grafo). Si una mutación con dependientes falla de forma permanente, el rollback es **en cascada**. 🚩 **Red flag:** drenar en paralelo o sin orden → el comentario llega antes que el post y el server lo rechaza.
 
 **14 — Estrategia de conflicto por dominio.** (a) **Contador de likes**: ni LWW ni CRDT de texto — un **contador conmutativo** (cada cliente manda el delta `+1/-1`, el server suma); LWW perdería incrementos concurrentes. (b) **Mensaje de chat**: **append-only**, no hay conflicto real — cada mensaje es inmutable con su ID y timestamp, ordenás por la hora del server. (c) **Documento colaborativo**: **CRDT** (Yjs/Automerge), porque hay edición concurrente de texto que debe *fusionarse*. Moraleja: la estrategia sale del **tipo de dato y de operación**, no de una regla única. 🚩 **Red flag:** proponer CRDT para los tres "porque es lo más avanzado" — es overkill para un contador y para un chat.
+
+**15 — Estados de UI y degradación parcial.** Cada sección de la home es independiente y tiene tres estados: **loading** (skeleton con la forma del contenido, no un spinner global que bloquee toda la pantalla), **ready** (datos) y **error/vacío** (mensaje contenido + reintento *de esa sección*). Como el BFF responde `200` con `recomendados: null`, el cliente lee la respuesta por sección: pinta perfil/feed/stories normales y renderiza la sección caída en su estado de error, sin tumbar el resto. El lazo cliente↔servidor cierra así: el BFF **decide qué es esencial** (si falla el perfil, sí es error de pantalla) vs **degradable** (recomendados `null` = la pantalla vive sin eso), y el cliente respeta ese contrato. Mostrar datos parciales > pantalla en blanco. 🚩 **Red flag:** un único estado global de pantalla (todo carga o todo falla) que convierte el fallo de "recomendados" en una pantalla de error completa.
 
 ---
 
