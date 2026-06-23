@@ -192,11 +192,25 @@ Y siempre, recordá el camino A: **una API gestionada (Claude) es la opción de 
 
 La regla, otra vez "escalá la herramienta al problema": **bajá en la tabla (hacia menos operación) salvo que un requisito concreto te empuje a subir.** La frase mental: **dónde correr la inferencia es un espectro build-vs-buy —GPU autogestionada (máximo control y ops), serverless-GPU (ellos la GPU, vos el modelo), endpoint gestionado (mínima ops, en tu cloud), API gestionada (cero ops de modelo, el default)— y elegís la de menos operación que cumpla tus requisitos—.**
 
+**Una cuarta dirección: inferencia local / edge (SLMs).** La tabla anterior asume servir un modelo grande en una GPU de servidor. Pero hay otro eje: el modelo puede ser tan **chico** que corre **on-device o on-prem sin GPU de servidor** —un **SLM** (Small Language Model) de 1B–8B—. Cuándo gana lo local:
+
+- **Privacidad / residencia de datos**: salud, finanzas, legal que **no pueden** mandar datos a una API externa. El modelo va donde están los datos.
+- **Latencia predecible**: sin round-trip de red; respuestas en decenas/cientos de ms.
+- **Volumen alto y sostenido**: hardware fijo en vez de costo por token que escala (conecta con el crossover del módulo 8).
+- **Offline / sin conectividad**.
+
+Las herramientas de facto: **llama.cpp + GGUF** (el estándar para hardware de consumo: CPU, GPU de consumo, Apple Silicon), con envoltorios fáciles como **Ollama** y **LM Studio**. Distinción de formatos respecto al módulo 4: **GGUF** (cuantización PTQ, CPU/mixto, portable, para local) vs **AWQ/GPTQ** (orientados a GPU de servidor, para vLLM). Regla práctica de cuantización por VRAM disponible: <8 GB → Q3/Q2; **8–12 GB → Q4_K_M (el recomendado, mejor relación calidad/tamaño)**; 16–24 GB → Q8; 24 GB+ → fp16. Modelos típicos: familias Llama, Gemma, Phi, Qwen en 1B–8B (muchos producidos por **distillation** de un modelo grande — puente con [fine-tuning.md](fine-tuning.md)).
+
+> **El patrón ganador es híbrido, no "todo on-device".** Los SLMs **no igualan** a los modelos frontera en razonamiento complejo. El diseño que rinde: **SLM local para el 80–90% del trabajo rutinario + API frontera para los casos difíciles** (es un router/cascada, como en el módulo 8). Cuidado con las cifras de ahorro "70–75%" que circulan: vienen de vendors de inferencia local, tratalas como **orden de magnitud**, no como garantía — medí en tu caso (la disciplina de siempre).
+
+La frase mental del eje local: **si el modelo entra chico (SLM vía Ollama/llama.cpp+GGUF), podés correrlo on-device/on-prem y ganás privacidad, latencia y costo a volumen —pero rara vez iguala al frontier, así que el patrón real es híbrido: SLM local para lo rutinario, API frontera para lo difícil—.**
+
 **Ejercicios 7**
 7.1 Ordená las opciones de menos a más operación de tu parte y dá el caso de uso de cada una.
 7.2 ¿Qué resuelve una plataforma serverless-GPU (Modal/Replicate) respecto a una GPU autogestionada?
 7.3 ¿En qué se diferencia un endpoint gestionado (Bedrock/SageMaker) de la API gestionada de Claude, y cuándo el primero ayuda con compliance?
 7.4 ¿Cuál es la regla para elegir en este espectro y con qué criterio del temario conecta?
+7.5 ¿Cuándo conviene inferencia local/edge con un SLM, y por qué el patrón ganador es híbrido y no "todo on-device"? ¿Qué herramienta y qué cuantización usarías en una máquina con 12 GB de VRAM?
 
 ---
 
@@ -451,6 +465,12 @@ El ejercicio que cierra el módulo —y el track—: **desplegar de verdad** el 
     tu nube.
 7.4 Bajá hacia menos operación salvo que un requisito concreto te empuje a subir. Es el build-vs-buy /
     "escalá la herramienta al problema" del temario (AWS gestionado vs autogestionado).
+7.5 Conviene cuando hay privacidad/residencia de datos (no podés mandar a una API externa), necesitás
+    latencia predecible sin round-trip, tenés volumen alto sostenido (hardware fijo < costo por token),
+    o necesitás operar offline. Híbrido y no "todo on-device" porque los SLMs no igualan al frontier en
+    razonamiento complejo: SLM local para el 80–90% rutinario, API frontera para los casos difíciles
+    (un router/cascada). Con 12 GB de VRAM: llama.cpp/Ollama con un modelo en GGUF cuantizado a Q4_K_M
+    (la mejor relación calidad/tamaño en esa franja).
 ```
 
 ### Módulo 8
