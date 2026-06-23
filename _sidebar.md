@@ -68,6 +68,7 @@
   - [🎙️ Voice AI: STT, TTS y agentes de voz](voice-ai.md)
   - [🚀 Deploy de aplicaciones de IA](deploy-ai.md)
   - [🛡️ Seguridad de IA y red-teaming](seguridad-ia.md)
+  - [🔧 Fine-tuning y adaptación de modelos](fine-tuning.md)
 
 - **Track QA / Automation**
   - [🎭 Playwright: E2E de browser](playwright.md)
