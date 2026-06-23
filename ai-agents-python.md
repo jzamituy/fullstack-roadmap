@@ -24,7 +24,7 @@ uv add langgraph langchain-anthropic langgraph-checkpoint-sqlite
 5. LangGraph III: persistencia, memoria e interrupts (checkpointing + human-in-the-loop)
 6. AutoGen: agentes que conversan (el paradigma multi-agente por diálogo)
 7. Multi-agente: supervisor, group chat y cuándo NO usarlo
-8. Tools, RAG y MCP en el mundo Python (conectar las piezas del track)
+8. Tools, RAG, MCP y A2A en el mundo Python (conectar las piezas del track)
 9. Confiabilidad y guardarraíles en frameworks
 10. Observabilidad y evaluación de agentes (la trayectoria, no solo la respuesta)
 11. El criterio de cierre: framework vs a mano, y el puente del track
@@ -307,7 +307,7 @@ La elección de framework mapea al patrón: **LangGraph** para supervisor/jerár
 
 ---
 
-## Módulo 8 — Tools, RAG y MCP en el mundo Python (conectar las piezas del track)
+## Módulo 8 — Tools, RAG, MCP y A2A en el mundo Python (conectar las piezas del track)
 
 **Teoría.** Un agente sin buenas tools es un chat; el diseño de tools (de [Agentes](agentes.md) módulo 4: pocas y enfocadas, descripciones prescriptivas del *cuándo*, mínimo privilegio) vale **igual** acá —el framework no te exime de ese criterio—. Lo que cambia es **cómo** se declaran las tools en Python y cómo se enchufan las piezas que ya construiste en el track.
 
@@ -350,14 +350,19 @@ def hacer_tool_buscar(vectordb, tenant_id: str):
 
 El `tenant_id` se cierra por closure desde la sesión —el modelo nunca lo elige, así que no puede pedir data de otro tenant—. Dos cosas de RAG que se vuelven **más** críticas en un agente (igual que en [Agentes](agentes.md) módulo 9): el **filtrado por permisos** (un agente con búsqueda sin filtro puede filtrar data entre tenants con más libertad que un pipeline fijo) y el **grounding** (responder solo con lo recuperado, citar la fuente).
 
-**MCP en Python.** El estándar de herramientas de [Agentes](agentes.md) módulo 6 (el "USB-C de las tools de IA") tiene SDK de Python y adaptadores para los frameworks: podés exponer un servidor MCP y consumir sus tools desde un agente LangGraph/AutoGen sin escribir un adaptador a medida por cada servicio. El modelo mental no cambia —el agente sigue pidiendo tools y observando resultados—; cambia **de dónde vienen** (un protocolo estándar en vez de funciones de tu repo), y siguen aplicando mínimo privilegio, tratar la salida como no confiable, y cuidar credenciales.
+**MCP en Python.** El estándar de herramientas de [Agentes](agentes.md) módulo 6 (el "USB-C de las tools de IA") tiene SDK de Python y adaptadores para los frameworks: podés exponer un servidor MCP y consumir sus tools desde un agente LangGraph/AutoGen sin escribir un adaptador a medida por cada servicio. El modelo mental no cambia —el agente sigue pidiendo tools y observando resultados—; cambia **de dónde vienen** (un protocolo estándar en vez de funciones de tu repo), y siguen aplicando mínimo privilegio, tratar la salida como no confiable, y cuidar credenciales. (La seguridad propia de MCP —tool poisoning, confused deputy, rug pull— se trata en [Seguridad de IA](seguridad-ia.md) módulo 6.)
 
-La frase mental: **en Python las tools se declaran con `@tool` y su docstring ES el prompt que decide su uso; el retrieval del track entra como una tool (agentic retrieval, con permisos y grounding intactos), y MCP te trae tools externas estándar —el criterio de diseño de tools de [Agentes](agentes.md) no cambia, solo su sintaxis—.**
+**A2A: el protocolo agente↔agente (la capa horizontal).** Si MCP conecta un agente con sus *tools y datos* (capa **vertical**: el agente "baja" a buscar capacidades), **A2A** (Agent2Agent, originado en Google y donado —como MCP— a la **Agentic AI Foundation** de la Linux Foundation) conecta un agente con **otros agentes** (capa **horizontal**: agentes autónomos que se delegan tareas, incluso de equipos o vendors distintos). El modelo mental: **MCP hacia adentro (tools), A2A hacia los lados (otros agentes).** El mecanismo central es la **Agent Card** —un JSON público (servido en `/.well-known/agent-card.json`) donde un agente declara qué sabe hacer— para que otro agente descubra sus capacidades y le delegue trabajo.
+
+Honestidad de madurez (para no sobreinvertir): **A2A es bastante más nuevo y menos probado que MCP.** MCP ya ganó la capa de tools (lo adoptaron Anthropic, OpenAI, Google, Microsoft); A2A tiene respaldo fuerte (Google, Microsoft, AWS) pero su uso **cross-vendor real en producción es incipiente** —la mayoría del multi-agente sigue siendo dentro de un mismo sistema, y OpenAI no lo adoptó—. Para el multi-agente del módulo 7 **dentro de tu propio proceso, NO necesitás A2A**: tus agentes se coordinan por el grafo (LangGraph) o el diálogo (AutoGen). A2A recién importa cuando tus agentes deben hablar **con agentes de otros sistemas/organizaciones**. Conviene **conocerlo estratégicamente** (el eje MCP-vertical / A2A-horizontal, y que ambos están bajo gobernanza neutral de la Linux Foundation —señal de permanencia—) y **no perderte en la sopa de siglas** (ACP y demás), que en 2026 es mayormente contenido de blog.
+
+La frase mental: **en Python las tools se declaran con `@tool` y su docstring ES el prompt que decide su uso; el retrieval del track entra como una tool (agentic retrieval, con permisos y grounding intactos), MCP te trae tools externas estándar (capa vertical) y A2A coordina agente↔agente (capa horizontal, más verde) —el criterio de diseño de tools de [Agentes](agentes.md) no cambia, solo su sintaxis—.**
 
 **Ejercicios 8**
 8.1 ¿De dónde saca el modelo el nombre, la descripción y el schema de una tool definida con `@tool`? ¿Por qué el docstring no es opcional?
 8.2 ¿Cómo entra el RAG del track en un agente, y qué dos cosas de RAG se vuelven más críticas? (conectá con [Agentes](agentes.md) módulo 9)
 8.3 ¿Qué aporta MCP en el mundo Python y qué del modelo mental del agente NO cambia al usarlo?
+8.4 Distinguí MCP de A2A (qué conecta cada uno). ¿Necesitás A2A para coordinar dos agentes dentro de tu mismo proceso? ¿Cuándo sí importaría?
 
 ---
 
@@ -595,6 +600,11 @@ El ejercicio que cierra el módulo y que mostrás en una entrevista de AI Engine
     servicio. No cambia el modelo mental: el agente sigue pidiendo tools y observando resultados;
     cambia de dónde vienen (un protocolo estándar), y siguen aplicando mínimo privilegio, salida no
     confiable y cuidado de credenciales.
+8.4 MCP conecta un agente con sus tools/datos (vertical, hacia adentro); A2A conecta un agente con
+    OTROS agentes (horizontal, hacia los lados), vía Agent Cards que declaran capacidades. Para
+    coordinar agentes DENTRO de tu proceso NO necesitás A2A: lo hace el grafo (LangGraph) o el diálogo
+    (AutoGen). A2A importa cuando tus agentes deben hablar con agentes de otros sistemas/organizaciones;
+    es más nuevo y menos probado que MCP (que ya ganó la capa de tools), así que conocelo, no sobreinviertas.
 ```
 
 ### Módulo 9
