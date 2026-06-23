@@ -67,6 +67,7 @@
   - [🦾 AI Agents en Python (LangGraph/AutoGen)](ai-agents-python.md)
   - [🎙️ Voice AI: STT, TTS y agentes de voz](voice-ai.md)
   - [🚀 Deploy de aplicaciones de IA](deploy-ai.md)
+  - [🛡️ Seguridad de IA y red-teaming](seguridad-ia.md)
 
 - **Track QA / Automation**
   - [🎭 Playwright: E2E de browser](playwright.md)
