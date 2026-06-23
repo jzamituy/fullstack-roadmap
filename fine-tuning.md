@@ -85,6 +85,8 @@ lora_config = LoraConfig(
 )
 
 trainer = SFTTrainer(
+    # API de TRL volátil entre versiones: la firma de SFTTrainer/SFTConfig cambió
+    # (p. ej. tokenizer → processing_class). Verificá la doc de tu versión.
     model="meta-llama/Llama-3.1-8B",
     train_dataset=dataset,       # tus ejemplos {prompt, respuesta deseada}
     peft_config=lora_config,
@@ -163,7 +165,7 @@ El otro gran cambio de 2025-26. Cuando lo que querés mejorar no es el *gusto* s
 - En vez de un reward model aprendido (caro, subjetivo), usás un **verificador determinista**: ¿el código pasa los unit tests? ¿la respuesta matemática es exacta? Eso es el reward. Barato, sin humanos, sin sesgo de juez.
 - El algoritmo dominante es **GRPO** (de DeepSeek-R1): elimina el value model y el critic, normalizando las recompensas dentro de un grupo de respuestas generadas.
 
-> **Segundo one-liner:** **GRPO/RLVR entrena la *competencia*** (qué es *correcto*). No compite con DPO — un pipeline frontier moderno usa ambos: SFT → DPO → RLVR.
+> **Segundo one-liner:** **GRPO/RLVR entrena la *competencia*** (qué es *correcto*). No compite con DPO — un pipeline frontier moderno combina los tres regímenes (SFT + preferencia tipo DPO + verificable tipo RLVR); el **orden exacto varía según el equipo/lab** (no hay un canon único), así que tomá "SFT → DPO → RLVR" como una secuencia habitual, no como ley.
 
 Dos honestidades importantes:
 1. **"Afila, no crea."** Hay evidencia de que RLVR sube el `pass@1` (saca a la superficie capacidad ya latente) más que generar razonamiento genuinamente nuevo. No es magia.

@@ -172,7 +172,7 @@ def call_downstream(user_token: str, action: str): ...
 # 6) HUMAN-IN-THE-LOOP para acciones irreversibles (borrar, gastar, enviar).
 ```
 
-Referencias autoritativas para citar: **OWASP MCP Security Cheat Sheet**, los **MCP Security Best Practices** oficiales (`modelcontextprotocol.io`), **MITRE ATLAS**. La spec de MCP endureció esto en sus revisiones de 2025 (la versión estable vigente es **2025-11-25**): servidores como *OAuth 2.0 Resource Servers*, **prohibición de token passthrough**, validación de *audience* (RFC 8707). La propia spec admite el problema de **"consent fatigue"** (los usuarios aprueban en automático) — otra razón para no depender solo del clic de confirmación.
+Referencias autoritativas para citar: **OWASP MCP Security Cheat Sheet**, los **MCP Security Best Practices** oficiales (`modelcontextprotocol.io`), **MITRE ATLAS**. La spec de MCP endureció esto en sus revisiones de 2025 (la versión estable vigente a esta escritura es **2025-11-25** — dato volátil, **verificá la versión actual en `modelcontextprotocol.io`**, igual que con las fechas del EU AI Act): servidores como *OAuth 2.0 Resource Servers*, **prohibición de token passthrough**, validación de *audience* (RFC 8707). La propia spec admite el problema de **"consent fatigue"** (los usuarios aprueban en automático) — otra razón para no depender solo del clic de confirmación.
 
 ---
 
