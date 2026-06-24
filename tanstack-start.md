@@ -6,6 +6,8 @@
 
 **Lo que asumimos.** React, TypeScript (cómodo con genéricos e inferencia), `async/await`, qué es SSR vs CSR, y haber tocado alguna vez **TanStack Query** (antes React Query). No asume Next.js, pero si lo conocés vas a entender más rápido los contrastes.
 
+> **¿Te falta alguna base?** Si los **genéricos e inferencia** de TS te suenan flojos, repasá [TypeScript](typescript.md) antes de seguir — este módulo se apoya fuerte en el sistema de tipos. Si **SSR vs CSR** o **TanStack Query** te resultan nuevos, dedicales un repaso corto primero: sin esa base, los módulos 3, 5 y 6 te van a costar el doble. Convertir el prerrequisito en rampa, no en muro.
+
 **Para practicar.** Node 20+, y el scaffold oficial:
 
 ```bash
@@ -30,6 +32,8 @@ npx gitpick TanStack/router/tree/main/examples/react/start-basic start-basic
 
 Las soluciones de **todos** los ejercicios están al final, en la sección "Soluciones".
 
+**Tipos de ejercicio** (para que sepas cuándo solo pensar y cuándo abrir el editor): 🔁 recordar · 🧠 criterio/análisis · ✍️ implementación (requiere un proyecto armado).
+
 ---
 
 ## Módulo 1 — Qué es TanStack Start y qué problema resuelve
@@ -43,9 +47,9 @@ La frase mental: **TanStack Start es "tu SPA de React + TanStack Router, pero ah
 **Estado y versión** ⚠️: el **v1.0 Release Candidate** se anunció el **23-sep-2025**. El versionado interno de los paquetes (`@tanstack/react-start`) va muy avanzado (rango `1.16x.x` a mediados de 2026), pero el rótulo oficial en el sitio osciló entre "RC" y "estable" según el momento. **Tratá el estado como "estable de facto, etiqueta conservadora"**: producción-ready para early adopters, pero verificá el badge oficial antes de afirmar "1.0". Soporta hoy **React, Solid y Vue** (paquetes `react-start`, `solid-start`, `vue-start`).
 
 **Ejercicios 1**
-1.1 En una frase, ¿qué es TanStack Start y sobre qué tres piezas se construye?
-1.2 ¿Qué problema concreto resuelve para alguien que ya tiene una SPA de React andando?
-1.3 ¿Por qué conviene tratar con cuidado la afirmación "TanStack Start ya es 1.0 estable"?
+1.1 🔁 En una frase, ¿qué es TanStack Start y sobre qué tres piezas se construye?
+1.2 🔁 ¿Qué problema concreto resuelve para alguien que ya tiene una SPA de React andando?
+1.3 🧠 ¿Por qué conviene tratar con cuidado la afirmación "TanStack Start ya es 1.0 estable"?
 
 ---
 
@@ -57,22 +61,22 @@ La frase mental: **TanStack Start es "tu SPA de React + TanStack Router, pero ah
 
 - **TanStack Start es *client-first* con SSR aditivo.** El SSR es "additive to React — not a replacement". Arrancás del modelo cliente que ya conocés (componentes normales, hooks, estado) y el servidor **suma** capacidades (render inicial, server functions) sin obligarte a partir tu cabeza en dos mundos.
 
-Esto tiene una consecuencia directa sobre **RSC** ⚠️: TanStack Start **está sumando soporte de React Server Components, pero como una *primitiva opt-in*, no como el default**. Existe un paquete dedicado (`@tanstack/react-start-rsc`, todavía `0.x` / experimental a mediados de 2026). En el modelo de Start, un RSC es **"un stream de bytes" (React Flight) — una primitiva de datos más** que producís explícitamente y consumís con los patrones que ya conocés de Query/Router. Es lo opuesto a Next, donde los RSC los tenés por default y "peleás para opt-out".
-
-> **Honestidad obligatoria:** vas a leer artículos de 2026 que dicen "TanStack Start NO soporta RSC". Eso quedó **desactualizado** — sí hay soporte. Pero tampoco es RSC maduro: es nuevo, experimental, y filosóficamente distinto al de Next. El RSC de Next lleva **años** de battle-testing; el de Start recién arranca. **Ninguna de las dos frases extremas ("no lo soporta" / "ya es igual que Next") es cierta.**
-
 La frase mental: **Next te hace pensar desde el servidor hacia afuera; Start te hace pensar desde el cliente hacia adentro.** No hay un ganador universal — hay un encaje según tu app (módulo 10).
 
+> 🔬 **Profundización opcional — RSC en Start** (podés saltearla en una primera lectura; volvé cuando tengas firme la dicotomía de arriba). Una consecuencia de esta filosofía aparece en cómo Start trata los **React Server Components** ⚠️: los **está sumando como una *primitiva opt-in*, no como el default** (paquete `@tanstack/react-start-rsc`, todavía `0.x` / experimental a mediados de 2026; se habilita explícitamente con `rsc: { enabled: true }`). En el modelo de Start, un RSC es **"un stream de bytes" (React Flight) — una primitiva de datos más** que producís y consumís con los patrones que ya conocés de Query/Router. Es lo opuesto a Next, donde los RSC los tenés por default y "peleás para opt-out".
+>
+> **Honestidad:** vas a leer artículos de 2026 que dicen "TanStack Start NO soporta RSC". Eso quedó **desactualizado** — sí hay soporte. Pero tampoco es RSC maduro: es nuevo, experimental, y filosóficamente distinto al de Next, que lleva **años** de battle-testing. **Ninguna de las dos frases extremas ("no lo soporta" / "ya es igual que Next") es cierta.**
+
 **Ejercicios 2**
-2.1 Explicá en tus palabras la diferencia entre "server-first" y "client-first". ¿Cuál describe a Next y cuál a Start?
-2.2 ¿Por qué la frase "TanStack Start no soporta RSC" es a la vez un mito desactualizado y algo que no podés desmentir del todo? Matizalo.
-2.3 Si tu app es un dashboard altamente interactivo con mucho estado en el cliente, ¿cuál de los dos paradigmas te genera menos fricción y por qué?
+2.1 🔁 Explicá en tus palabras la diferencia entre "server-first" y "client-first". ¿Cuál describe a Next y cuál a Start?
+2.2 🧠 ¿Por qué la frase "TanStack Start no soporta RSC" es a la vez un mito desactualizado y algo que no podés desmentir del todo? Matizalo.
+2.3 🧠 Si tu app es un dashboard altamente interactivo con mucho estado en el cliente, ¿cuál de los dos paradigmas te genera menos fricción y por qué?
 
 ---
 
 ## Módulo 3 — Routing type-safe: TanStack Router por debajo
 
-**Teoría.** El routing de Start **es** TanStack Router, y acá está su carta más fuerte: **type-safety de punta a punta en compile time**, sin que escribas anotaciones. Soporta routing **file-based** (un archivo por ruta, generado a un árbol tipado) **o** code-based.
+**Teoría.** El routing de Start **es** TanStack Router, y acá te da algo que en tu SPA tenías que cablear a mano: **type-safety de punta a punta en compile time**, sin que escribas anotaciones. Soporta routing **file-based** (un archivo por ruta, generado a un árbol tipado) **o** code-based.
 
 Una ruta file-based se ve así:
 
@@ -103,9 +107,9 @@ export const Route = createFileRoute('/posts')({
 La frase mental: **en TanStack Router la URL es estado tipado y validado, no un string que rezás que venga bien.**
 
 **Ejercicios 3**
-3.1 ¿Qué significa "type-safety de punta a punta en compile time" aplicado a una ruta? Dá un ejemplo de un error que el compilador atrapa.
-3.2 ¿Por qué tratar los search params como tipados y validables (con Zod) es una ventaja real frente a leerlos como `URLSearchParams`?
-3.3 (Implementación) Escribí una ruta `/products/$category` cuyo loader reciba `category` (tipado) y un search param `sort` validado a `'price' | 'name'` con un default.
+3.1 🔁 ¿Qué significa "type-safety de punta a punta en compile time" aplicado a una ruta? Dá un ejemplo de un error que el compilador atrapa.
+3.2 🧠 ¿Por qué tratar los search params como tipados y validables (con Zod) es una ventaja real frente a leerlos como `URLSearchParams`?
+3.3 ✍️ Escribí una ruta `/products/$category` cuyo loader reciba `category` (tipado) y un search param `sort` validado a `'price' | 'name'` con un default.
 
 ---
 
@@ -130,10 +134,10 @@ export const saveUser = createServerFn({ method: 'POST' })
   })
 ```
 
-**Cómo funciona el RPC por debajo** (esto es lo elegante, y entenderlo te salva de bugs). El compilador —que es un **plugin de Vite**— genera **tres versiones** de cada server function:
+**Cómo funciona el RPC por debajo** (esto es lo elegante, y entenderlo te salva de bugs). El modelo mental primero, así leés lo que sigue sin marearte: **lo que vos escribís como una sola función, el compilador la parte en tres caras** — la misma función vista desde tres lugares distintos. Con esa idea en la cabeza, mirá las tres (el compilador es un **plugin de Vite**):
 
 1. **Handler de servidor**: el body real, vive solo en el server.
-2. **Client stub**: en el bundle del cliente, el body se **reemplaza por un `fetch('/_serverFn/[id]')`** — una llamada HTTP al endpoint que expone el handler.
+2. **Client stub**: en el bundle del cliente, el body se **reemplaza por un `fetch` a un endpoint interno de server functions** (la base es configurable —`TSS_SERVER_FN_BASE`— y por defecto cae bajo un prefijo tipo `/_serverFn/<id>`) — una llamada HTTP al endpoint que expone el handler.
 3. **SSR wrapper**: durante el render en servidor, hace un import dinámico del handler y lo ejecuta **local, sin round-trip HTTP**.
 
 Resultado: escribís una función, la llamás igual desde cliente o server, y el framework resuelve el transporte. Es **type-safe sobre el límite de red** con serialización automática. La frase mental: **una server function es una función que sabés que corre en el server, pero que llamás como si fuera local — el RPC es invisible y tipado.**
@@ -143,10 +147,10 @@ Resultado: escribís una función, la llamás igual desde cliente o server, y el
 **Contraste con Next.js** ⚠️: el equivalente de Next son las **Server Actions** (`"use server"`). Diferencia clave: las Server Actions cruzan un boundary serializado donde **el tipado se rompe** — la Action puede recibir datos que no matchean lo que TS espera, así que **necesitás validación runtime igual**. Las server functions de Start son **RPC tipado de verdad**. Es la diferencia central de type-safety entre ambos (módulo 9).
 
 **Ejercicios 4**
-4.1 ¿Qué es una server function y desde dónde la podés invocar?
-4.2 Explicá las tres versiones que el compilador genera de cada server function y para qué sirve cada una.
-4.3 ¿Por qué una server function NO es lo mismo que un endpoint de API pública? ¿Qué usás si necesitás un webhook?
-4.4 (Trampa común) ¿Cuál es el método canónico hoy para validar el input de una server function, y qué nombre alternativo —deprecado— vas a ver en tutoriales y blogs viejos? ¿Por qué este detalle importa?
+4.1 🔁 ¿Qué es una server function y desde dónde la podés invocar?
+4.2 🔁 Explicá las tres versiones que el compilador genera de cada server function y para qué sirve cada una.
+4.3 🧠 ¿Por qué una server function NO es lo mismo que un endpoint de API pública? ¿Qué usás si necesitás un webhook?
+4.4 🔁 (Trampa común) ¿Cuál es el método canónico hoy para validar el input de una server function, y qué nombre alternativo —deprecado— vas a ver en tutoriales y blogs viejos? ¿Por qué este detalle importa?
 
 ---
 
@@ -173,9 +177,9 @@ ssr: ({ params, search }) => (search.preview ? 'data-only' : true)
 ¿Por qué importa? Porque te da el **control granular** que en un modelo todo-o-nada no tenés. Una ruta que usa `localStorage` o `canvas` no puede correr en el server → `ssr: false`. Una que necesita data pero cuyo render es pesado en cliente → `'data-only'`. Esto es coherente con la filosofía client-first del módulo 2: **el SSR es una capacidad que activás donde suma, no una imposición global.**
 
 **Ejercicios 5**
-5.1 ¿Qué hace el streaming en SSR y qué problema de UX ataca?
-5.2 Explicá las tres variantes de `ssr` por ruta y dá un caso de uso para cada una.
-5.3 Tenés una ruta que renderiza un gráfico con una librería que usa `window`. ¿Qué valor de `ssr` le ponés y por qué?
+5.1 🔁 ¿Qué hace el streaming en SSR y qué problema de UX ataca?
+5.2 🔁 Explicá las tres variantes de `ssr` por ruta y dá un caso de uso para cada una.
+5.3 🧠 Tenés una ruta que renderiza un gráfico con una librería que usa `window`. ¿Qué valor de `ssr` le ponés y por qué?
 
 ---
 
@@ -202,31 +206,35 @@ function Posts() {
 
 La gran ventaja sobre el modelo de Next: si ya vivís en el ecosistema **TanStack Query** (cosa probable si venís de SPA con React), este modelo te resulta **natural** — es el mismo Query que ya usás, ahora con SSR. Tenés SWR, optimistic updates e invalidación granular "gratis", y evitás el re-fetch ciego en cada navegación.
 
-**Contraste con Next.js**: Next usa **async Server Components que hacen `fetch` directo** + el sistema de caché del framework (en Next 16, con "Cache Components" y `"use cache"` opt-in). Es más conciso para páginas content-heavy, pero es **otro modelo mental** de caché que tenés que aprender. Start reusa el que ya conocés.
+**Contraste con Next.js** ⚠️: Next usa **async Server Components que hacen `fetch` directo** + el sistema de caché del framework (en Next 16, con "Cache Components" y `"use cache"` opt-in — nombres/versión a verificar en los docs de Next). Es más conciso para páginas content-heavy, pero es **otro modelo mental** de caché que tenés que aprender. Start reusa el que ya conocés.
 
 **Ejercicios 6**
-6.1 ¿Qué significa que un loader sea "isomórfico" y qué problema de las SPA resuelve?
-6.2 En el patrón loader + Query, ¿por qué el componente no vuelve a hacer fetch si el loader ya trajo la data?
-6.3 ¿Cuál es la ventaja de data loading de Start específicamente para alguien que ya usa TanStack Query en su SPA?
+6.1 🔁 ¿Qué significa que un loader sea "isomórfico" y qué problema de las SPA resuelve?
+6.2 🔁 En el patrón loader + Query, ¿por qué el componente no vuelve a hacer fetch si el loader ya trajo la data?
+6.3 🧠 ¿Cuál es la ventaja de data loading de Start específicamente para alguien que ya usa TanStack Query en su SPA?
 
 ---
 
 ## Módulo 7 — El motor por debajo: Vite + Nitro (y por qué murió Vinxi)
 
-**Teoría.** Acá hay un cambio histórico que **invalida casi todos los tutoriales viejos**, así que prestá atención.
+**Teoría.** Acá hay un cambio reciente que te va a ahorrar horas peleando con tutoriales que ya no aplican, así que prestá atención.
 
 **Cómo es hoy** ⚠️:
 - En **desarrollo**, Start usa el **dev server de Vite directamente** (cold start de cientos de ms, no segundos).
-- Para **producción**, construye con **Nitro** (el motor de servidor sobre H3), que hace el deploy **"adapterless"**: elegís un preset y deployás a cualquier target sin reescribir nada.
-- Se configura con el **plugin `tanstackStart()` en `vite.config.ts`**.
+- Para **producción**, el camino **"adapterless"** es vía **Nitro** (el motor de servidor sobre H3): agregás su plugin (`nitro()`) y elegís un preset (Node, Bun, Vercel…) para deployar a cualquier target sin reescribir nada. **Ojo:** no es universal — Cloudflare y Netlify usan **plugins de Vite dedicados** (`@cloudflare/vite-plugin`, `@netlify/vite-plugin-tanstack-start`) y no pasan por el preset de Nitro.
+- Se configura con el **plugin `tanstackStart()` en `vite.config.ts`** (más `viteReact()`, ver abajo).
 
 ```ts
 // vite.config.ts (forma ACTUAL)
 import { defineConfig } from 'vite'
 import { tanstackStart } from '@tanstack/react-start/plugin/vite'
+import viteReact from '@vitejs/plugin-react'
 
 export default defineConfig({
-  plugins: [tanstackStart()],
+  plugins: [
+    tanstackStart(),
+    viteReact(), // OBLIGATORIO: el plugin de React va DESPUÉS del de Start, o el JSX no se transforma
+  ],
 })
 ```
 
@@ -240,9 +248,9 @@ export default defineConfig({
 La lección de fondo (y esto es criterio senior): **Start es nuevo, y "nuevo" significa que la documentación de terceros envejece rápido.** Cuando trabajes con tecnología joven, **la fuente de verdad son los docs oficiales y los releases**, no el primer blog que aparece en Google. Es así de fácil.
 
 **Ejercicios 7**
-7.1 ¿Qué hace Vite en Start y qué hace Nitro? ¿En qué etapa interviene cada uno?
-7.2 ¿Qué significa que el deploy sea "adapterless" y qué ventaja te da?
-7.3 Encontrás un tutorial que te dice de configurar Start con `defineConfig` de `@tanstack/react-start/config` y Vinxi. ¿Qué hacés y por qué?
+7.1 🔁 ¿Qué hace Vite en Start y qué hace Nitro? ¿En qué etapa interviene cada uno?
+7.2 🔁 ¿Qué significa que el deploy sea "adapterless" y qué ventaja te da?
+7.3 🧠 Encontrás un tutorial que te dice de configurar Start con `defineConfig` de `@tanstack/react-start/config` y Vinxi. ¿Qué hacés y por qué?
 
 ---
 
@@ -274,14 +282,14 @@ src/
 
 La convención de sufijos (`.functions.ts` / `.server.ts` / `.ts`) **no es obligatoria pero es buena práctica**: deja claro de un vistazo qué código puede llegar al cliente y cuál nunca. Es Screaming Architecture aplicada al boundary cliente/servidor.
 
-**Deploy (presets de Nitro)** ⚠️: `node-server`, `cloudflare-workers`, `netlify`, `vercel`, `bun`, `railway`, y más. Cloudflare y Netlify usan plugins de Vite dedicados. Los partners oficiales destacados son **Cloudflare, Netlify y Railway**.
+**Deploy** ⚠️: los presets oficiales hoy son `cloudflare-workers`, `netlify`, `railway`, `nitro`, `vercel`, `node-server`, `bun` y `appwrite-sites` (y la lista crece). Recordá la distinción del módulo 7: varios targets (Node, Bun, Vercel, nitro) van por el camino **adapterless de Nitro**, pero **Cloudflare y Netlify usan plugins de Vite dedicados**. Los partners oficiales destacados son **Cloudflare, Netlify y Railway**.
 
 **Ecosistema**: ejemplos oficiales con Clerk, Convex, Supabase, WorkOS, Material UI, React Query y tRPC; e integración profunda con el resto de TanStack (Query, Form, Store, Table).
 
 **Ejercicios 8**
-8.1 ¿Para qué sirve la convención de sufijos `.functions.ts` / `.server.ts` / `.ts`? ¿Qué deja explícito?
-8.2 ¿Qué rol cumple `__root.tsx`?
-8.3 Tu empresa exige self-hosting on-prem (nada de Vercel, por residencia de datos). ¿El deploy de Start es un problema? ¿Por qué?
+8.1 🔁 ¿Para qué sirve la convención de sufijos `.functions.ts` / `.server.ts` / `.ts`? ¿Qué deja explícito?
+8.2 🔁 ¿Qué rol cumple `__root.tsx`?
+8.3 🧠 Tu empresa exige self-hosting on-prem (nada de Vercel, por residencia de datos). ¿El deploy de Start es un problema? ¿Por qué?
 
 ---
 
@@ -301,6 +309,8 @@ La convención de sufijos (`.functions.ts` / `.server.ts` / `.ts`) **no es oblig
 | **Deploy** | Óptimo en Vercel; self-host con asteriscos | Agnóstico vía Nitro (Node, CF, Bun, Lambda) |
 | **Madurez / ecosistema** ⚠️ | Enorme (~130K stars, años en producción) | Joven (v1 reciente; el ecosistema base sí es maduro) |
 
+> ⚠️ **Sobre los datos de Next.js de esta tabla y sección** (versión "16", "Turbopack default", "Cache Components", "~130K stars", detalles del lock-in de Vercel): no son verificables desde el repo de TanStack. Tratalos como volátiles y contrastalos contra los docs oficiales de **Next.js / Vercel**. El contraste conceptual (Server Actions vs Server Functions tipadas) sí es estructural.
+
 **Las tres diferencias que realmente deciden:**
 
 1. **Server-first vs client-first (lo filosófico, módulo 2).** No es una feature: es cómo pensás la app entera. Next: boundaries server/client todo el tiempo, RSC maduro. Start: arrancás del cliente, el server suma. Ganás transparencia y control en Start, pero escribís más "plumbing" que en Next, donde mucho es implícito.
@@ -316,15 +326,15 @@ La convención de sufijos (`.functions.ts` / `.server.ts` / `.ts`) **no es oblig
 > - El RSC de Next sigue siendo **el más maduro hoy**; el de Start es más transparente pero más nuevo y más manual.
 
 **Ejercicios 9**
-9.1 Nombrá las tres diferencias que realmente deciden entre Start y Next, y explicá una en profundidad.
-9.2 ¿Por qué se dice que en type-safety Start es "netamente superior"? Dá el ejemplo concreto de Server Actions vs Server Functions.
-9.3 "Next.js te encierra en Vercel." ¿Es literalmente cierto? Matizá la afirmación con dos ejemplos concretos de qué sufre Next self-hosteado.
+9.1 🔁 Nombrá las tres diferencias que realmente deciden entre Start y Next, y explicá una en profundidad.
+9.2 🧠 ¿Por qué se dice que en type-safety Start es "netamente superior"? Dá el ejemplo concreto de Server Actions vs Server Functions.
+9.3 🧠 "Next.js te encierra en Vercel." ¿Es literalmente cierto? Matizá la afirmación con dos ejemplos concretos de qué sufre Next self-hosteado.
 
 ---
 
 ## Módulo 10 — El criterio: cuándo SÍ y cuándo NO usarlo
 
-**Teoría.** El cierre, que es lo que separa al que sigue modas del que decide con criterio. **No hay un ganador universal — hay un encaje.** El mismo principio que recorre todo: *la mejor herramienta es la que resuelve tu problema real, y la decisión se mide contra tu contexto, no contra el hype de Twitter.*
+**Teoría.** El cierre: acá convertís todo lo anterior en una decisión que podés defender. **No hay un ganador universal — hay un encaje.** El mismo principio que recorre todo: *la mejor herramienta es la que resuelve tu problema real, y la decisión se mide contra tu contexto, no contra el hype de Twitter.*
 
 **Elegí Next.js si:**
 - Sitio **content-heavy**: marketing, e-commerce, CMS, blogs — donde brillan SSG, ISR y el RSC maduro.
@@ -347,9 +357,9 @@ La convención de sufijos (`.functions.ts` / `.server.ts` / `.ts`) **no es oblig
 **El consejo que vale oro, de la propia comunidad:** **"No migres por migrar."** No reescribas un Next que funciona. La performance sola (bundles más chicos, dev server más rápido) **no justifica** un rewrite. Probá Start en un proyecto nuevo que encaje con su perfil, o migrá ruta por ruta. La frase mental de cierre: **elegí el framework por el encaje con tu app y tu equipo, no por cuál salió en el último video de YouTube.** Es así de fácil.
 
 **Ejercicios 10**
-10.1 Tu equipo arranca un **SaaS dashboard** nuevo, todos vienen de SPA con TanStack Query, y el deploy es en Cloudflare. ¿Cuál elegís y por qué?
-10.2 Te toca un **e-commerce** con foco en SEO, mucho contenido estático, deploy en Vercel, y necesitás sumar 3 devs rápido. ¿Cuál elegís y por qué?
-10.3 Tenés una app en Next.js que funciona bien en producción. Un compañero quiere migrarla a Start "porque es más rápido y más moderno". ¿Qué le respondés?
+10.1 🧠 Tu equipo arranca un **SaaS dashboard** nuevo, todos vienen de SPA con TanStack Query, y el deploy es en Cloudflare. ¿Cuál elegís y por qué?
+10.2 🧠 Te toca un **e-commerce** con foco en SEO, mucho contenido estático, deploy en Vercel, y necesitás sumar 3 devs rápido. ¿Cuál elegís y por qué?
+10.3 🧠 Tenés una app en Next.js que funciona bien en producción. Un compañero quiere migrarla a Start "porque es más rápido y más moderno". ¿Qué le respondés?
 
 ---
 
@@ -392,7 +402,7 @@ export const Route = createFileRoute('/products/$category')({
 
 **4.1** Es lógica que **solo corre en el servidor** (DB, env, fs) pero invocable **desde cualquier lado** —loaders, componentes, hooks, otras server functions— como una función normal y type-safe. El framework resuelve el transporte.
 
-**4.2** (1) **Handler de servidor**: el body real, solo vive en el server. (2) **Client stub**: en el bundle del cliente el body se reemplaza por un `fetch('/_serverFn/[id]')`. (3) **SSR wrapper**: durante el render en server, importa el handler dinámicamente y lo ejecuta **local, sin HTTP**. Así la misma llamada funciona desde cliente (vía fetch) o desde server (local).
+**4.2** (1) **Handler de servidor**: el body real, solo vive en el server. (2) **Client stub**: en el bundle del cliente el body se reemplaza por un `fetch` a un endpoint interno de server functions (base configurable, por defecto bajo un prefijo tipo `/_serverFn/<id>`). (3) **SSR wrapper**: durante el render en server, importa el handler dinámicamente y lo ejecuta **local, sin HTTP**. Así la misma llamada funciona desde cliente (vía fetch) o desde server (local).
 
 **4.3** Porque es un **RPC same-origin** con CSRF middleware por defecto, pensado para que tu propio frontend hable con tu backend — no para exponer una API pública. Para un **webhook** (que viene de un tercero, cross-origin) o una API REST de verdad, usás **server routes**.
 
