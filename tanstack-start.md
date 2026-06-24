@@ -123,7 +123,7 @@ export const getServerTime = createServerFn().handler(async () => {
 
 // Mutación con validación de input
 export const saveUser = createServerFn({ method: 'POST' })
-  .inputValidator((d: { id: string; name: string }) => d) // ⚠️ se llama inputValidator, NO validator
+  .validator((d: { id: string; name: string }) => d) // método canónico; acepta una fn o un schema (Zod, etc.)
   .handler(async ({ data }) => {
     // data está tipado; acá tocás la DB, env, fs...
     return db.user.update(data)
@@ -146,7 +146,7 @@ Resultado: escribís una función, la llamás igual desde cliente o server, y el
 4.1 ¿Qué es una server function y desde dónde la podés invocar?
 4.2 Explicá las tres versiones que el compilador genera de cada server function y para qué sirve cada una.
 4.3 ¿Por qué una server function NO es lo mismo que un endpoint de API pública? ¿Qué usás si necesitás un webhook?
-4.4 (Trampa común) ¿Cómo se llama el método para validar el input de una server function? ¿Por qué este detalle importa?
+4.4 (Trampa común) ¿Cuál es el método canónico hoy para validar el input de una server function, y qué nombre alternativo —deprecado— vas a ver en tutoriales y blogs viejos? ¿Por qué este detalle importa?
 
 ---
 
@@ -235,7 +235,7 @@ export default defineConfig({
 > ⚠️ **Las tres correcciones que te salvan de tutoriales desactualizados:**
 > 1. Ya **NO se usa Vinxi** ni `@tanstack/react-start/config` → es el plugin `tanstackStart()` en `vite.config.ts`.
 > 2. El scaffold actual es **`npx @tanstack/cli@latest create`**, no `create-tsrouter-app` ni `create-start-app`.
-> 3. El validador de server functions es **`inputValidator`**, no `validator`.
+> 3. El validador de server functions es **`.validator()`** (acepta una función o un schema tipo Zod). Vas a ver `.inputValidator()` en blogs y tutoriales: hoy está **deprecado** (el código fuente lo marca `@deprecated` con el mensaje "Use `validator` instead") — ambos funcionan, pero usá `validator`.
 
 La lección de fondo (y esto es criterio senior): **Start es nuevo, y "nuevo" significa que la documentación de terceros envejece rápido.** Cuando trabajes con tecnología joven, **la fuente de verdad son los docs oficiales y los releases**, no el primer blog que aparece en Google. Es así de fácil.
 
@@ -396,7 +396,7 @@ export const Route = createFileRoute('/products/$category')({
 
 **4.3** Porque es un **RPC same-origin** con CSRF middleware por defecto, pensado para que tu propio frontend hable con tu backend — no para exponer una API pública. Para un **webhook** (que viene de un tercero, cross-origin) o una API REST de verdad, usás **server routes**.
 
-**4.4** Se llama **`inputValidator`** (no `validator`). Importa porque es un error común —incluso los LLMs lo equivocan— y usar el nombre viejo te da un fallo silencioso o de tipos difícil de rastrear.
+**4.4** El método canónico es **`.validator()`** (acepta una función validadora o un schema tipo Zod). El nombre alternativo es **`.inputValidator()`**, que hoy está **deprecado** (el código fuente lo marca `@deprecated` con "Use `validator` instead"; ambos siguen funcionando porque apuntan a la misma implementación). Importa porque es justo el tipo de dato que cambia entre versiones: vas a encontrar blogs y respuestas que usan `inputValidator` y te conviene saber que el canónico hoy es `validator`. La lección de fondo: en tecnología joven, **verificá contra los docs/código oficial, no contra el primer blog.**
 
 **5.1** El streaming manda el HTML al cliente **apenas está listo**, en chunks, en vez de esperar a renderizar todo. Ataca el **time-to-first-byte / contenido visible**: el usuario ve algo antes, y las partes lentas (que esperan data) llegan después sin bloquear el resto.
 
