@@ -11,6 +11,7 @@
 
 - **Full Stack web (React)**
   - [▲ TanStack Start vs Next.js](tanstack-start.md)
+  - [🧩 React Server Components a fondo](rsc.md)
 
 - **Backend**
   - **NestJS**
