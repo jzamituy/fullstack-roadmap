@@ -9,6 +9,9 @@
 - **TypeScript**
   - [📘 Teoría + ejercicios](typescript.md)
 
+- **Full Stack web (React)**
+  - [▲ TanStack Start vs Next.js](tanstack-start.md)
+
 - **Backend**
   - **NestJS**
     - [🦅 NestJS](nestjs.md)
