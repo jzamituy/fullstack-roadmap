@@ -10,6 +10,7 @@
   - [📘 Teoría + ejercicios](typescript.md)
 
 - **Full Stack web (React)**
+  - [⚛️ React: hooks y Context desde los fundamentos](react-fundamentos.md)
   - [▲ TanStack Start vs Next.js](tanstack-start.md)
   - [🧩 React Server Components a fondo](rsc.md)
   - [🧱 Microfrontends robustos](microfrontends.md)
