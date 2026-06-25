@@ -1,6 +1,6 @@
 # Microfrontends robustos: del concepto a producción
 
-**Module Federation, resiliencia y aislamiento · ejemplos en React · 2026**
+**Module Federation, resiliencia, aislamiento y multi-framework · ejemplos en React, Angular y Vue · 2026**
 
 > Cómo usar esta guía: leé la teoría de cada módulo, hacé los ejercicios **sin mirar las soluciones**, y contrastá al final. Este módulo es la cara **arquitectónica** de la sección [Full Stack web (React)](tanstack-start.md): no es sobre una herramienta, es sobre **cómo partir un frontend grande entre varios equipos sin que se vuelva un caos**. El foco está en lo que casi nadie te enseña: la **robustez** — qué pasa cuando un pedazo falla, cómo aislás estilos y código, cómo versionás. El "hello world" de Module Federation lo encontrás en cualquier lado; un microfrontend que no se cae en producción, no.
 
@@ -23,6 +23,7 @@
 8. Routing y comunicación entre microfrontends
 9. Testing, observabilidad y governance
 10. El criterio: cuándo NO usar microfrontends
+11. Multi-framework en el mundo real: cómo conviven React, Angular y Vue (y cómo se comunican)
 
 Las soluciones de **todos** los ejercicios están al final, en la sección "Soluciones".
 
@@ -418,6 +419,268 @@ La frase mental de cierre: **microfrontends resuelven un problema de organigrama
 
 ---
 
+## Módulo 11 — Multi-framework en el mundo real: cómo conviven React, Angular y Vue (y cómo se comunican)
+
+**Teoría.** Hasta acá todo fue **React con React**. Pero el mundo real es más sucio: terminás con React, Angular, Vue y un legacy en jQuery **en la misma página**. Y ojo —esto no se elige porque sí—. Casi siempre llegás acá por una de tres razones honestas:
+
+1. **Migración incremental** de un legacy: querés pasar de AngularJS/jQuery a React **sin un rewrite big-bang** (lo vemos al final, es el mejor caso de uso).
+2. **Adquisiciones / fusiones:** dos empresas se juntan, cada una traía su stack, y de un día para el otro hay que mostrarlas en un solo producto.
+3. **Equipos autónomos** que —ejerciendo la autonomía que el microfrontend les promete— eligieron frameworks distintos.
+
+Pero antes de entusiasmarte, el criterio senior, y lo dice Luca Mezzalira (el autor canónico del tema, ex-DAZN): **no arranques un greenfield mezclando frameworks.** Multi-framework es una **capacidad de alto impuesto**, no un default. Volvé al shopping: que un local sea una hamburguesería y el de al lado una zapatería está bien; que CADA local hable un idioma distinto y use enchufes distintos es un costo que pagás todos los días. Mezclás frameworks cuando **el beneficio organizacional supera ese impuesto** —migración, adquisición, autonomía real— y lo tratás como **transición**, no como destino.
+
+Este módulo tiene un corazón: **cómo se comunican y comparten datos pedazos hechos en frameworks distintos** (sección 11.5). Todo lo demás existe para llegar bien preparado a esa pregunta. El recorrido:
+
+- **11.1 — el idioma común** (Web Components): cómo un framework habla con los demás.
+- **11.2 — el portero** (single-spa): quién decide qué pedazo se monta y cuándo.
+- **11.3 — el límite** (Module Federation entre frameworks): qué se puede federar y qué no.
+- **11.4 — el costo** (Hydra of Lerna): qué pagás por sumar frameworks.
+- **11.5 — 🫀 EL CORAZÓN** (comunicación y datos): cómo se hablan los pedazos.
+- **11.6 — la realidad** (casos): quién lo hizo de verdad y qué aprendió.
+- **11.7 — cuándo SÍ** (migración strangler fig): el caso de uso que lo justifica.
+
+### 11.1 — Web Components: la lingua franca
+
+Si React no entiende a Angular y Angular no entiende a Vue, **¿qué entienden todos?** La plataforma. Un **custom element** (`class X extends HTMLElement` + `customElements.define('mi-widget', X)`) es un elemento del DOM de verdad, con su ciclo de vida (`connectedCallback`, `disconnectedCallback`, `attributeChangedCallback`). Cualquier framework que renderice HTML puede **renderizarlo**; cualquiera que escuche eventos del DOM puede **escucharlo**. El contrato de interoperabilidad es **la plataforma misma** (atributos, propiedades, eventos del DOM, slots), no el modelo de componentes de ningún framework. Esa es la lingua franca.
+
+> ⚠️ Dato volátil (mediados de 2026): en `custom-elements-everywhere.com` —el scoreboard de referencia— React, Angular, Vue, Svelte, Lit y compañía puntúan **100%**. Pero ojo: que React llegara al 100% recién pasó con **React 19** (dic 2024). Si tu host es React 18 o anterior, lo de abajo NO aplica del todo.
+
+Pensalo como el **enchufe estándar del shopping**: cada local (cada framework) es distinto por dentro, pero todos respetan la misma toma de corriente. Esa toma es el custom element. Y tiene dos lados: **exportar** (publicar tu pedazo para que otro lo enchufe) y **consumir** (enchufar un pedazo ajeno).
+
+**Exportar** — publicar un pedazo como custom element:
+
+| Framework | Cómo se exporta | Soporte |
+|---|---|---|
+| **Angular** | `@angular/elements` + `createCustomElement(Component, { injector })`. Los `@Input()` se mapean a atributos dash-case; los `@Output()` emiten un `CustomEvent` con los datos en `event.detail` | de primera |
+| **Vue 3** | `defineCustomElement(MiComp)` devuelve un constructor de `HTMLElement` listo para `customElements.define` | de primera |
+| **React** | NO tiene API nativa: subclaseás `HTMLElement` a mano y montás con `createRoot(...).render(<App/>)` dentro del `connectedCallback` | artesanal ⚠️ |
+
+(El caso React es el más áspero: además de manual, la delegación de eventos de React se complica dentro de un Shadow DOM.)
+
+**Consumir** — enchufar un custom element ajeno. Acá el dolor histórico fue React:
+
+| Framework | Cómo se consume |
+|---|---|
+| **React 19** | Si la prop coincide con una propiedad del elemento, la asigna como **propiedad** (pasan objetos y arrays bien); los eventos custom se escuchan con prefijo `on` (`onsay-hi={...}` escucha `say-hi`). Antes de React 19 serializaba las props no-string a string (`[1,2,3]` → `"1,2,3"`) y no podías bindear eventos de forma declarativa |
+| **Angular** | `CUSTOM_ELEMENTS_SCHEMA` habilita usar elementos custom (dash-case) en el template sin que Angular se queje. En la práctica, con `[prop]="x"` setea la propiedad del DOM (así pasás objetos limpio) — comportamiento práctico, no documentado como tal; conviene aislar el elemento en un wrapper |
+| **Vue** | `compilerOptions.isCustomElement` para que el compilador no trate a `<mi-widget>` como un componente Vue |
+
+**Shadow DOM, el aislamiento que ya viste en el módulo 7**, ahora en clave cross-framework: te da scoping de CSS real entre equipos, pero las propiedades heredables (`color`, `font-family`) igual se filtran, y un design system global **no puede entrar**... salvo por un canal: **las CSS custom properties (variables CSS) SÍ atraviesan el límite del Shadow DOM**. Por eso los **design tokens como variables CSS** son el puente recomendado para mantener coherencia visual sin romper el aislamiento.
+
+### 11.2 — single-spa: el orquestador agnóstico de frameworks
+
+Module Federation resuelve "cómo cargo código de otro equipo", pero deja una pregunta abierta: **¿quién es el portero que decide qué pedazo se monta en cada ruta —y lo desmonta cuando te vas?** En el shopping es la administración: decide qué local abre según en qué pasillo estás. En microfrontends multi-framework ese portero es **single-spa**: un orquestador top-level que gestiona el **ciclo de vida** y el **routing** de apps independientes, varias en la misma página, sin refresh.
+
+Cada app expone funciones de ciclo de vida asíncronas:
+- **`bootstrap`** (una vez), **`mount`** (cuando su ruta se activa), **`unmount`** (cuando se desactiva — **acá limpiás DOM y listeners**, clave para no leakear).
+
+El root config registra apps y dice cuándo están activas:
+
+```js
+// root-config.js
+import { registerApplication, start } from 'single-spa'
+
+registerApplication({
+  name: '@org/navbar-react',
+  app: () => import('@org/navbar-react'),
+  activeWhen: () => true,            // siempre montada
+})
+registerApplication({
+  name: '@org/checkout-angular',
+  app: () => import('@org/checkout-angular'),
+  activeWhen: ['/checkout'],         // solo en /checkout
+})
+registerApplication({
+  name: '@org/dashboard-vue',
+  app: () => import('@org/dashboard-vue'),
+  activeWhen: ['/dashboard'],
+})
+start()
+```
+
+single-spa observa la URL y monta/desmonta cada app según su `activeWhen`. Si dos activeWhen son verdaderos a la vez, **las dos apps se montan juntas** (un navbar React + una página Angular conviviendo). Cada framework se envuelve con su adapter: `single-spa-react`, `single-spa-angular`, `single-spa-vue`.
+
+**¿single-spa o Module Federation?** No es "o" — son **complementarios**: single-spa **orquesta** (routing + ciclo de vida), MF **comparte código**. El setup recomendado de single-spa usa **import maps** para que React/Angular/Vue se descarguen **una sola vez** y las apps los compartan. La doc oficial pide elegir **import maps O module federation** para las deps compartidas, no mezclar los dos mecanismos.
+
+### 11.3 — Module Federation entre frameworks: qué SÍ y qué NO
+
+Pregunta del millón: **¿puedo federar un remote Vue dentro de un host React?** Respuesta honesta: podés **cargarlo** (`loadRemote('vueRemote/x')` te devuelve el módulo), pero **los componentes NO interoperan**. ¿Por qué? Cada framework mantiene su propio **árbol interno** de componentes y un **motor** que lo sincroniza con el DOM — en React ese árbol son las *fibras* y el motor es el *reconciliador*; Vue tiene los suyos. Son **dos cerebros que no comparten neuronas**: `react-dom` no sabe renderizar un componente Vue, y al revés igual. En el shopping: dos locales con cajas registradoras incompatibles. Si intentás bridgear ingenuamente, **con cada re-render del host el componente Vue pierde su estado**. (Esto es razonamiento sobre cómo funcionan los runtimes, no una cláusula de la doc de MF.)
+
+Y dos cosas que se rompen seguro:
+- **NO podés compartir `react` como `singleton` entre frameworks.** El `shared` deduplica dentro de la **misma familia**; Angular y Vue ni siquiera importan React. (El código compilado de Angular usa APIs internas donde el semver ni aplica.)
+- **Los dos runtimes se cargan igual.** Host React + remote Angular = los dos runtimes bootstrappeados en la misma pestaña.
+
+**El patrón que SÍ funciona:** que el remote no exponga un componente crudo, sino una **función de montaje agnóstica de framework**. El contrato es: el host te pasa **un nodo del DOM + props**, y el remote monta SU propio framework adentro y te devuelve un `unmount`. Module Federation oficializó este patrón con el nombre **Bridge** (`createBridgeComponent` / `createRemoteAppComponent`, con un lifecycle `render`/`destroy`); lo de abajo es la versión a mano del mismo concepto, para que veas el mecanismo sin magia.
+
+```ts
+// remote Vue — expone una función de montaje, no un componente Vue
+import { createApp } from 'vue'
+import Widget from './Widget.vue'
+
+export function mount(el: HTMLElement, props: Record<string, unknown> = {}): () => void {
+  const app = createApp(Widget, props)
+  app.mount(el)
+  return () => app.unmount()   // el host llama esto al desmontar
+}
+```
+
+```tsx
+// host React — monta el remote agnóstico en un nodo que él controla
+import { useEffect, useRef } from 'react'
+import { loadRemote } from '@module-federation/enhanced/runtime'
+
+type RemoteModule = { mount: (el: HTMLElement, props?: Record<string, unknown>) => () => void }
+
+export function VueIsland(props: { userId: string }) {
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    let unmount: (() => void) | undefined
+    loadRemote<RemoteModule>('vueRemote/Widget').then((mod) => {
+      if (ref.current && mod) unmount = mod.mount(ref.current, props)
+    })
+    return () => unmount?.()    // limpieza: React desmonta → Vue desmonta
+  }, [props])
+  return <div ref={ref} />
+}
+```
+
+Fijate el patrón: **React es dueño del nodo del DOM, Vue es dueño de lo que pasa adentro**, y el límite es un contrato chico (`mount(el, props) => unmount`). Sin pelearse por el árbol de fibras.
+
+### 11.4 — El costo real: N runtimes en memoria ("Hydra of Lerna")
+
+Mezzalira tiene un nombre para el anti-patrón: **"Hydra of Lerna"** — la hidra mitológica a la que, por cada cabeza que cortabas, le crecían dos. Acá es igual: **cada framework que sumás hace crecer DOS costos a la vez, bundle y memoria.** Los frameworks **no están diseñados para bootstrappearse juntos en la misma pestaña**: en el shopping sería tener **tres generadores eléctricos prendidos** para abrir un solo local. Cargar React + Angular + Vue significa:
+
+- ⚠️ **Payload (cifras volátiles, verificá en `bundlephobia.com` con fecha):** React + ReactDOM ≈ 45KB gz **en React 18** (ojo: en React 19 `react-dom` se reestructuró y bundlephobia lo reporta como un re-export delgado de ~1.4KB, que NO es comparable; el runtime real en el browser sigue pesando lo suyo), Vue ≈ 42-45KB gz (full build 3.5.x; el runtime-only es menor), Angular bastante más (es multi-paquete). En conjunto, **140KB+ gz de runtime ANTES de una sola línea de tu producto**.
+- **N reconciliadores en memoria**, cada uno con su loop de render y su sistema de reactividad.
+
+Mitigaciones: **compartir el runtime dentro de cada familia** (un solo React para todos los MFEs React), **lazy-load** de las islas de otro framework (no cargues Angular hasta que el usuario pise `/checkout`), y **limitar la diversidad** (dos frameworks no son tres). La regla de Geers es contundente: *"Avoid Micro Frontends Anarchy"*.
+
+### 11.5 — Comunicación y datos entre frameworks (el corazón del módulo)
+
+Acá está lo que casi nadie te explica bien. **¿Cómo le pasa datos un MFE React a uno Angular?** Y la primera respuesta es entender qué **NO** podés hacer:
+
+> **No podés compartir un React Context con Angular. Punto.** Un Context de React, la inyección de dependencias de Angular, el `provide/inject` de Vue — **son construcciones internas del runtime de cada framework**. El Context de React vive en SU árbol de fibras; Angular no tiene forma de verlo. Dos runtimes bootstrappeados por separado **no comparten ningún grafo de objetos.**
+
+Entonces, ¿qué comparten? **Solo la plataforma del navegador**: el DOM, `window`, los `CustomEvent`, la **URL**, el **web storage** y `BroadcastChannel`. Eso es todo lo que tienen en común. Y de ahí sale el mantra que repiten Mezzalira, Geers y la propia doc de single-spa:
+
+> **NO COMPARTAS ESTADO, COMPARTÍ EVENTOS.**
+
+Igual que en el módulo 8, ordenamos los mecanismos de **menor a mayor acoplamiento** — pero ahora el filtro es más duro, porque tiene que funcionar **entre frameworks distintos**:
+
+| Mecanismo | Acoplamiento | Cross-framework | Para qué |
+|---|---|---|---|
+| **URL / routing** | mínimo | ✅ nativo | "en qué sección/recurso estamos" |
+| **CustomEvents (event bus)** | bajo | ✅ nativo | "pasó algo" (se agregó al carrito, se deslogueó) |
+| **Web storage + `storage`/`BroadcastChannel`** | bajo-medio | ✅ nativo | estado persistente o entre pestañas |
+| **Props/callbacks en el límite de montaje** | medio | ✅ (vía mount function) | datos tipados que el host baja al remote |
+| **Store global compartido (Redux/NgRx)** | máximo | ❌ ni siquiera funciona bien | — (anti-patrón, ver abajo) |
+
+**El caballo de batalla es el event bus sobre `CustomEvent`** porque es lo único verdaderamente común y desacoplado: el emisor **no sabe quién escucha**. Es el **sistema de altavoces del shopping**: un local anuncia "promoción en caja 3" y lo escucha quien quiera, sin que el que habla sepa quién está oyendo. Veámoslo con código — un bus chiquito, tipado, que vive en el `window`:
+
+```ts
+// shared/event-bus.ts — agnóstico de framework. Vive sobre window.
+// El "contrato" es el NOMBRE del evento + el SHAPE del detail.
+type MfeEventMap = {
+  'cart:add': { sku: string; qty: number }
+  'auth:logout': { reason: string }
+}
+
+export function emit<K extends keyof MfeEventMap>(type: K, detail: MfeEventMap[K]): void {
+  window.dispatchEvent(new CustomEvent(type, { detail }))
+}
+
+export function on<K extends keyof MfeEventMap>(
+  type: K,
+  handler: (detail: MfeEventMap[K]) => void,
+): () => void {
+  const listener = (e: Event) => handler((e as CustomEvent<MfeEventMap[K]>).detail)
+  window.addEventListener(type, listener)
+  return () => window.removeEventListener(type, listener) // devolvés el "off" para limpiar
+}
+```
+
+Ahora **el mismo evento `cart:add`, emitido desde React y escuchado desde Angular y Vue al mismo tiempo:**
+
+```tsx
+// MFE en REACT — emite
+import { emit } from 'shared/event-bus'
+
+export function AddToCart({ sku }: { sku: string }) {
+  return <button onClick={() => emit('cart:add', { sku, qty: 1 })}>Agregar</button>
+}
+```
+
+```ts
+// MFE en ANGULAR — escucha (y limpia en ngOnDestroy)
+import { Component, OnDestroy, signal } from '@angular/core'
+import { on } from 'shared/event-bus'
+
+@Component({ selector: 'cart-badge', template: `🛒 {{ count() }}` }) // standalone es el default desde Angular 19
+export class CartBadge implements OnDestroy {
+  count = signal(0)
+  private off = on('cart:add', ({ qty }) => this.count.update((n) => n + qty))
+  ngOnDestroy(): void { this.off() } // sin esto, leak: el listener sobrevive al desmontaje
+}
+```
+
+```vue
+<!-- MFE en VUE — escucha (y limpia en onUnmounted) -->
+<script setup lang="ts">
+import { ref, onUnmounted } from 'vue'
+import { on } from 'shared/event-bus'
+
+const count = ref(0)
+const off = on('cart:add', ({ qty }) => { count.value += qty })
+onUnmounted(off) // misma disciplina de limpieza que Angular
+</script>
+
+<template>🛒 {{ count }}</template>
+```
+
+**Lo que tenés que ver acá:** React no sabe que existen Angular ni Vue. Solo grita "`cart:add`" al `window`. Los otros dos, cada uno en su runtime, **escuchan el mismo evento del navegador** y reaccionan con SU propio sistema de reactividad (signals en Angular, refs en Vue). **Cero acoplamiento de código entre ellos.** Y fijate la disciplina repetida: **siempre limpiás el listener al desmontar** (`ngOnDestroy`, `onUnmounted`, el cleanup de `useEffect`) — si no, en un orquestador como single-spa que monta y desmonta apps, los listeners se acumulan y tenés un leak.
+
+**Tres advertencias finales sobre datos compartidos:**
+
+1. **El `detail` es un contrato implícito sin tipos compartidos.** Ese `MfeEventMap` tipado es lindo en el código fuente, pero **en runtime no hay nada que lo valide**: cada MFE compila por separado, así que en el navegador el evento es solo un string y un objeto. Si el emisor cambia el shape del `detail`, **rompe a los oyentes en runtime, sin error de compilación** — exactamente el problema de contract testing del módulo 9, recargado. **Versioná y documentá el shape de cada evento.**
+2. **La URL es tu mejor amiga.** Para "qué producto/sección estamos viendo", no inventes un evento: ponelo en la URL. Es declarativo, bookmarkeable, lo lee cualquier framework con `location`, y es el contrato de **menor** acoplamiento que existe.
+3. **El store global compartido es el anti-patrón, recargado.** Compartir un Redux entre React y Angular no solo recrea el monolito (módulo 8): es que **ni siquiera funciona bien**, porque Angular no se entera de los cambios del store de React sin pegamento manual. single-spa lo dice explícito: **evitá librerías de estado global entre MFEs.** Si necesitás un mínimo transversal (ej. el usuario logueado), pasalo por evento + storage, no por un store compartido.
+
+### 11.6 — Casos del mundo real (con honestidad)
+
+Teoría linda, pero **¿quién hizo esto de verdad?** Y, más importante, **¿qué aprendieron?** (Ojo: varios de estos posts son históricos, de 2017-2021 — léelos como "qué decidieron entonces", no como "el estado del arte hoy".)
+
+- **Spotify — y por qué ABANDONÓ la idea en la web.** En desktop, cada página era una app aislada en su propio **iframe**. Cuando llevaron eso a la web, lo **descartaron**: cada iframe traía su propio JS/CSS sin deps compartidas → *"long load times"* y *"demasiado complejo para el web player"*. Migraron a una SPA React+Redux y en 2021 unificaron el desktop sobre esa misma base. **La lección:** el aislamiento total (iframes) se paga en performance; a veces el monolito moderno gana.
+- **IKEA — composición en el servidor.** Gustaf Nilsson Kotte: modelo de "páginas y fragmentos" compuestos principalmente con **Edge Side Includes (ESI)** — los servicios exponen HTML listo y el consumidor lo transcluye. Server-side, no runtime JS.
+- **Zalando — la evolución honesta.** Empezaron con **Mosaic/Tailor** (un servicio que streamea layout componiendo `<fragment src=...>`). Para 2018 los fragmentos les dieron **inconsistencia de UX** y una barrera de entrada alta → los reemplazaron por su **Interface Framework** (Entities + Renderers). **La lección:** una arquitectura de MFE puede ser un paso evolutivo que después reemplazás.
+- **DAZN — Mezzalira y el "decisions framework".** Split **vertical** (un equipo dueño de una vista entera como SPA independiente), el app shell **carga UN MFE a la vez** (no varios frameworks juntos en pantalla — esquivan la Hydra), routing en el borde con CloudFront + Lambda@Edge, estado por APIs de bootstrap. Principio: **"duplicación antes que abstracción"**.
+- **American Express — One App** (open source): SSR en Node + composición de módulos vía un registro central (un `module-map.json`). En producción interna desde ~2016, open-source desde ~2019. **La lección:** los microfrontends también viven en el server, no solo en el browser.
+
+### 11.7 — El mejor caso de uso honesto: migración incremental (strangler fig)
+
+Si te quedás con UNA sola razón para mezclar frameworks, que sea esta. El patrón **strangler fig** (Martin Fowler, 2004) viene de la higuera estranguladora: la enredadera crece alrededor del árbol hasta sostenerse sola y el árbol original muere. Aplicado al software: **reemplazás el sistema legacy pieza por pieza**, mientras seguís entregando features — en vez del **big-bang rewrite**, que *"se cae en llamas la mayoría de las veces"*.
+
+Los microfrontends son la herramienta perfecta para hacerlo **en el frontend**: ponés un shell (o single-spa) que enruta a "lo viejo o lo nuevo", y vas **estrangulando** el AngularJS/jQuery legacy una ruta a la vez, reemplazándola por React, **sin pedirle a nadie que pare a reescribir todo**. Casos documentados:
+
+- **Canopy Tax:** migrando de AngularJS a React en la misma página fue **lo que dio origen a single-spa**. Lo más difícil: lograr que la SPA legacy **limpie todo en su `unmount`**.
+- **Smartly.io:** de AngularJS a React vía un "bridge component"; llegaron a **más del 41% en React** sin rewrite, porque el rewrite era *"demasiado riesgoso"*.
+
+> ⚠️ **El riesgo que nadie te cuenta:** el **"in-between permanente"** — la migración que **nunca termina** y te quedás manteniendo DOS frameworks para siempre (lo peor de ambos mundos, de nuevo el "distributed monolith" del módulo 10). Sam Newman, en *Monolith to Microservices*, insiste en lo mismo: planificá la **baja del legacy** y ponele fecha. Si no, no estás migrando: estás acumulando.
+
+La frase mental de cierre: **entre frameworks no compartís objetos, compartís la plataforma — eventos, URL, storage. Web Components y single-spa te dejan convivir; el event bus te deja comunicar; pero el multi-framework es un impuesto que solo vale la pena para migrar, fusionar o por autonomía real. Tratalo como un puente, no como una casa.**
+
+**Ejercicios 11**
+11.1 🔁 ¿Qué es un custom element y por qué se lo llama la "lingua franca" entre frameworks? Nombrá cómo exporta uno Angular y cómo lo arregló React 19 para consumirlos.
+11.2 🧠 ¿Qué hace single-spa y qué hace Module Federation? ¿Por qué se dice que son **complementarios** y no alternativas?
+11.3 🧠 ¿Por qué federar un componente Vue dentro de un host React "no interopera", y cuál es el patrón que SÍ funciona para montarlo?
+11.4 🧠 ¿Qué es la "Hydra of Lerna" y qué dos costos concretos pagás al cargar React + Angular + Vue en la misma pestaña? Dá una mitigación.
+11.5 🔁 ¿Por qué no podés compartir un React Context con un MFE hecho en Angular? ¿Qué es lo ÚNICO que comparten dos frameworks bootstrappeados por separado?
+11.6 🧠 Explicá el mantra "no compartas estado, compartí eventos". ¿Por qué un store global (Redux) compartido entre React y Angular es peor todavía que entre dos MFEs React?
+11.7 ✍️ Escribí un event bus tipado y agnóstico de framework sobre `window`: una función `emit(type, detail)` y una `on(type, handler)` que devuelva una función para **dar de baja** el listener. Tipá los eventos con un mapa.
+11.8 ✍️ Usando ese bus, tenés un MFE en React que emite `auth:logout` con `{ reason: string }` y un MFE en Vue que muestra un cartel cuando eso pasa. Escribí el emisor (React) y el oyente (Vue), incluyendo la **limpieza** del listener.
+11.9 🧠 Vas a migrar un frontend AngularJS legacy a React con strangler fig. ¿Cuál es el principal riesgo del patrón y cómo lo evitás?
+
+---
+
 ## Soluciones
 
 > Llegaste hasta acá habiendo intentado los ejercicios, ¿no? Bien. Contrastá.
@@ -559,6 +822,77 @@ El **límite de dueño** está en el `/*`: el host declara `/checkout/*` (es due
 
 **10.3** **Separación por dominio y code-splitting**: con workspaces, módulos por dominio y lazy routes, ya obtenés boundaries claros entre features y bajás solo el código de la página que el usuario visita. Eso cubre la mayor parte del beneficio "técnico" de los microfrontends **sin** el costo de runtime federado, duplicación de deps ni coordinación de versiones entre equipos.
 
+
+
+**11.1** Un **custom element** es un elemento del DOM real definido por vos (`class X extends HTMLElement` + `customElements.define`), con ciclo de vida propio. Es la "lingua franca" porque el contrato de interoperabilidad es **la plataforma** (atributos, propiedades, eventos del DOM, slots), que **todos** los frameworks entienden — no el modelo de componentes de ninguno. Angular lo exporta con **`@angular/elements` + `createCustomElement(Component, { injector })`**. React 19 arregló el **consumo**: ahora asigna las props que coinciden con una propiedad del elemento como **propiedades** (pasan objetos/arrays, antes los serializaba a string) y permite escuchar eventos custom con prefijo `on` (`onsay-hi`).
+
+**11.2** **single-spa orquesta; Module Federation comparte código.** single-spa es el **portero**: decide qué app (de qué framework) se monta en cada ruta, gestiona su ciclo de vida (bootstrap/mount/unmount) y maneja el routing top-level. Module Federation resuelve otra cosa: **cómo un host carga código de un remote en runtime** y cómo comparten dependencias. Son complementarios porque cubren ejes distintos —routing/ciclo de vida vs. carga/sharing de código—: podés usar single-spa para orquestar y MF (o import maps) para cargar y compartir. La doc de single-spa solo pide no **mezclar los dos mecanismos de sharing** de deps third-party (elegí import maps **o** MF), pero a nivel de arquitectura conviven sin problema.
+
+**11.3** No interopera porque cada framework tiene su propio árbol interno y su motor de render: `react-dom` solo sabe renderizar **fibras de React** (su árbol + su reconciliador); un componente Vue corre sobre el renderer y la reactividad de **Vue**. Son dos cerebros que no comparten neuronas. Si lo bridgeás ingenuamente, con cada re-render del host el componente Vue **pierde su estado**. El patrón que SÍ funciona: el remote expone una **función de montaje agnóstica** —`mount(el, props) => unmount`—; el host React le da **un nodo del DOM que él controla** y Vue monta su propia app adentro. React es dueño del nodo, Vue de lo que pasa dentro; el límite es un contrato chico (MF lo oficializa como patrón **Bridge**).
+
+**11.4** La **"Hydra of Lerna"** (término de Mezzalira) es el anti-patrón de bootstrappear varios frameworks en la misma pestaña, para lo que **no fueron diseñados** — por cada framework que sumás crecen dos costos a la vez. Dos costos concretos: (1) **payload** — el runtime de los tres (≈140KB+ gz ⚠️) se descarga **antes** de tu código de producto; (2) **N reconciliadores en memoria**, cada uno con su render loop y su sistema de reactividad. Mitigación (cualquiera): compartir el runtime dentro de la misma familia (un solo React), lazy-load de las islas de otro framework, o limitar la diversidad de frameworks.
+
+**11.5** No podés porque un React Context es una **construcción interna del runtime de React** — vive en su árbol de fibras, y Angular (con su propio runtime y su DI) no tiene forma de verlo. Dos frameworks bootstrappeados por separado **no comparten ningún grafo de objetos**. Lo ÚNICO que comparten es **la plataforma del navegador**: el DOM, `window`, los `CustomEvent`, la URL, el web storage y `BroadcastChannel`.
+
+**11.6** "No compartas estado, compartí eventos" significa: en vez de un objeto de estado común que todos leen y mutan (acoplamiento máximo), emitís **eventos** de "pasó algo" y cada MFE reacciona con su propio estado interno; el emisor no sabe quién escucha (acoplamiento mínimo). Un Redux compartido entre React y Angular es **peor** que entre dos MFEs React porque, además de recrear el monolito, **ni siquiera funciona**: la reactividad de Redux está atada a React; Angular no se entera de los cambios sin pegamento manual (suscripciones + disparar change detection a mano). O sea: pagás el acoplamiento y encima no obtenés la reactividad.
+
+**11.7**
+```ts
+// shared/event-bus.ts — agnóstico de framework, vive sobre window
+type MfeEventMap = {
+  'auth:logout': { reason: string }
+  // ...más eventos del contrato
+}
+
+export function emit<K extends keyof MfeEventMap>(type: K, detail: MfeEventMap[K]): void {
+  window.dispatchEvent(new CustomEvent(type, { detail }))
+}
+
+export function on<K extends keyof MfeEventMap>(
+  type: K,
+  handler: (detail: MfeEventMap[K]) => void,
+): () => void {
+  const listener = (e: Event) => handler((e as CustomEvent<MfeEventMap[K]>).detail)
+  window.addEventListener(type, listener)
+  return () => window.removeEventListener(type, listener) // el "off"
+}
+```
+Las claves: el mapa `MfeEventMap` + los genéricos `K extends keyof MfeEventMap` hacen que `emit`/`on` estén **tipados** (el `detail` se infiere por el nombre del evento). `on` devuelve la función de baja para que cada framework la llame al desmontar. Y ojo: ese tipado **solo existe en el código fuente** — en runtime el evento es un string y un objeto, así que el shape es un contrato implícito (módulo 9).
+
+**11.8**
+```tsx
+// MFE React — emite
+import { emit } from 'shared/event-bus' // emit('auth:logout', { reason })
+
+export function LogoutButton() {
+  return (
+    <button onClick={() => emit('auth:logout', { reason: 'user-click' })}>
+      Salir
+    </button>
+  )
+}
+```
+```vue
+<!-- MFE Vue — escucha y LIMPIA -->
+<script setup lang="ts">
+import { ref, onUnmounted } from 'vue'
+import { on } from 'shared/event-bus'
+
+const mensaje = ref<string | null>(null)
+const off = on('auth:logout', ({ reason }) => {
+  mensaje.value = `Sesión cerrada (${reason})`
+})
+onUnmounted(off) // sin esto, el listener sobrevive al desmontaje → leak
+</script>
+
+<template>
+  <div v-if="mensaje" class="banner">{{ mensaje }}</div>
+</template>
+```
+La clave: React solo despacha el `CustomEvent` al `window` (no conoce a Vue); Vue lo escucha y reacciona con su propio `ref`. Y el `onUnmounted(off)` garantiza que, si el MFE Vue se desmonta (ej. en single-spa), el listener se va con él.
+
+**11.9** El principal riesgo es el **"in-between permanente"**: la migración nunca termina y quedás manteniendo **dos frameworks para siempre** — la complejidad distribuida sin el beneficio (un "distributed monolith", módulo 10). Lo evitás **planificando la baja del legacy y poniéndole fecha** (Sam Newman): tratás la coexistencia como un estado **transitorio con deadline**, medís el avance (% migrado) y priorizás cerrar la migración, no solo abrir features nuevas en lo nuevo.
+
 ---
 
-> **Para seguir.** La fuente de verdad de este módulo son `module-federation.io`, `webpack.js.org`, `rspack.rs` y el artículo de [Micro Frontends de Cam Jackson en martinfowler.com](https://martinfowler.com/articles/micro-frontends.html). Antes de implementar, re-verificá lo marcado con ⚠️ — versiones y nombres de paquetes de MF, el comportamiento exacto de `strictVersion`, y las opciones de Vite. El puente natural: [TanStack Start](tanstack-start.md) y [RSC](rsc.md) para el lado de cada app, y el track de arquitectura para los patrones de boundaries.
+> **Para seguir.** La fuente de verdad de este módulo son `module-federation.io`, `webpack.js.org`, `rspack.rs` y el artículo de [Micro Frontends de Cam Jackson en martinfowler.com](https://martinfowler.com/articles/micro-frontends.html). Para el módulo multi-framework (11), sumá: `single-spa.js.org`, el scoreboard `custom-elements-everywhere.com`, [micro-frontends.org de Michael Geers](https://micro-frontends.org/), las guías de Web Components de [angular.dev](https://angular.dev/guide/elements) y [vuejs.org](https://vuejs.org/guide/extras/web-components.html), el [strangler fig de Fowler](https://martinfowler.com/bliki/StranglerFigApplication.html), y el libro *Building Micro-Frontends* de Luca Mezzalira (2ª ed., 2025). Antes de implementar, re-verificá lo marcado con ⚠️ — versiones y nombres de paquetes de MF, el comportamiento exacto de `strictVersion`, las opciones de Vite, el soporte de custom elements de React 19, y las cifras de bundle size. El puente natural: [TanStack Start](tanstack-start.md) y [RSC](rsc.md) para el lado de cada app, y el track de arquitectura para los patrones de boundaries.
