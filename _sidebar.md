@@ -50,6 +50,7 @@
   - [🛠️ AWS hands-on con CDK](aws-practica.md)
 
 - **Arquitectura**
+  - [🧯 SOLID: los cinco principios](solid.md)
   - [🧱 Domain-Driven Design](ddd.md)
   - [🔀 Event-driven aplicada](event-driven.md)
 
