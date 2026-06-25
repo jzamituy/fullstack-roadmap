@@ -37,6 +37,7 @@
 
 - **DevOps**
   - [🐳 Docker, deploy y CI/CD](docker-deploy.md)
+  - [⚖️ Reverse proxy y capa web](reverse-proxy.md)
   - [☸️ Kubernetes: orquestación](kubernetes.md)
   - [🔭 Observabilidad práctica](observabilidad.md)
 
