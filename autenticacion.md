@@ -6,6 +6,8 @@
 
 **Lo que asumimos.** Que ya tenés usuarios persistidos en PostgreSQL (módulo anterior) y que entendés guards, providers y DI de NestJS. El dominio sigue siendo el mismo: **usuarios** que se registran, inician sesión y acceden a sus **proyectos** y **tareas**.
 
+> **¿Te falta alguna base?** Auth se apoya en dos cosas concretas. (1) **Guards y DI de NestJS**: los tokens se validan en un guard y los servicios de auth se inyectan; si eso te suena nuevo, repasá [NestJS](nestjs.md) (módulo 8, guards) antes de seguir. (2) **Usuarios en PostgreSQL**: hasheás contraseñas y guardás sesiones contra una tabla real, así que si no hiciste [PostgreSQL](postgresql.md), el registro y el login te van a costar el doble. Convertir el prerrequisito en rampa, no en muro.
+
 **Para practicar.** Vas a necesitar:
 
 ```bash

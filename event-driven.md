@@ -6,6 +6,8 @@
 
 **Lo que asumimos.** El archivo senior (consistencia/transacciones, resiliencia, DDD), los módulos de PostgreSQL (transacciones), Redis (colas, idempotencia) y AWS (EventBridge/SQS/Step Functions), y el módulo de patrones (CQRS+Mediator).
 
+> **¿Te falta alguna base?** Esta página es de las más avanzadas del hub: une piezas de varios módulos, así que es rampa, no muro. Consistencia, transacciones y resiliencia salen de [NestJS senior](nestjs-senior.md); las transacciones a nivel base, de [PostgreSQL](postgresql.md); colas e idempotencia, de [Redis](redis.md); los servicios de mensajería, de [AWS](aws.md); y CQRS+Mediator, de [Patrones en NestJS](nestjs-patrones.md). Sin esas bases, los patrones Outbox y Saga te van a parecer magia. Convertir el prerrequisito en rampa, no en muro.
+
 **Advertencia honesta.** Casi todo lo de esta página es **complejidad que se justifica solo en sistemas distribuidos o dominios complejos**. En un monolito con una sola base, una transacción ACID resuelve el 90% de esto. Lo aprendés para saber **cuándo** te hace falta y para no aplicarlo donde sobra — que es la marca de un Tech Lead, no coleccionar patrones.
 
 **Índice de módulos**

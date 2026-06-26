@@ -6,6 +6,8 @@
 
 **Lo que asumimos.** Tu "Task API" con Postgres, auth (JWT), tests, deploy y Redis. Reusamos todo: autenticamos sockets con tu JWT y escalamos WebSockets con tu Redis.
 
+> **¿Te falta alguna base?** Acá no construimos un backend nuevo: le **agregamos** tiempo real al que ya tenés. Autenticamos cada socket con tu [JWT](autenticacion.md) y escalamos WebSockets entre instancias con tu [Redis](redis.md), así que si auth o Redis te quedaron flojos, repasalos antes — sin eso, los módulos de autenticación de sockets y de escalado te van a costar el doble. Convertir el prerrequisito en rampa, no en muro.
+
 **Para practicar.** NestJS usa **Socket.IO** por defecto para WebSockets:
 
 ```bash

@@ -4,6 +4,10 @@
 
 > Cómo usar esta guía: leé la teoría de cada módulo, hacé los ejercicios **sin mirar las soluciones**, y contrastá al final. Ya tenés una "Task API" con base, auth y tests. Falta lo que la convierte en un producto: empaquetarla para que corra **igual en cualquier lado** (Docker), automatizar que cada cambio se valide solo (CI/CD) y dejarla **desplegada con una URL pública**. Esto no es opcional para tu portfolio: el roadmap exige que cada proyecto esté "desplegado, con README, tests y diagrama". Un proyecto que no se puede correr ni ver vale la mitad en una entrevista.
 
+**Lo que asumimos.** Que ya tenés una API backend funcionando con base de datos, auth y tests (la "Task API" del roadmap) — Docker empaqueta algo que ya existe, no es el punto de partida. Manejo básico de la terminal y de Git/GitHub.
+
+> **¿Te falta alguna base?** Docker no enseña a construir la app: la **empaqueta**. Si todavía no tenés un backend que corra localmente, volvé a [NestJS](nestjs.md) primero — vas a dockerizar y desplegar *eso*. Y el pipeline de CI/CD del módulo 5 corre **tus tests** antes de mergear, así que si testing te resultó flojo, pegale una mirada a [Testing](testing.md): sin esa base, el módulo de CI no tiene de qué agarrarse. Convertir el prerrequisito en rampa, no en muro.
+
 **Por qué importa.** Docker es **must-have** en 2026 (aparece en casi toda oferta). Y un pipeline de CI/CD que corre tus tests (el módulo anterior) antes de mergear es lo que hace que "tener tests" sirva de verdad: nadie puede romper `main` sin que el sistema lo frene.
 
 **Para practicar.** Necesitás Docker instalado (`docker -v`, `docker compose version`) y una cuenta gratis en una plataforma de deploy (Railway, Render o Fly.io). El repo ya en GitHub (para Actions).

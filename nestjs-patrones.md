@@ -4,6 +4,10 @@
 
 > Cómo usar esta página: leé la teoría de cada módulo, intentá los ejercicios **sin mirar las soluciones**, y contrastá al final. Los ejemplos asumen que ya configuraste un proyecto Nest (`nest new`) con `tsconfig` estricto y `experimentalDecorators` activado (viene por defecto). No hace falta correr todo: el objetivo es entender el *porqué* de cada patrón. Los snippets **omiten los imports** por brevedad (`@nestjs/common`, `class-validator`, `class-transformer`, `rxjs`, `@nestjs/cqrs`); en un proyecto real los traés de esos paquetes.
 
+**Lo que asumimos.** Que ya hiciste [NestJS](nestjs.md) (módulos, controladores, providers, DI básica) y que manejás TypeScript con soltura (clases, interfaces, genéricos, decoradores). Acá no explicamos qué es un provider: lo damos por sabido y vamos al *porqué* de cada patrón.
+
+> **¿Te falta alguna base?** Estos patrones son la capa de *criterio* arriba de NestJS, no una intro. Si los módulos, la DI o el patrón Repository todavía te resultan nuevos, hacé primero [NestJS](nestjs.md) — sin esa base, el módulo 1 (IoC/DI) y el 4 (Repository) te van a costar el doble. Y como casi todo se apoya en interfaces y genéricos, si el sistema de tipos de TS te tiembla, repasá [TypeScript](typescript.md) (clases e interfaces, módulo 10). Convertir el prerrequisito en rampa, no en muro.
+
 **Índice**
 1. Inversión de Control e Inyección de Dependencias (DI)
 2. Patrón Módulo

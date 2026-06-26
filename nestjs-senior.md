@@ -4,6 +4,10 @@
 
 > Esta página es densa a propósito. La idea no es memorizar, sino entender *por qué* cada decisión y *cuándo* conviene lo contrario. Cada sección tiene teoría clara, pros y contras, y código solo donde ayuda a ver el porqué. Al final hay **casos de decisión** (con soluciones) para entrenar criterio, que es lo que realmente evalúan en una entrevista Senior.
 
+**Lo que asumimos.** NestJS sólido ([NestJS](nestjs.md)) y los [patrones de diseño en NestJS](nestjs-patrones.md) (DI, Repository, CQRS+Mediator), TypeScript a fondo, y haber sentido el dolor de decisiones de arquitectura en un proyecto real. Esto es nivel criterio, no sintaxis.
+
+> **¿Te falta alguna base?** Esta página entrena *criterio Senior*: asume que el "cómo" ya lo tenés y discute el "por qué" y el "cuándo NO". Si todavía estás peleando con la mecánica de Nest (providers, módulos, pipeline de request), hacé primero [NestJS](nestjs.md) y [Patrones en NestJS](nestjs-patrones.md) — sin eso, las secciones de arquitectura y DI avanzada te van a costar el doble. La intro a DDD (sección 2) se profundiza en [DDD](ddd.md). Convertir el prerrequisito en rampa, no en muro.
+
 **Contenido**
 1. Criterio de arquitectura (el tema central)
 2. Domain-Driven Design (DDD)

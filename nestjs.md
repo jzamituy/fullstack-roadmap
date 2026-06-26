@@ -4,6 +4,10 @@
 
 > Cómo usar esta guía: leé la teoría de cada módulo, hacé los ejercicios **sin mirar las soluciones**, y recién después contrastá con la sección final. NestJS es un framework de Node.js sobre TypeScript que usa **decoradores** y **inyección de dependencias**; si venís de React, pensalo como "Angular para el backend". Para practicar, arrancá un proyecto con `npm i -g @nestjs/cli` y `nest new mi-api` (o probá los snippets mentalmente; el foco acá es entender los patrones). El `tsconfig` que genera el CLI ya viene en modo estricto y con `experimentalDecorators` + `emitDecoratorMetadata`. Este último, junto con `reflect-metadata`, es lo que habilita la **DI por tipo**: Nest lee el tipo del parámetro del constructor para saber qué inyectar. Por eso las **clases** se inyectan sin token, pero las **interfaces** (que no existen en runtime) sí lo necesitan.
 
+**Lo que asumimos.** TypeScript con soltura (clases, interfaces, genéricos, decoradores y modificadores de acceso), Node.js (`npm`, módulos, `async/await`) y nociones de HTTP (request/response, métodos GET/POST, status codes). Si venís de Angular, la DI y los decoradores te van a resultar familiares.
+
+> **¿Te falta alguna base?** Nest se para sobre dos pilares. (1) El **sistema de tipos de TS**: la inyección de dependencias lee el tipo del constructor en runtime, así que clases, interfaces y decoradores no son opcionales acá. Si los ves flojos, repasá [TypeScript](typescript.md) —sobre todo clases e interfaces (módulo 10)— antes de seguir, o los módulos 3, 5 y 11 te van a costar el doble. (2) **Node por dentro**: Nest es una capa sobre el módulo `http` de Node; si el ciclo de vida de un request o el event loop te suenan nuevos, pegale una mirada a [Node por dentro](nodejs.md). Convertir el prerrequisito en rampa, no en muro.
+
 **Índice de módulos**
 1. Arquitectura: módulos, controladores y providers
 2. Controladores y rutas HTTP
