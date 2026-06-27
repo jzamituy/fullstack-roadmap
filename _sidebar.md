@@ -57,6 +57,7 @@
   - [🧯 SOLID: los cinco principios](solid.md)
   - [🧱 Domain-Driven Design](ddd.md)
   - [🔀 Event-driven aplicada](event-driven.md)
+  - [🏛️ Diseño de sistemas backend](system-design.md)
 
 - **Mobile**
   - [📱 Mobile System Design](mobile-system-design.md)
