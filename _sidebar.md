@@ -23,6 +23,8 @@
   - **Node.js**
     - [⚙️ Node.js por dentro](nodejs.md)
     - [🚂 Express: routing, middleware y APIs](express.md)
+  - **GraphQL**
+    - [🔗 GraphQL a fondo: schema, N+1 y cliente](graphql.md)
 
 - **Bases de datos**
   - [🐘 PostgreSQL + ORM](postgresql.md)
