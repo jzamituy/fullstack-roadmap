@@ -326,7 +326,7 @@ GET  /{shortCode}           → 301/302 redirect
 Tabla: `shortCode (PK) | longUrl | createdAt`. El `shortCode` es el corazón.
 
 **4. La decisión clave — generar el shortCode.** Opciones:
-- **Hash del URL (ej. MD5) y tomar 7 chars:** riesgo de colisión y dos URLs iguales dan el mismo code (¿querés eso?).
+- **Hash del URL (ej. MD5) y tomar 7 chars:** el problema no es la fortaleza de MD5, es que al **truncar** a 7 chars colapsás el espacio a ~62⁷ y aparecen colisiones (paradoja del cumpleaños) → necesitás detección de colisión + reintento con otro slice/salt. Además dos URLs iguales dan el mismo code (¿querés eso?).
 - **Contador autoincremental + Base62:** un número global que codificás en `[a-zA-Z0-9]` (62 símbolos). 7 chars Base62 = 62⁷ ≈ **3.5 billones (3.5×10¹²)** de combinaciones. Sin colisiones por diseño. El reto: el contador global es un cuello de botella → se resuelve con **rangos pre-asignados** (cada instancia toma un bloque de 1000 ids y los reparte localmente).
 
 **5. Escala (donde duele = las lecturas).** El redirect es lo caliente: va a **caché** (Redis) `shortCode → longUrl` con altísimo hit rate (los links populares se visitan mucho); miss → base → poblar caché. Una **CDN** delante puede cachear los redirects más populares. La base, con **read replicas** porque es lectura-intensiva.
@@ -481,6 +481,7 @@ async function reintentarConBackoff<T>(
   fn: () => Promise<T>,
   maxIntentos: number,
 ): Promise<T> {
+  if (maxIntentos < 1) throw new RangeError("maxIntentos debe ser >= 1");
   let ultimoError: unknown;
   for (let intento = 0; intento < maxIntentos; intento++) {
     try {
@@ -546,5 +547,8 @@ class TokenBucket {
 Cuando estos 12 módulos te salgan fluidos, tenés lo que de verdad evalúan en una entrevista de diseño senior: **un método para encarar cualquier problema y el criterio para justificar cada trade-off.** Recomendado a continuación:
 
 - **Practicá el método en voz alta** con problemas clásicos: feed de red social, chat en tiempo real, sistema de notificaciones, rate limiter distribuido, "diseñá YouTube/Uber/WhatsApp". Lo importante no es la respuesta, es el recorrido (requisitos → estimación → diseño → trade-offs).
+- **Auto-evaluate con el [checklist de entrevista](system-design-checklist.md):** los conceptos senior/staff que el interviewer inyecta (consenso, quórums, watermarks, consistent hashing, etc.), cada uno resuelto en 4 capas, con el mapa hacia el módulo que lo profundiza.
+- **Profundizá donde el método se queda corto:** este módulo da el criterio; los cinco módulos del roadmap de system design lo llevan a fondo — [Consenso](consenso.md), [Replicación](replicacion.md), [Streams](streams.md), [Datos a escala](datos-escala.md) y [Building blocks](building-blocks.md), cada uno con su laboratorio.
+- **Practicá con casos resueltos:** el [Banco de casos](system-design-casos.md) aplica este mismo método de punta a punta en 8 sistemas (feed, chat, typeahead, pagos, etc.).
 - **Conectá con los módulos del hub:** cada decisión de este módulo se implementa en otro — caché en [Redis](redis.md), eventos en [Event-driven](event-driven.md), datos en [PostgreSQL](postgresql.md), operación en [Observabilidad](observabilidad.md), orquestación en [Kubernetes](kubernetes.md).
 - **Diseñá tu propio proyecto del portfolio "a escala imaginaria":** tomá tu "Task API" y escribí un documento de una página respondiendo "¿qué cambiaría si tuviera 10M de usuarios?". Ese ejercicio, hecho con honestidad (sin sobre-diseñar), demuestra criterio senior.
