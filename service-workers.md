@@ -22,8 +22,9 @@
 7. Estrategias de caching (cache-first, network-first, stale-while-revalidate…)
 8. Versionado y actualización: el usuario "atascado" en una versión vieja
 9. Más allá del offline: Push, Background Sync y Periodic Sync
-10. Limitaciones, trampas y debugging
-11. El criterio: cuándo un Service Worker paga (y cuándo es over-engineering)
+10. El lado servidor en Node: web-push, el `manifest` y los headers correctos
+11. Limitaciones, trampas y debugging
+12. El criterio: cuándo un Service Worker paga (y cuándo es over-engineering)
 
 Las soluciones de **todos** los ejercicios están al final, en la sección "Soluciones".
 
@@ -66,7 +67,7 @@ Tres consecuencias prácticas que tenés que internalizar desde ya:
 2. **Es efímero.** El browser **termina** el service worker cuando está ocioso (a veces en segundos) y lo **revive** cuando llega un evento (un `fetch`, un `push`). Por eso **no podés guardar estado en variables globales** y esperar que sobreviva: entre dos eventos, todo se borra. El estado va a IndexedDB o a la Cache API.
 3. **Es asíncrono hasta la médula.** No hay APIs síncronas de almacenamiento (nada de `localStorage`). Todo es `Promise`.
 
-La frase mental: **pensalo como una función serverless (tipo AWS Lambda) que vive en el browser**: sin estado entre invocaciones, despertada por eventos, y muerta apenas termina. Esa analogía te ahorra el 80% de los bugs de principiante.
+La frase mental: **pensalo como una función serverless (tipo AWS Lambda) que vive en el browser**: sin estado entre invocaciones, despertada por eventos, y muerta apenas termina. Esa analogía te ahorra el 80% de los bugs de principiante. (Un matiz, para no estirarla de más: la analogía es por el **ciclo** —se despierta ante eventos y muere ocioso—, **no** por la concurrencia. Hay **una sola instancia** del service worker por scope, no un pool que escala como Lambda.)
 
 **Ejercicios 2**
 2.1 🔁 ¿Por qué no podés acceder al `document` desde un service worker?
@@ -96,7 +97,7 @@ Tres reglas que **siempre** confunden:
 - **El scope lo define la ubicación del archivo.** Un service worker controla las páginas que estén **dentro de su carpeta o más abajo**. Un `sw.js` en la **raíz** (`/sw.js`) controla **todo el sitio**. Uno en `/app/sw.js` controla solo `/app/...`. Por eso casi siempre lo querés en la raíz. (Podés ampliar el scope con el header `Service-Worker-Allowed`, pero no reducirlo más allá de la ubicación del archivo.)
 - **Registrar ≠ controlar (la primera vez).** Cuando registrás un service worker por primera vez, la página que lo registró **no queda controlada todavía**. El control empieza en la *próxima* carga (salvo que fuerces `clients.claim()`, módulo 4). Esto descoloca a todos al principio: "lo registré pero el `fetch` no se dispara". Es esperado.
 
-La frase mental: **el scope es geográfico (por URL), no por importación. Archivo en la raíz = control total; archivo enterrado = control parcial.**
+La frase mental: **el scope lo define el path del archivo `sw.js`, no dónde lo registrás ni qué importás. Archivo en la raíz = control de todo el origen; archivo enterrado = control solo de esa subcarpeta hacia abajo.**
 
 **Ejercicios 3**
 3.1 🔁 ¿Por qué los service workers exigen HTTPS, y cuál es la única excepción?
@@ -209,9 +210,9 @@ Reglas que evitan los dolores típicos:
 - **Devolvés una `Promise<Response>`.** Puede venir de la caché, de `fetch()`, o construida a mano (`new Response('...')`).
 - **No interceptes lo que no debés.** Requests `POST`/`PUT` (mutaciones), llamadas a analytics, requests a otros orígenes que no controlás… normalmente conviene **dejarlas pasar** (no llamar `respondWith`). Cachear un `POST` no tiene sentido y la Cache API ni siquiera lo permite por defecto.
 - **Cuidado con cachear respuestas malas.** Antes de guardar una respuesta nueva, verificá que sea válida (`response.ok`, status correcto). Cachear un 404 o un 500 te deja sirviendo basura desde la caché.
-- **Las respuestas `opaque`.** Cuando hacés fetch *cross-origin* sin CORS (modo `no-cors`), recibís una respuesta **opaca**: no podés leer su status ni su contenido, y ocupa más cuota de la que parece. Cacheá opacas solo si sabés lo que hacés.
+- **Las respuestas `opaque`.** Cuando hacés fetch *cross-origin* sin CORS (modo `no-cors`), recibís una respuesta **opaca**: no podés leer su status ni su contenido, y ocupa más cuota de la que parece. Ojo con un detalle que confunde: en una respuesta opaca, **`response.ok` siempre es `false`** y `status` es `0`, así que **no podés usar `response.ok` como criterio** para decidir si cachearla. Cachear opacas es una decisión explícita (y cara en cuota): hacela solo si sabés lo que hacés.
 
-Ejemplo más realista, con guarda y clonado de la respuesta:
+Ejemplo más realista, con guarda, clonado **y fallback offline**:
 
 ```js
 self.addEventListener('fetch', (event) => {
@@ -222,18 +223,27 @@ self.addEventListener('fetch', (event) => {
     const cached = await caches.match(event.request)
     if (cached) return cached
 
-    const response = await fetch(event.request)
-    // clonamos: una Response es un stream y se consume una sola vez
-    if (response.ok) {
-      const cache = await caches.open('runtime-v1')
-      cache.put(event.request, response.clone())
+    try {
+      const response = await fetch(event.request)
+      // clonamos: una Response es un stream y se consume una sola vez
+      if (response.ok) {
+        const cache = await caches.open('runtime-v1')
+        cache.put(event.request, response.clone())
+      }
+      return response
+    } catch {
+      // sin red Y sin caché: NO dejes que respondWith reciba un rechazo.
+      // Devolvé un fallback (una offline.html precacheada, o una Response a mano).
+      return (await caches.match('/offline.html'))
+        ?? new Response('Sin conexión', { status: 503, statusText: 'Offline' })
     }
-    return response
   })())
 })
 ```
 
 ⚠️ **El `.clone()` no es opcional.** Un `Response` (y un `Request`) tiene un body que es un *stream*: se puede leer **una sola vez**. Si lo devolvés a la página **y** lo guardás en caché, necesitás dos copias → `response.clone()`. Olvidarlo es uno de los bugs más comunes del tema.
+
+⚠️ **Nunca dejes que `respondWith` reciba una promesa rechazada.** Si `fetch()` falla (offline) y no hay nada en caché, un `await fetch(...)` sin `try/catch` propaga el error a `respondWith` y la request **rompe** — justo el caso offline que el service worker debería cubrir. Siempre cerrá con un fallback: una página `/offline.html` precacheada en `install`, o una `Response` construida a mano. Esta es la diferencia entre "tengo un service worker" y "tengo offline".
 
 La frase mental: **el evento `fetch` te da la última palabra sobre cada request. `respondWith` = "yo me encargo"; no llamarlo = "que siga su curso". Interceptás selectivamente, validás antes de cachear, y clonás porque el body se consume una sola vez.**
 
@@ -242,6 +252,7 @@ La frase mental: **el evento `fetch` te da la última palabra sobre cada request
 6.2 🔁 ¿Por qué hay que clonar la `Response` si la querés devolver y cachear a la vez?
 6.3 🧠 ¿Por qué normalmente no interceptás requests `POST` ni llamadas de analytics?
 6.4 🧠 ¿Qué problema trae cachear una respuesta sin chequear `response.ok` primero?
+6.5 🧠 En el ejemplo realista, ¿qué pasa si sacás el `try/catch` y el usuario está offline pidiendo algo que no está en caché? ¿Por qué es justo el caso que el SW debía cubrir?
 
 ---
 
@@ -264,15 +275,19 @@ async function staleWhileRevalidate(request) {
   const cache = await caches.open('swr-v1')
   const cached = await cache.match(request)
 
-  const networkFetch = fetch(request).then(response => {
-    if (response.ok) cache.put(request, response.clone())
-    return response
-  })
+  const networkFetch = fetch(request)
+    .then(response => {
+      if (response.ok) cache.put(request, response.clone())
+      return response
+    })
+    .catch(() => cached)  // ⚠️ sin esto, un fallo de red queda sin manejar
 
   // devolvemos la caché si existe (rápido); si no, esperamos la red
   return cached || networkFetch
 }
 ```
+
+⚠️ **Ese `.catch()` no es decorativo.** Sin él, `return cached || networkFetch` tiene un agujero: si **no** hay caché y la red falla (offline), `respondWith` recibe una promesa **rechazada** y la request rompe. Y aunque haya caché, el rechazo de `networkFetch` queda como *unhandled rejection*. El `.catch(() => cached)` garantiza que el revalidado nunca tire un error suelto. **Regla de oro del SW: ninguna promesa que termine en `respondWith` debe poder rechazar.**
 
 El criterio que separa a quien entendió: **no hay una estrategia "mejor" — hay una por tipo de recurso.** Un sitio real combina varias:
 - JS/CSS con hash → **Cache First** (son inmutables, el hash cambia si cambian).
@@ -280,7 +295,27 @@ El criterio que separa a quien entendió: **no hay una estrategia "mejor" — ha
 - API de contenido → **Stale-While-Revalidate** o **Network First** según cuán crítica sea la frescura.
 - `/api/pagos` → **Network Only**.
 
-> 🧰 **En la práctica usás Workbox.** Escribir todo esto a mano es tedioso y propenso a bugs (expiración, límites de entradas, broadcast de updates). **Workbox** (de Google) te da estas estrategias como funciones listas, manejo de expiración, y routing por patrón de URL. Para producción, casi nadie escribe el `fetch` handler a mano; entender los módulos 4–7 es para **saber qué hace Workbox por debajo** y poder debuggearlo.
+**Navigation Preload: el costo de arranque escondido.** Hay un detalle de performance que muerde en *Network First* de navegación: cuando el service worker está dormido (módulo 2), el browser tiene que **arrancarlo** antes de que pueda hacer el `fetch` de la navegación → ese arranque agrega latencia justo en la request más importante (el HTML de la página). **Navigation Preload** lo resuelve: el browser **dispara la request de red en paralelo** mientras el service worker arranca, y vos consumís esa respuesta ya en curso.
+
+```js
+self.addEventListener('activate', (event) => {
+  event.waitUntil(self.registration.navigationPreload?.enable())
+})
+
+self.addEventListener('fetch', (event) => {
+  if (event.request.mode !== 'navigate') return
+  event.respondWith((async () => {
+    const preloaded = await event.preloadResponse  // la red ya arrancó en paralelo
+    if (preloaded) return preloaded
+    try { return await fetch(event.request) }
+    catch { return (await caches.match('/offline.html')) ?? Response.error() }
+  })())
+})
+```
+
+⚠️ Soporte: estable en Chromium y Firefox; **Safari aún no lo implementa** — verificá en `caniuse.com`. Es una mejora progresiva: donde no está, el `event.preloadResponse` resuelve a `undefined` y caés al `fetch` normal, así que no rompe nada.
+
+> 🧰 **En la práctica usás Workbox.** Escribir todo esto a mano es tedioso y propenso a bugs (expiración, límites de entradas, broadcast de updates, y el versionado manual del módulo 8). **Workbox** (de Google) te da estas estrategias como funciones listas, manejo de expiración, navigation preload, y routing por patrón de URL. Para producción, casi nadie escribe el `fetch` handler a mano: usás Workbox o el plugin de tu framework (`vite-plugin-pwa`, etc.). Entender los módulos 4–8 es para **saber qué hace Workbox por debajo** y poder debuggearlo — no para reimplementarlo, ni para sufrir el versionado a mano que vas a ver en el módulo 8.
 
 La frase mental: **la estrategia se elige por recurso, no por app. Inmutable → cache-first; navegación → network-first; contenido tolerante → stale-while-revalidate; sensible → network-only. En producción, Workbox.**
 
@@ -289,6 +324,7 @@ La frase mental: **la estrategia se elige por recurso, no por app. Inmutable →
 7.2 🧠 Explicá por qué *stale-while-revalidate* es un buen balance, y cuál es su contra (qué ve el usuario en la primera carga tras un cambio).
 7.3 🧠 ¿Por qué *Cache First* es seguro para `app.8f2c.js` pero peligroso para `app.js` (sin hash)?
 7.4 🧠 ¿Qué aporta Workbox sobre escribir el handler de `fetch` a mano, y por qué igual conviene entender el mecanismo crudo?
+7.5 🧠 ¿Qué problema de latencia resuelve Navigation Preload, y por qué aparece justo cuando el service worker está dormido?
 
 ---
 
@@ -325,13 +361,25 @@ self.addEventListener('activate', (event) => {
 })
 ```
 
-**b) El browser detecta el cambio del `sw.js`.** Cuando el usuario vuelve a entrar, el browser **re-baja `sw.js`** y lo compara **byte a byte** con el que tiene. Si cambió (basta cambiar la constante `CACHE`), arranca el ciclo `install` del nuevo. ⚠️ **Importante:** asegurate de que el **propio `sw.js` no se sirva con caché HTTP larga**, o el browser no se enterará de que cambiaste el service worker. Servilo con `Cache-Control: no-cache` (o `max-age=0`).
+**b) El browser detecta el cambio del `sw.js`.** Cuando el usuario vuelve a entrar (y periódicamente), el browser **re-baja `sw.js`** y lo compara **byte a byte** con el que tiene. Si cambió (basta cambiar la constante `CACHE`), arranca el ciclo `install` del nuevo. ⚠️ **Importante:** asegurate de que el **propio `sw.js` no se sirva con caché HTTP larga**, o el browser no se enterará de que cambiaste el service worker. Servilo con `Cache-Control: no-cache` (o `max-age=0`).
+
+Dos precisiones que cierran esta trampa del todo:
+
+- **El browser ya limita la caché del propio `sw.js` a 24h.** Desde hace años, por defecto el browser **ignora** cualquier `Cache-Control` de más de 24 horas **para el script del service worker** (no para los recursos que cachea, ojo — solo para el `sw.js` mismo). O sea: aun si te olvidás el header, la actualización llega como mucho en un día. Pero no dependas de eso: serví el `sw.js` con `no-cache` para que el cambio se detecte enseguida.
+- **`updateViaCache` controla esto explícitamente.** En el `register()` podés decirle al browser que **nunca** use la caché HTTP para chequear el `sw.js` (ni sus `importScripts`):
+
+```js
+navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' })
+// 'none'    → nunca usa caché HTTP para el sw.js (recomendado)
+// 'imports' → cachea el sw.js pero no sus importScripts
+// 'all'     → comportamiento viejo (cachea todo); evitalo
+```
 
 **c) Avisale al usuario y dejá que él active.** El patrón seguro (ver módulo 4): cuando hay un service worker en *waiting*, mostrás un toast "Nueva versión disponible — Recargar". Al aceptar, le mandás `skipWaiting()` al worker en espera y recargás:
 
 ```js
 // en la página
-navigator.serviceWorker.register('/sw.js').then(reg => {
+navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).then(reg => {
   reg.addEventListener('updatefound', () => {
     const nuevo = reg.installing
     nuevo.addEventListener('statechange', () => {
@@ -362,8 +410,9 @@ La frase mental: **versión nueva = nombre de caché nuevo + borrar los viejos e
 **Ejercicios 8**
 8.1 🔁 ¿En qué evento del ciclo de vida conviene borrar las cachés de versiones anteriores?
 8.2 🧠 ¿Por qué un usuario podría seguir viendo la versión vieja "para siempre", y qué dos mecanismos lo causan?
-8.3 🧠 ¿Por qué es un error servir `sw.js` con `Cache-Control: max-age=31536000`?
+8.3 🧠 ¿Por qué es un error servir `sw.js` con `Cache-Control: max-age=31536000`? ¿Qué red de seguridad pone igual el browser, y por qué no deberías depender solo de ella?
 8.4 ✍️ Describí (o codeá) el flujo "nueva versión disponible → el usuario acepta → se activa y recarga".
+8.5 🔁 ¿Qué hace `updateViaCache: 'none'` en el `register()` y por qué conviene?
 
 ---
 
@@ -390,7 +439,7 @@ self.addEventListener('notificationclick', (event) => {
 })
 ```
 
-⚠️ Requiere **permiso explícito** del usuario (`Notification.requestPermission()`), suscripción vía `pushManager.subscribe()` con claves **VAPID**, y un backend que envíe el push. En **iOS**, Web Push **solo funciona si la PWA está instalada** en la pantalla de inicio (no en Safari a secas) y llegó relativamente tarde — verificá soporte.
+⚠️ Requiere **permiso explícito** del usuario (`Notification.requestPermission()`), suscripción vía `pushManager.subscribe()` con claves **VAPID**, y un backend que envíe el push. En **iOS** llegó tarde y con una condición dura: Web Push existe **desde iOS 16.4 (marzo 2023)** y **solo funciona si el usuario agregó la PWA a la pantalla de inicio** (no en Safari como pestaña normal). En Android/desktop, en cambio, funciona desde el browser sin instalar. Verificá soporte y versión mínima antes de prometer push en iOS.
 
 **Background Sync ⚠️.** Si el usuario hace una acción offline (mandar un mensaje, postear un comentario), registrás un *sync*; el browser lo **reintenta automáticamente** cuando vuelve la conexión, despertando al service worker:
 
@@ -407,21 +456,106 @@ self.addEventListener('sync', (event) => {
 })
 ```
 
+⚠️ **Ojo: Background Sync NO es cross-browser.** Aunque suene a estándar maduro, en 2026 la *one-shot* Background Sync API sigue siendo **esencialmente Chromium** — **Safari y Firefox no la implementan**. No es solo Periodic Sync el que falla afuera; este también. Por eso el patrón **portable** no se apoya en el evento `sync`: guardás la cola en **IndexedDB** y la drenás en **dos disparadores** que sí funcionan en todos lados — al **reabrir la app** (un check al cargar) y dentro del handler `fetch` cuando vuelve a haber red. Background Sync, donde existe, es la **mejora progresiva** encima de eso (reintenta aunque el usuario no reabra), no la base.
+
 **Periodic Background Sync ⚠️.** Actualizar contenido cada tanto en segundo plano (ej. precargar el feed de noticias a la mañana). Soporte **muy limitado** (esencialmente Chromium, y atado al *engagement* del usuario con la PWA). No construyas features críticas sobre esto.
 
 El hilo común de las tres: **el service worker puede ejecutarse cuando tu página no está abierta**. Eso es lo que lo separa de cualquier truco que puedas hacer solo con JS de página.
 
-La frase mental: **el service worker no es solo caché — es el punto de enganche del browser para despertar tu código ante eventos del sistema (push, reconexión, timer). Push y Background Sync son las features "nativas" que eso desbloquea; ojo con el soporte desigual, sobre todo en iOS.**
+La frase mental: **el service worker no es solo caché — es el punto de enganche del browser para despertar tu código ante eventos del sistema (push, reconexión, timer). Push y Background Sync son las features "nativas" que eso desbloquea; ojo con el soporte desigual: Push exige PWA instalada en iOS, y Background/Periodic Sync son Chromium-only, así que el patrón portable siempre es IndexedDB + reintento.**
 
 **Ejercicios 9**
 9.1 🔁 ¿Qué tienen en común Push, Background Sync y Periodic Sync respecto del estado de la página?
 9.2 🧠 El usuario manda un mensaje sin conexión. ¿Cómo combinás IndexedDB + Background Sync para que se envíe solo al volver la red?
 9.3 🧠 ¿Por qué no deberías construir una feature crítica sobre Periodic Background Sync?
 9.4 🧠 ¿Qué condición especial tiene Web Push en iOS que no tiene en Android/desktop?
+9.5 🧠 Background Sync no existe en Safari/Firefox. ¿Cómo armás el envío offline para que funcione igual en todos los browsers, y dónde encaja Background Sync en ese diseño?
 
 ---
 
-## Módulo 10 — Limitaciones, trampas y debugging
+## Módulo 10 — El lado servidor en Node: web-push, el `manifest` y los headers correctos
+
+**Teoría.** Hasta acá todo fue browser. Pero como venís hacia **Full Stack Node**, lo que el mercado te va a pedir no es solo escribir el `sw.js` — es **el otro extremo**: el servidor que hace que el service worker funcione. Tres piezas concretas que viven en tu Express/Nest.
+
+**a) Servir el `sw.js` con los headers correctos.** El service worker no es un asset cualquiera: cómo lo servís define si las actualizaciones llegan (módulo 8) y hasta dónde alcanza su scope (módulo 3).
+
+```ts
+import express from 'express'
+const app = express()
+
+// El sw.js: sin caché HTTP, para que el browser detecte cambios enseguida (módulo 8)
+app.get('/sw.js', (_req, res) => {
+  res.set('Cache-Control', 'no-cache')
+  // Solo si servís el sw.js desde una subcarpeta pero querés scope de raíz (módulo 3):
+  res.set('Service-Worker-Allowed', '/')
+  res.sendFile(`${process.cwd()}/public/sw.js`)
+})
+```
+
+Las dos reglas que se traducen en headers: `Cache-Control: no-cache` para el `sw.js` (no para los assets con hash, que sí querés cachear largo), y `Service-Worker-Allowed` **solo** si necesitás ampliar el scope más allá de donde está el archivo.
+
+**b) El `manifest.webmanifest`: lo que vuelve "instalable" a la PWA.** El service worker da el offline; el **manifest** da la instalabilidad (ícono en la pantalla de inicio, nombre, splash). Es un JSON que linkeás desde el HTML y servís con el content-type correcto:
+
+```ts
+app.get('/manifest.webmanifest', (_req, res) => {
+  res.type('application/manifest+json')   // content-type que el browser espera
+  res.json({
+    name: 'Mi App', short_name: 'MiApp', start_url: '/', display: 'standalone',
+    background_color: '#ffffff', theme_color: '#0b5',
+    icons: [{ src: '/icon-192.png', sizes: '192x192', type: 'image/png' },
+            { src: '/icon-512.png', sizes: '512x512', type: 'image/png' }],
+  })
+})
+```
+```html
+<link rel="manifest" href="/manifest.webmanifest">
+```
+
+Para que el browser ofrezca "Instalar", se necesita: **HTTPS + service worker registrado + manifest válido** (con `name`, `start_url`, `display` e íconos de 192 y 512). Las tres cosas juntas.
+
+**c) Emitir Push desde Node (`web-push` + VAPID).** En el módulo 9 viste el lado browser (`pushManager.subscribe`). El que **manda** el push es tu backend. El flujo:
+
+1. Generás un par de claves **VAPID** una vez (identifican a tu server ante el push service): `npx web-push generate-vapid-keys`. La **pública** va al cliente; la **privada** queda **solo en el server** (es un secreto, como cualquier API key).
+2. El cliente se suscribe con la clave pública y te manda su `subscription` (un objeto con endpoint + claves). **Lo guardás en tu DB**, asociado al usuario.
+3. Cuando hay algo que notificar, tu server le pega al `endpoint` de la suscripción con la librería `web-push`:
+
+```ts
+import webpush from 'web-push'
+
+webpush.setVapidDetails(
+  'mailto:vos@dominio.com',
+  process.env.VAPID_PUBLIC_KEY!,   // pública
+  process.env.VAPID_PRIVATE_KEY!,  // privada — NUNCA al cliente
+)
+
+// subscription = lo que el browser mandó en el módulo 9 y guardaste en la DB
+async function notificar(subscription: webpush.PushSubscription, payload: object) {
+  try {
+    await webpush.sendNotification(subscription, JSON.stringify(payload))
+  } catch (err: any) {
+    // 404/410 = la suscripción caducó o el usuario revocó: borrala de la DB
+    if (err.statusCode === 404 || err.statusCode === 410) {
+      await borrarSubscription(subscription.endpoint)
+    } else {
+      throw err
+    }
+  }
+}
+```
+
+El detalle de producción que distingue: **las suscripciones caducan o se revocan**. Cuando `sendNotification` devuelve **410 Gone** (o 404), esa suscripción está muerta — hay que **borrarla de la DB**, o vas a acumular basura y reintentar contra endpoints muertos para siempre.
+
+La frase mental: **el service worker es la mitad cliente de un sistema de dos extremos. La otra mitad vive en tu Node: servir `sw.js` con `no-cache`, servir el `manifest` para la instalabilidad, y emitir push con `web-push` + VAPID — limpiando las suscripciones muertas (410). Eso es lo que te van a pedir como backend.**
+
+**Ejercicios 10**
+10.1 🔁 ¿Qué tres cosas tienen que cumplirse juntas para que el browser ofrezca "Instalar" una PWA?
+10.2 🧠 ¿Por qué la clave VAPID privada nunca puede viajar al cliente, y dónde vive cada una de las dos claves?
+10.3 🧠 Tu server manda push y recibe un `410 Gone` de un endpoint. ¿Qué pasó y qué tenés que hacer?
+10.4 ✍️ Escribí el handler de Express que sirve `sw.js` con los headers correctos para que las actualizaciones se detecten y, si hiciera falta, con scope de raíz desde una subcarpeta.
+
+---
+
+## Módulo 11 — Limitaciones, trampas y debugging
 
 **Teoría.** El service worker es poderoso justamente porque se mete en el medio de todo — y eso lo hace **peligroso si lo manejás mal**. Las limitaciones y trampas que tenés que conocer:
 
@@ -454,15 +588,15 @@ La caché HTTP es **gratis y suficiente** para el 80% de los casos. El service w
 
 La frase mental: **el service worker te da poder a cambio de complejidad permanente. Cacheá agresivo solo con versionado y un kill switch listos. Y recordá que la caché HTTP, gratis, ya resuelve la mayoría de los casos.**
 
-**Ejercicios 10**
-10.1 🔁 Nombrá tres limitaciones duras de los service workers.
-10.2 🧠 ¿Qué es un "service worker zombie" y cómo lo prevenís?
-10.3 🧠 ¿Para qué sirve tener un "kill switch" preparado y qué haría ese `sw.js` de emergencia?
-10.4 🧠 Diferenciá la caché HTTP de la caché vía service worker en dos ejes (quién controla y offline).
+**Ejercicios 11**
+11.1 🔁 Nombrá tres limitaciones duras de los service workers.
+11.2 🧠 ¿Qué es un "service worker zombie" y cómo lo prevenís?
+11.3 🧠 ¿Para qué sirve tener un "kill switch" preparado y qué haría ese `sw.js` de emergencia?
+11.4 🧠 Diferenciá la caché HTTP de la caché vía service worker en dos ejes (quién controla y offline).
 
 ---
 
-## Módulo 11 — El criterio: cuándo un Service Worker paga (y cuándo es over-engineering)
+## Módulo 12 — El criterio: cuándo un Service Worker paga (y cuándo es over-engineering)
 
 **Teoría.** El cierre: convertir todo lo anterior en una decisión defendible. La pregunta no es "¿los service workers son buenos?", sino "**¿este service worker paga para MI app?**".
 
@@ -479,15 +613,15 @@ La frase mental: **el service worker te da poder a cambio de complejidad permane
 
 El matiz honesto: **el service worker no es una mejora gratis que activás "por las dudas".** Es una pieza de infraestructura con mantenimiento permanente. Si tu único objetivo es "que cargue rápido", **empezá por caché HTTP, CDN y optimización de assets** — son más baratos y resuelven la mayoría de los casos. Reservá el service worker para cuando necesites lo que **solo** él da: **funcionar sin red y reaccionar a eventos con la app cerrada.**
 
-Y la herramienta práctica: si decidís que sí, **no lo escribas a mano para producción — usá Workbox** (o el plugin PWA de tu framework: Vite PWA, Next PWA, Angular service worker). Entender los módulos 4–10 es lo que te permite **usar esas herramientas con criterio y debuggearlas**, no reinventarlas.
+Y la herramienta práctica: si decidís que sí, **no lo escribas a mano para producción — usá Workbox** (o el plugin PWA de tu framework: Vite PWA, Next PWA, Angular service worker). Entender los módulos 4–11 es lo que te permite **usar esas herramientas con criterio y debuggearlas**, no reinventarlas.
 
 La frase mental de cierre: **el service worker es la herramienta para offline, push e instalabilidad — no un acelerador genérico. Si solo querés velocidad, la caché HTTP es más barata. Si necesitás que la app viva sin red o reaccione con la pestaña cerrada, no hay sustituto — pero asumí el mantenimiento, versioná siempre, y tené un kill switch.**
 
-**Ejercicios 11**
-11.1 🧠 Una landing page de marketing, online-only, quiere cargar más rápido. ¿Service worker o caché HTTP + CDN? Justificá.
-11.2 🧠 Una app de relevamiento de campo que se usa en zonas sin señal. ¿Paga el service worker? ¿Qué capacidades concretas usarías?
-11.3 🧠 Un colega quiere agregar un service worker "porque las PWA son el futuro", sin un caso de offline ni push. ¿Qué le respondés, y qué riesgo concreto le señalás?
-11.4 🧠 ¿Por qué para producción conviene Workbox y no un `fetch` handler artesanal, y por qué igual hay que entender el mecanismo crudo?
+**Ejercicios 12**
+12.1 🧠 Una landing page de marketing, online-only, quiere cargar más rápido. ¿Service worker o caché HTTP + CDN? Justificá.
+12.2 🧠 Una app de relevamiento de campo que se usa en zonas sin señal. ¿Paga el service worker? ¿Qué capacidades concretas usarías?
+12.3 🧠 Un colega quiere agregar un service worker "porque las PWA son el futuro", sin un caso de offline ni push. ¿Qué le respondés, y qué riesgo concreto le señalás?
+12.4 🧠 ¿Por qué para producción conviene Workbox y no un `fetch` handler artesanal, y por qué igual hay que entender el mecanismo crudo?
 
 ---
 
@@ -509,7 +643,7 @@ La frase mental de cierre: **el service worker es la herramienta para offline, p
 
 **3.1** Porque un service worker intercepta **toda la red**: sobre HTTP sería un vector ideal para un atacante man-in-the-middle. Solo funciona en contextos seguros (`https://`); la única excepción es `http://localhost`, para poder desarrollar.
 
-**3.2** Porque el **scope es geográfico por URL**: un `sw.js` en `/static/js/` solo controla `/static/js/...`, no `/`. Lo moverías a la **raíz** (`/sw.js`) para que controle todo el sitio.
+**3.2** Porque el **scope lo define el path del archivo**: un `sw.js` en `/static/js/` solo controla `/static/js/...`, no `/`. Lo moverías a la **raíz** (`/sw.js`) para que controle todo el sitio (o, si tenés que dejarlo en la subcarpeta, lo servís con el header `Service-Worker-Allowed: /` para ampliar el scope).
 
 **3.3** No es un bug: en el **primer** registro, la página que lo registró **no queda controlada todavía**; el control empieza en la próxima carga, salvo que uses `clients.claim()`.
 
@@ -537,6 +671,8 @@ La frase mental de cierre: **el service worker es la herramienta para offline, p
 
 **6.4** Guardás una respuesta inválida (404/500) y después la servís desde la caché como si fuera buena → caché envenenada, el usuario ve errores persistentes. Por eso se valida `response.ok` antes de `cache.put`.
 
+**6.5** Sin `try/catch`, el `await fetch(...)` **rechaza** (no hay red), ese rechazo llega a `respondWith`, y la request **rompe** con un error de red — el usuario ve la página caída. Es justo el caso que el SW debía cubrir: estar offline pidiendo algo nuevo. Con el `catch` devolvés un fallback (una `/offline.html` precacheada o una `Response` a mano) y la app degrada con gracia en vez de romperse.
+
 **7.1** (a) `app.8f2c.js` → **Cache First** (inmutable por el hash). (b) `index.html` → **Network First** (querés fresco, con fallback offline). (c) avatar → **Stale-While-Revalidate** (un poco viejo está bien). (d) `POST /api/checkout` → **Network Only** (no se cachea).
 
 **7.2** Balance: devuelve la caché **al instante** (rápido) y refresca en segundo plano para la próxima vez. La contra: tras un cambio, en **esa** carga el usuario ve la versión **vieja**; recién la siguiente carga trae la nueva.
@@ -545,13 +681,17 @@ La frase mental de cierre: **el service worker es la herramienta para offline, p
 
 **7.4** Workbox aporta las estrategias listas, manejo de **expiración y límite de entradas**, routing por patrón de URL, precaching con manifiesto y broadcast de updates — todo lo tedioso y bug-prone. Conviene entender el mecanismo crudo para **debuggear** Workbox y configurarlo con criterio (saber qué estrategia por recurso).
 
+**7.5** Resuelve la **latencia de arranque del service worker**: cuando el SW está dormido (efímero, módulo 2), el browser tiene que arrancarlo antes de poder hacer el `fetch` de la navegación, y ese arranque demora la request más importante (el HTML). Navigation Preload **dispara la request de red en paralelo** mientras el SW arranca, y vos consumís esa respuesta vía `event.preloadResponse`. Aparece justo en SW dormido porque si ya estuviera despierto no habría costo de arranque que ocultar.
+
 **8.1** En **`activate`**: ahí comparás los nombres de caché existentes contra la versión actual y borrás los que no coincidan.
 
 **8.2** Porque (1) la Cache API **no expira sola** (lo precacheado se queda) y (2) el service worker nuevo queda en **waiting** y no toma control mientras haya pestañas viejas abiertas — y mucha gente nunca las cierra (móvil/PWA). Sin un flujo de actualización, el usuario queda congelado.
 
-**8.3** Porque el browser **re-baja `sw.js`** para detectar cambios; si lo cacheás un año, el browser sigue usando el viejo y **nunca se entera** de que deployaste un service worker nuevo. Hay que servirlo con `no-cache`/`max-age=0`.
+**8.3** Porque el browser **re-baja `sw.js`** para detectar cambios; si lo cacheás un año, podrías quedar sirviendo el viejo. La **red de seguridad**: el browser igual **ignora** cualquier `Cache-Control` de más de **24h para el propio `sw.js`**, así que la actualización llega como mucho en un día. Pero no dependas solo de eso —son 24h de retraso— : servilo con `no-cache`/`max-age=0` para que el cambio se detecte enseguida.
 
 **8.4** Flujo: al registrar, escuchás `updatefound`; el nuevo worker pasa a `installed` con un `controller` activo (= hay versión vieja corriendo) → mostrás un toast "Nueva versión". Al aceptar el usuario, le mandás `postMessage({type:'SKIP_WAITING'})`; el SW hace `self.skipWaiting()`, dispara `controllerchange`, y ahí hacés `location.reload()`.
+
+**8.5** Le dice al browser que **no use la caché HTTP** para chequear si el `sw.js` (ni sus `importScripts`) cambió: siempre lo valida contra el server. Conviene porque elimina por completo el riesgo de que una caché intermedia te haga servir un service worker viejo, sin depender del header ni del límite de 24h.
 
 **9.1** Que pueden ejecutarse **con la página/app cerrada**: el browser despierta al service worker ante un push entrante, la recuperación de la red, o un timer. No dependen de que haya una pestaña abierta.
 
@@ -559,23 +699,41 @@ La frase mental de cierre: **el service worker es la herramienta para offline, p
 
 **9.3** Porque su **soporte es muy limitado** (esencialmente Chromium) y está atado al engagement con la PWA y a heurísticas del browser que no controlás. Una feature crítica fallaría en gran parte de los usuarios.
 
-**9.4** En **iOS**, Web Push **solo funciona si la PWA está instalada** en la pantalla de inicio (no en Safari como pestaña normal), mientras que en Android/desktop funciona desde el browser.
+**9.4** En **iOS**, Web Push **solo funciona si la PWA está instalada** en la pantalla de inicio (no en Safari como pestaña normal), y desde **iOS 16.4+**, mientras que en Android/desktop funciona desde el browser sin instalar.
 
-**10.1** Cualquiera de: sin DOM/`window`/`localStorage`; solo HTTPS (o localhost); efímero (sin estado en globals); cuota de almacenamiento limitada y evictable; soporte desigual de APIs satélite.
+**9.5** La base portable **no se apoya en el evento `sync`** (Chromium-only): guardás la acción pendiente en **IndexedDB** y la drenás en dos disparadores que existen en todos lados — al **reabrir la app** (un check al cargar) y en el handler `fetch` cuando vuelve a haber red. **Background Sync** se suma como **mejora progresiva** donde existe: reintenta automáticamente aunque el usuario no reabra la app. O sea: IndexedDB + reintento manual es el piso garantizado; Background Sync es el bonus.
 
-**10.2** Un service worker que **sirve contenido viejo indefinidamente** porque cacheó agresivo (cache-first) sobre recursos que cambian, sin versionado. Se previene **versionando los nombres de caché**, borrando viejos en `activate`, sirviendo `sw.js` sin caché, y teniendo un flujo de actualización que avisa al usuario.
+**10.1** **HTTPS** + un **service worker registrado** + un **manifest válido** (con `name`, `start_url`, `display` e íconos de 192 y 512 px). Las tres juntas; si falta una, el browser no ofrece "Instalar".
 
-**10.3** Sirve para **desactivar de emergencia** un service worker roto que afecta a todos los usuarios en producción. Ese `sw.js` de emergencia se **desregistra a sí mismo** (`self.registration.unregister()`) y **borra todas las cachés**, devolviendo a los usuarios al comportamiento normal sin service worker.
+**10.2** Porque la privada **firma** los push e identifica a tu server ante el push service: si viajara al cliente, cualquiera podría enviar notificaciones en tu nombre. La **pública** va al cliente (la usa en `pushManager.subscribe`); la **privada** vive **solo en el server** (variable de entorno/secreto).
 
-**10.4** **Quién controla:** la caché HTTP la maneja el browser según headers del server; la del service worker la maneja **tu código** con lógica arbitraria. **Offline:** la HTTP no da offline programable; el service worker **sí**, porque vos decidís servir desde caché cuando la red falla.
+**10.3** La suscripción está **muerta** (el usuario revocó el permiso, desinstaló la PWA, o el push service la expiró). Hay que **borrarla de tu DB**: si no, acumulás suscripciones zombie y seguís reintentando contra endpoints muertos para siempre.
 
-**11.1** **Caché HTTP + CDN.** Para un sitio online-only, los headers de caché y un CDN dan casi toda la velocidad sin el costo del ciclo de vida, versionado y debugging del service worker. Agregar un SW ahí es complejidad sin beneficio proporcional.
+**10.4**
+```ts
+app.get('/sw.js', (_req, res) => {
+  res.set('Cache-Control', 'no-cache')      // para detectar updates (módulo 8)
+  res.set('Service-Worker-Allowed', '/')    // solo si necesitás scope de raíz desde subcarpeta
+  res.sendFile(`${process.cwd()}/public/sw.js`)
+})
+```
+La clave: `no-cache` para que el cambio del `sw.js` se detecte enseguida, y `Service-Worker-Allowed` únicamente si el archivo no está en la raíz pero querés que controle todo el origen.
 
-**11.2** **Sí paga**, claramente. Usarías: precaching del app shell para que abra sin red, Cache API + IndexedDB para los datos del relevamiento offline, y **Background Sync** para subir lo capturado automáticamente cuando vuelve la señal. Es justo el caso donde el SW no tiene sustituto.
+**11.1** Cualquiera de: sin DOM/`window`/`localStorage`; solo HTTPS (o localhost); efímero (sin estado en globals); cuota de almacenamiento limitada y evictable; soporte desigual de APIs satélite.
 
-**11.3** Que el service worker **no es una mejora gratis**: es infraestructura con mantenimiento permanente. Sin un caso concreto de offline o push, el costo (ciclo de vida, versionado, debugging) supera el beneficio. El **riesgo concreto**: dejar usuarios atascados en versiones viejas (service worker zombie) si el versionado no se mantiene bien. Para "solo velocidad", caché HTTP + CDN.
+**11.2** Un service worker que **sirve contenido viejo indefinidamente** porque cacheó agresivo (cache-first) sobre recursos que cambian, sin versionado. Se previene **versionando los nombres de caché**, borrando viejos en `activate`, sirviendo `sw.js` sin caché, y teniendo un flujo de actualización que avisa al usuario.
 
-**11.4** Workbox te da estrategias, expiración, routing y manejo de updates probados en producción — escribir eso a mano es tedioso y propenso a bugs sutiles (clonado, expiración, opacas, broadcast). Igual hay que entender el mecanismo crudo (ciclo de vida, fetch, versionado) para **configurar y debuggear** Workbox con criterio, no a ciegas.
+**11.3** Sirve para **desactivar de emergencia** un service worker roto que afecta a todos los usuarios en producción. Ese `sw.js` de emergencia se **desregistra a sí mismo** (`self.registration.unregister()`) y **borra todas las cachés**, devolviendo a los usuarios al comportamiento normal sin service worker.
+
+**11.4** **Quién controla:** la caché HTTP la maneja el browser según headers del server; la del service worker la maneja **tu código** con lógica arbitraria. **Offline:** la HTTP no da offline programable; el service worker **sí**, porque vos decidís servir desde caché cuando la red falla.
+
+**12.1** **Caché HTTP + CDN.** Para un sitio online-only, los headers de caché y un CDN dan casi toda la velocidad sin el costo del ciclo de vida, versionado y debugging del service worker. Agregar un SW ahí es complejidad sin beneficio proporcional.
+
+**12.2** **Sí paga**, claramente. Usarías: precaching del app shell para que abra sin red, Cache API + IndexedDB para los datos del relevamiento offline, y una **cola en IndexedDB + reintento** (con **Background Sync** como mejora progresiva donde exista) para subir lo capturado automáticamente cuando vuelve la señal. Es justo el caso donde el SW no tiene sustituto.
+
+**12.3** Que el service worker **no es una mejora gratis**: es infraestructura con mantenimiento permanente. Sin un caso concreto de offline o push, el costo (ciclo de vida, versionado, debugging) supera el beneficio. El **riesgo concreto**: dejar usuarios atascados en versiones viejas (service worker zombie) si el versionado no se mantiene bien. Para "solo velocidad", caché HTTP + CDN.
+
+**12.4** Workbox te da estrategias, expiración, routing y manejo de updates probados en producción — escribir eso a mano es tedioso y propenso a bugs sutiles (clonado, expiración, opacas, broadcast). Igual hay que entender el mecanismo crudo (ciclo de vida, fetch, versionado) para **configurar y debuggear** Workbox con criterio, no a ciegas.
 
 ---
 
