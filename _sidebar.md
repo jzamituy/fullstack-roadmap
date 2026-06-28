@@ -63,6 +63,7 @@
   - [🔀 Event-driven aplicada](event-driven.md)
   - [🏛️ Diseño de sistemas backend](system-design.md)
   - [🗂️ Banco de casos de diseño](system-design-casos.md)
+  - [✅ Checklist de entrevista (4 capas)](system-design-checklist.md)
   - [📐 Diseño de APIs y contratos](api-design.md)
 
 - **Concurrencia**
