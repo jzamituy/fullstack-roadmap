@@ -10,7 +10,7 @@
 
 **Tipos de ejercicio** (para que sepas cuándo solo pensar y cuándo abrir el editor): 🔁 recordar · 🧠 criterio/análisis · ✍️ implementación (escribís código). Este módulo es mayormente criterio (vas a ver muchos 🧠), porque diseñar una API **es** tomar decisiones y defenderlas.
 
-**El marco que usamos en las fallas.** Para cada decisión de contrato que puede romper a un consumidor, aplicamos las **cuatro capas**: (1) **qué se rompe**, (2) **por qué** a esta escala/forma de uso, (3) **control de corto plazo** que frena el daño, (4) **cambio de diseño** que baja la probabilidad de que se repita. Y una buena respuesta de diseño de API tiene **tres cosas**: una **forma para el happy path** (el contrato feliz), un **modelo de falla** (qué devolvés cuando algo sale mal) y un **camino de evolución** (cómo cambiás sin romper). Lo cerramos en el módulo 14.
+**El marco que usamos en las fallas.** Para cada decisión de contrato que puede romper a un consumidor, aplicamos las **cuatro capas**: (1) **qué se rompe**, (2) **por qué** a esta escala/forma de uso, (3) **control de corto plazo** que frena el daño, (4) **cambio de diseño** que baja la probabilidad de que se repita. Y una buena respuesta de diseño de API tiene **tres cosas**: una **forma para el happy path** (el contrato feliz), un **modelo de falla** (qué devolvés cuando algo sale mal) y un **camino de evolución** (cómo cambiás sin romper). Lo cerramos en el módulo 15.
 
 **Índice de módulos**
 1. El contrato primero: qué es diseñar una API
@@ -22,11 +22,12 @@
 7. Versionado de APIs: estrategias y cuándo (y cuándo no)
 8. Evolución sin romper: breaking vs non-breaking y expand-contract
 9. El contrato de error: problem+json (RFC 9457)
-10. Rate limiting y cuotas en el contrato (429 y Retry-After)
-11. Caching HTTP y concurrencia optimista: ETag, 304 y If-Match
-12. Webhooks: el contrato saliente
-13. OpenAPI como fuente de verdad: spec-first y contract testing
-14. Caso completo: diseñar la API pública de la Task API
+10. El contrato de autenticación: API keys, Bearer/OAuth2 y scopes
+11. Rate limiting y cuotas en el contrato (429 y Retry-After)
+12. Caching HTTP y concurrencia optimista: ETag, 304 y If-Match
+13. Webhooks: el contrato saliente
+14. OpenAPI como fuente de verdad: spec-first y contract testing
+15. Caso completo: diseñar la API pública de la Task API
 
 Las soluciones de **todos** los ejercicios están al final, en la sección "Soluciones".
 
@@ -103,7 +104,7 @@ Dos principios que guían el diseño:
 **Status codes que tenés que usar bien** (el status **es** parte del contrato):
 
 - **2xx — éxito:** `200 OK` (lectura/actualización con cuerpo), `201 Created` (creaste un recurso; devolvé `Location` con su URL), `202 Accepted` (lo aceptaste pero se procesa async, ver módulo 4), `204 No Content` (éxito sin cuerpo, típico en `DELETE`).
-- **4xx — error del cliente:** `400 Bad Request` (malformado), `401 Unauthorized` (no autenticado — mal nombrado, en realidad es "no identificado"), `403 Forbidden` (autenticado pero sin permiso), `404 Not Found`, `409 Conflict` (choca con el estado actual: duplicado, edición concurrente), `422 Unprocessable Entity` (sintaxis OK pero viola reglas de negocio/validación), `429 Too Many Requests` (rate limit, módulo 10).
+- **4xx — error del cliente:** `400 Bad Request` (malformado), `401 Unauthorized` (no autenticado — mal nombrado, en realidad es "no identificado"), `403 Forbidden` (autenticado pero sin permiso), `404 Not Found`, `409 Conflict` (choca con el estado actual: duplicado, edición concurrente), `422 Unprocessable Entity` (sintaxis OK pero viola reglas de negocio/validación), `429 Too Many Requests` (rate limit, módulo 11).
 - **5xx — error del servidor:** `500 Internal Server Error` (algo explotó de tu lado), `502/503/504` (gateway, no disponible, timeout). Regla: un `5xx` es **culpa tuya**; nunca devuelvas `500` por un input malo del cliente (eso es `4xx`).
 
 > **El error clásico — el `200` mentiroso.** Devolver `200 OK` con `{ "error": "no encontrado" }` adentro. Rompe todo: los clientes, los proxies y los reintentadores miran el **status** para decidir. Un `200` le dice a la infraestructura "salió bien, cacheá/seguí", cuando en realidad falló. El status code no es decorativo: es la primera línea del contrato que lee toda la cadena HTTP.
@@ -368,8 +369,13 @@ interface ProblemDetails {
 }
 
 function problema(status: number, type: string, title: string, detail?: string): ProblemDetails {
-  return { type, title, status, detail };
+  const p: ProblemDetails = { type, title, status };
+  if (detail !== undefined) p.detail = detail;   // agregá la clave solo si hay valor
+  return p;
 }
+// Construimos el objeto y sumamos `detail` solo si vino: así el helper también es
+// correcto bajo `exactOptionalPropertyTypes` (más allá del --strict estándar), donde
+// `{ detail: undefined }` no es asignable a una propiedad opcional.
 ```
 
 > **Reglas de oro del contrato de error:**
@@ -386,7 +392,49 @@ function problema(status: number, type: string, title: string, detail?: string):
 
 ---
 
-## Módulo 10 — Rate limiting y cuotas en el contrato (429 y Retry-After)
+## Módulo 10 — El contrato de autenticación: API keys, Bearer/OAuth2 y scopes
+
+**Teoría.** Quién puede llamar a tu API, y con qué permisos, es **parte del contrato** — no un detalle de implementación que se resuelve "después". El módulo 3 dejó los status `401` (no autenticado) y `403` (autenticado pero sin permiso); acá diseñamos **cómo** el consumidor se identifica y qué promete el contrato al respecto. La **mecánica** (cómo firmás y validás un JWT, OAuth2 paso a paso, hashing de secretos) está en [Autenticación](autenticacion.md); este módulo es el **contrato**: qué credencial pedís, dónde viaja y qué devolvés cuando falta o no alcanza.
+
+**Las dos formas que vas a diseñar:**
+
+- **API key:** un secreto opaco y de larga vida que identifica a una *aplicación* (no a un usuario). Simple, ideal para integraciones server-to-server y APIs de terceros. El contrato define cómo se emite, cómo se rota y cómo se revoca. **Siempre por header** (`Authorization` o uno propio tipo `X-API-Key`), nunca en la URL.
+- **Bearer token (OAuth2 / OIDC):** un token de **vida corta** (típicamente un JWT) que representa a un *usuario* (o a una app actuando en su nombre), obtenido vía un flujo OAuth2. Es el estándar para APIs públicas con usuarios. El contrato define el formato del header, la expiración y cómo se refresca.
+
+```http
+GET /v1/tareas
+Authorization: Bearer eyJhbGciOiJI...
+```
+
+**Dónde viaja la credencial — y dónde NO.** Siempre en el header `Authorization` (o un header dedicado), **nunca en el query string ni en el path**. Un token en la URL (`?api_key=...`) termina en los logs del servidor, en el historial del browser, en el header `Referer` que se manda a terceros y en las métricas de la CDN. Es la fuga de credenciales más común y más evitable. Y, obvio: **todo sobre HTTPS**, siempre.
+
+**`401` con `WWW-Authenticate`.** El `401` no es solo un número: el contrato HTTP pide acompañarlo del header `WWW-Authenticate`, que le dice al cliente **qué esquema** se espera y, en OAuth2, **por qué** falló (token vencido, scope insuficiente):
+
+```http
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer realm="api", error="invalid_token", error_description="The token expired"
+```
+
+Así el cliente distingue "nunca me autentiqué" de "mi token venció, lo refresco y reintento" sin adivinar. Combinalo con el contrato de error del módulo 9: cuerpo `problem+json` para el detalle legible, header `WWW-Authenticate` para la negociación máquina-a-máquina.
+
+**Scopes y permisos: la autorización como contrato.** No alcanza con "está autenticado": el contrato también declara **qué puede hacer** cada credencial. En OAuth2 eso son los **scopes** (`tareas:leer`, `tareas:escribir`), parte del token y documentados en el contrato. Si una credencial autenticada pide algo fuera de su scope, el status correcto es **`403`** (está identificada, pero no tiene permiso) — distinto del `401` (no está identificada). Diseñar los scopes con **mínimo privilegio** (que cada integración pida solo lo que necesita) es parte de diseñar bien la API.
+
+> **4 capas — la API key en la URL que se filtra:**
+> 1. **Qué se rompe:** un integrador manda la key como `?api_key=...`; esa URL queda registrada en los access logs, en un proxy, en el `Referer` hacia un tercero — y la credencial queda expuesta a quien lea esos registros.
+> 2. **Por qué a esta escala/uso:** no se nota en desarrollo (anda igual); el leak es silencioso y aparece cuando alguien audita logs, o cuando un atacante los consigue, y ya hay claves válidas circulando.
+> 3. **Control de corto plazo:** rechazar credenciales por query string; **rotar/revocar** las keys que ya viajaron así; aceptar el secreto solo por header.
+> 4. **Cambio de diseño:** contrato que exige `Authorization` por header, tokens de vida corta (Bearer) en vez de keys eternas donde se pueda, scopes de mínimo privilegio, y rotación/revocación documentadas como parte del ciclo de vida de la credencial.
+
+> **El criterio:** API key para identificar una **app** (server-to-server, terceros); Bearer/OAuth2 para identificar a un **usuario** en una API pública. La credencial **siempre por header, nunca en la URL**; el `401` lleva `WWW-Authenticate`; los permisos viven en **scopes** con mínimo privilegio; y el `403` es "te conozco pero no podés", distinto del `401` "no sé quién sos". El *cómo* lo implementás está en [Autenticación](autenticacion.md); lo de acá es lo que **prometés** en el contrato.
+
+**Ejercicios 10**
+10.1 🔁 ¿Cuál es la diferencia de contrato entre una API key y un Bearer token (qué identifica cada uno y cuál tiene vida corta)?
+10.2 🧠 ¿Por qué una credencial nunca debe viajar en el query string ni en el path? Nombrá al menos dos lugares donde se filtraría.
+10.3 🧠 Un cliente autenticado con scope `tareas:leer` intenta un `POST /tareas`. ¿Qué status devolvés y por qué no es `401`? ¿Qué header acompañaría a un `401` si el token hubiera vencido?
+
+---
+
+## Módulo 11 — Rate limiting y cuotas en el contrato (429 y Retry-After)
 
 **Teoría.** Toda API pública necesita límites de uso: para protegerse del abuso, repartir capacidad con justicia y no caer por un cliente desbocado. El **algoritmo** (token bucket, etc.) está en [Diseño de sistemas](system-design.md) módulo 12; acá nos importa **cómo lo expone el contrato**.
 
@@ -415,14 +463,14 @@ Hay un *draft* de IETF (`RateLimit` fields) que estandariza esto. Ojo a la versi
 
 > **El insight:** el rate limiting no es solo "rechazar"; es **comunicar**. Un buen contrato de límites le da al cliente todo para portarse bien: el `429`, el `Retry-After` y la cuota visible. Un mal contrato solo dice "no" y deja que el cliente adivine — y adivinar, bajo carga, significa retry storm.
 
-**Ejercicios 10**
-10.1 🔁 ¿Qué status code y qué header son el núcleo del contrato de rate limiting?
-10.2 🧠 ¿Por qué un `429` sin `Retry-After` puede empeorar una sobrecarga? Conectá con el retry storm.
-10.3 🧠 ¿Para qué sirven los headers `RateLimit-Limit/Remaining/Reset` si ya devolvés `429` cuando se pasa? (pista: proactivo vs reactivo)
+**Ejercicios 11**
+11.1 🔁 ¿Qué status code y qué header son el núcleo del contrato de rate limiting?
+11.2 🧠 ¿Por qué un `429` sin `Retry-After` puede empeorar una sobrecarga? Conectá con el retry storm.
+11.3 🧠 ¿Para qué sirven los headers `RateLimit-Limit/Remaining/Reset` si ya devolvés `429` cuando se pasa? (pista: proactivo vs reactivo)
 
 ---
 
-## Módulo 11 — Caching HTTP y concurrencia optimista: ETag, 304 e If-Match
+## Módulo 12 — Caching HTTP y concurrencia optimista: ETag, 304 e If-Match
 
 **Teoría.** El módulo 2 dijo que REST es "cacheable por la infraestructura HTTP". Eso no es magia: es **contrato**. Vos decidís, en los headers de respuesta, qué pueden cachear el browser, la CDN y los proxies — y de paso resolvés un problema de concurrencia que el módulo 3 dejó abierto (el `409`).
 
@@ -455,6 +503,8 @@ If-Match: "v3"            # "actualizá solo si sigue en la versión v3"
 
 Esto es **optimistic locking a nivel contrato** — el primo HTTP del lock optimista con columna de versión de [PostgreSQL](postgresql.md) y del `409 Conflict` del módulo 3. El `412` le dice al cliente "tu copia quedó vieja, no te dejo pisar"; el cliente releé, re-aplica su cambio sobre la versión fresca y reintenta.
 
+> **ETag fuerte vs débil para concurrencia.** Hay dos sabores: el **fuerte** (`"v3"`) garantiza igualdad *byte a byte* de la representación; el **débil** (`W/"v3"`) solo garantiza equivalencia *semántica*. Para cacheo (`If-None-Match`) ambos sirven, pero para **concurrencia optimista (`If-Match`) necesitás un ETag fuerte**: un validador débil no asegura que la versión sea exactamente la que creés, y podrías aplicar una escritura sobre algo que cambió. Si versionás con una columna `version`/`updated_at`, generás un ETag fuerte naturalmente.
+
 > **4 capas — el *lost update* por edición concurrente:**
 > 1. **Qué se rompe:** dos usuarios abren la misma tarea, ambos editan, el segundo en guardar **pisa** el cambio del primero sin que nadie se entere. Se pierde una escritura.
 > 2. **Por qué a esta escala/uso:** invisible con un solo editor; aparece cuando varios usuarios (o varias pestañas) editan el mismo recurso, o con un `PATCH` lento y otro rápido encima.
@@ -463,14 +513,14 @@ Esto es **optimistic locking a nivel contrato** — el primo HTTP del lock optim
 
 > **El insight:** caching y concurrencia optimista son **la misma pieza** (el ETag) mirada desde dos lados: en lectura ahorra transferencia (`304`), en escritura previene pisar cambios (`412`). Un contrato senior expone ETags en los recursos que se leen mucho y se editan concurrentemente — gratis te da las dos cosas.
 
-**Ejercicios 11**
-11.1 🔁 ¿Qué responde el servidor a un `GET` con `If-None-Match` cuando el recurso **no** cambió, y qué se ahorra con eso?
-11.2 🧠 Explicá cómo `If-Match` + `412` previene el *lost update*, y con qué patrón de [PostgreSQL](postgresql.md) se corresponde.
-11.3 🧠 ¿Cuándo pondrías `Cache-Control: private` en vez de `public`, y qué pasaría si te equivocás y marcás `public` un recurso por-usuario?
+**Ejercicios 12**
+12.1 🔁 ¿Qué responde el servidor a un `GET` con `If-None-Match` cuando el recurso **no** cambió, y qué se ahorra con eso?
+12.2 🧠 Explicá cómo `If-Match` + `412` previene el *lost update*, y con qué patrón de [PostgreSQL](postgresql.md) se corresponde.
+12.3 🧠 ¿Cuándo pondrías `Cache-Control: private` en vez de `public`, y qué pasaría si te equivocás y marcás `public` un recurso por-usuario?
 
 ---
 
-## Módulo 12 — Webhooks: el contrato saliente
+## Módulo 13 — Webhooks: el contrato saliente
 
 **Teoría.** Hasta acá tu API **recibe** llamadas. Un **webhook** invierte la dirección: es **tu API la que llama al consumidor** cuando pasa algo (un pago se confirmó, un trabajo terminó). El consumidor registra una URL (`POST /webhooks` con `{ url, eventos }`) y vos le hacés `POST` a esa URL con cada evento. Es el contrato **saliente**, y tiene sus propias reglas — las mismas que ya viste, ahora del otro lado.
 
@@ -504,14 +554,14 @@ function webhookEsValido(cuerpoRaw: string, firmaRecibida: string, secreto: stri
 
 **Evolución del payload.** El cuerpo de un webhook es un contrato como cualquier otro: agregar un campo es no-breaking, renombrar/quitar es breaking (módulo 9). Versioná el formato del evento igual que un endpoint y avisá las deprecaciones — tus consumidores tienen código que parsea ese JSON.
 
-**Ejercicios 12**
-12.1 🔁 ¿Por qué un webhook se entrega "al menos una vez" y qué le exige eso al receptor?
-12.2 🧠 ¿Para qué sirve la firma HMAC de un webhook y por qué la comparación se hace en tiempo constante (`timingSafeEqual`)?
-12.3 🧠 ¿Por qué el handler de un webhook debería responder `2xx` rápido y procesar el trabajo después, en vez de hacerlo en línea?
+**Ejercicios 13**
+13.1 🔁 ¿Por qué un webhook se entrega "al menos una vez" y qué le exige eso al receptor?
+13.2 🧠 ¿Para qué sirve la firma HMAC de un webhook y por qué la comparación se hace en tiempo constante (`timingSafeEqual`)?
+13.3 🧠 ¿Por qué el handler de un webhook debería responder `2xx` rápido y procesar el trabajo después, en vez de hacerlo en línea?
 
 ---
 
-## Módulo 13 — OpenAPI como fuente de verdad: spec-first y contract testing
+## Módulo 14 — OpenAPI como fuente de verdad: spec-first y contract testing
 
 **Teoría.** Un contrato que vive solo en la cabeza (o en un wiki desactualizado) no es un contrato: es folklore. **OpenAPI** (antes Swagger) es la forma estándar de **escribir el contrato como un documento** (YAML/JSON) que describe endpoints, parámetros, schemas de request/response y errores.
 
@@ -527,14 +577,14 @@ function webhookEsValido(cuerpoRaw: string, firmaRecibida: string, secreto: stri
 
 > **El criterio:** el valor de OpenAPI no es "generar lindos docs"; es tener **una sola fuente de verdad del contrato** que sirve a la vez de documentación, de generador de código y de **gate de CI** (el contract testing del módulo de API Testing rompe el build si la implementación se desvía del spec). Diseñar spec-first te fuerza a pensar el contrato antes de teclear el primer handler — que es, justamente, de lo que trató todo este módulo.
 
-**Ejercicios 13**
-13.1 🔁 ¿Qué describe un documento OpenAPI y cuál es la diferencia entre code-first y spec-first?
-13.2 🧠 Nombrá tres cosas que te habilita tener el contrato como spec OpenAPI, más allá de la documentación.
-13.3 🧠 ¿Cómo se conecta OpenAPI con el contract testing de [API Testing](api-testing.md) para evitar que un cambio rompa a un consumidor en producción?
+**Ejercicios 14**
+14.1 🔁 ¿Qué describe un documento OpenAPI y cuál es la diferencia entre code-first y spec-first?
+14.2 🧠 Nombrá tres cosas que te habilita tener el contrato como spec OpenAPI, más allá de la documentación.
+14.3 🧠 ¿Cómo se conecta OpenAPI con el contract testing de [API Testing](api-testing.md) para evitar que un cambio rompa a un consumidor en producción?
 
 ---
 
-## Módulo 14 — Caso completo: diseñar la API pública de la Task API
+## Módulo 15 — Caso completo: diseñar la API pública de la Task API
 
 **Teoría.** Apliquemos todo a la "Task API" del hub (usuarios ↔ proyectos ↔ tareas), ahora como **API pública** que van a consumir terceros.
 
@@ -559,29 +609,31 @@ POST   /tareas/{id}/completar                  # acción no-CRUD (excepción jus
 
 **4. Errores (módulo 9).** Una sola forma `application/problem+json` en toda la API, discriminable por `type`. Validación → `422`; recurso ajeno → `403`; inexistente → `404`; conflicto de edición concurrente → `409`.
 
-**5. Rate limiting (módulo 10).** `429` + `Retry-After` + headers `RateLimit-*` para que los integradores se autorregulen.
+**5. Autenticación (módulo 10).** Bearer/OAuth2 para usuarios (o API key para integraciones server-to-server), siempre por header `Authorization`, nunca en la URL. `401` con `WWW-Authenticate` cuando falta o vence el token; scopes (`tareas:leer`/`tareas:escribir`) con mínimo privilegio, y `403` cuando la credencial es válida pero no alcanza.
 
-**6. Caching y concurrencia optimista (módulo 11).** `ETag` en `GET /tareas/{id}` (lectura barata vía `304`) y `If-Match` → `412` en `PATCH /tareas/{id}` para que dos editores concurrentes no se pisen.
+**6. Rate limiting (módulo 11).** `429` + `Retry-After` + headers `RateLimit-*` para que los integradores se autorregulen.
 
-**7. Webhooks (módulo 12).** Los integradores se suscriben a eventos (`tarea.completada`) y los reciben firmados con HMAC, con id de evento para deduplicar y reintentos con backoff de nuestro lado.
+**7. Caching y concurrencia optimista (módulo 12).** `ETag` en `GET /tareas/{id}` (lectura barata vía `304`) y `If-Match` → `412` en `PATCH /tareas/{id}` para que dos editores concurrentes no se pisen.
 
-**8. CORS (si es API de browser).** Si un front en otro origen la consume, el contrato incluye CORS: el browser manda un *preflight* `OPTIONS` y nosotros respondemos qué orígenes, métodos y headers permitimos (`Access-Control-Allow-Origin`, etc.). Es contrato del lado del browser, no implementación: definirlo mal (un `*` permisivo en una API con credenciales) es un agujero de seguridad.
+**8. Webhooks (módulo 13).** Los integradores se suscriben a eventos (`tarea.completada`) y los reciben firmados con HMAC, con id de evento para deduplicar y reintentos con backoff de nuestro lado.
 
-**9. Versionado y evolución (módulos 8-9).** Arranca en `/v1`. Los cambios compatibles (campos opcionales, endpoints nuevos) entran sin versión nueva; un breaking real dispara `/v2` con expand-contract y headers `Deprecation`/`Sunset` para la `v1`.
+**9. CORS (si es API de browser).** *(No tuvo módulo propio: es contrato del lado del browser, y su mecánica se ve en [Express](express.md)/[Autenticación](autenticacion.md).)* Si un front en otro origen la consume, el contrato incluye CORS: el browser manda un *preflight* `OPTIONS` y nosotros respondemos qué orígenes, métodos y headers permitimos (`Access-Control-Allow-Origin`, etc.). Definirlo mal (un `*` permisivo en una API con credenciales) es un agujero de seguridad.
 
-**10. El contrato como spec (módulo 13).** Todo lo anterior vive en un OpenAPI spec-first, que genera el cliente tipado, alimenta el mock para los integradores y es el gate de contract testing en CI.
+**10. Versionado y evolución (módulos 7-8).** Arranca en `/v1`. Los cambios compatibles (campos opcionales, endpoints nuevos) entran sin versión nueva; un breaking real dispara `/v2` con expand-contract y headers `Deprecation`/`Sunset` para la `v1`.
+
+**11. El contrato como spec (módulo 14).** Todo lo anterior vive en un OpenAPI spec-first, que genera el cliente tipado, alimenta el mock para los integradores y es el gate de contract testing en CI.
 
 **Retrospectiva del método.** Diseñamos **el contrato primero** (recursos, formas, errores, evolución) y dejamos la implementación para después. Ese es el orden senior: la interfaz pública es lo caro y duradero; el código que la cumple es reemplazable.
 
-> **El cierre de criterio — no sobre-diseñar.** Todo esto asume una API pública con integradores externos y escala. Si tu API es interna, para un solo front que controlás, mucho de esto es over-engineering: offset alcanza, una versión informal alcanza, y un error simple y consistente alcanza. La marca de seniority no es aplicar las 12 cosas siempre — es **saber cuáles pide tu contexto**. "Diseñá el contrato que tus consumidores necesitan, ni más ni menos" — esa frase vale todo el módulo.
+> **El cierre de criterio — no sobre-diseñar.** Todo esto asume una API pública con integradores externos y escala. Si tu API es interna, para un solo front que controlás, mucho de esto es over-engineering: offset alcanza, una versión informal alcanza, y un error simple y consistente alcanza. La marca de seniority no es aplicar las 15 cosas siempre — es **saber cuáles pide tu contexto**. "Diseñá el contrato que tus consumidores necesitan, ni más ni menos" — esa frase vale todo el módulo.
 
 **Las 3 cosas (cierre del marco).** Una respuesta completa de diseño de API tiene: **(a)** una forma para el happy path (recursos, métodos, status, paginación), **(b)** un modelo de falla (errores `problem+json` consistentes, `429`/`Retry-After`, idempotencia ante reintentos) y **(c)** un camino de evolución (no-breaking por default, expand-contract y versionado solo cuando rompe). Si tu diseño cubre las tres, pensaste el contrato como un sistema vivo, no como una foto.
 
-**Ejercicios 14**
-14.1 🧠 Para `POST /proyectos/{id}/tareas`, listá las decisiones de contrato que tomarías (status de éxito, header de idempotencia, forma del error de validación, status si el proyecto no existe).
-14.2 🧠 Te piden agregar un campo `prioridad` a las tareas. ¿Es breaking? ¿Cómo lo introducís sin tocar la versión?
-14.3 🧠 ¿Qué tres cosas (happy path, modelo de falla, evolución) explicitarías al presentar el diseño de esta API en una entrevista, y por qué las tres juntas demuestran criterio?
-14.4 ✍️ Escribí un handler `crearTarea(req)` que reúna las piezas del contrato: si falta el título, devolvé `422` con `problem+json`; si el proyecto no existe, `404`; si todo va bien, `201` con header `Location`. Usá los tipos de abajo.
+**Ejercicios 15**
+15.1 🧠 Para `POST /proyectos/{id}/tareas`, listá las decisiones de contrato que tomarías (status de éxito, header de idempotencia, forma del error de validación, status si el proyecto no existe).
+15.2 🧠 Te piden agregar un campo `prioridad` a las tareas. ¿Es breaking? ¿Cómo lo introducís sin tocar la versión?
+15.3 🧠 ¿Qué tres cosas (happy path, modelo de falla, evolución) explicitarías al presentar el diseño de esta API en una entrevista, y por qué las tres juntas demuestran criterio?
+15.4 ✍️ Escribí un handler `crearTarea(req)` que reúna las piezas del contrato: si falta el título, devolvé `422` con `problem+json`; si el proyecto no existe, `404`; si todo va bien, `201` con header `Location`. Usá los tipos de abajo.
 ```ts
 interface Req { proyectoId: number; body: { titulo?: string }; }
 interface Res { status: number; headers?: Record<string, string>; body: unknown; }
@@ -683,6 +735,8 @@ function decodificarCursor(token: string): Cursor {
 }
 // El cliente trata el token como opaco: solo reenvía lo que le diste. Eso te deja
 // cambiar qué hay adentro del cursor sin romper el contrato.
+// Usamos `base64url` (no `base64`) porque el cursor viaja en el query string:
+// base64url no usa `+`, `/` ni `=`, que en una URL necesitarían escaparse (percent-encoding).
 ```
 
 ### Módulo 6
@@ -702,7 +756,7 @@ function decodificarCursor(token: string): Cursor {
 ### Módulo 8
 **8.1** (a) campo opcional nuevo en la respuesta → **no breaking** (el cliente que no lo conoce lo ignora). (b) renombrar un campo → **breaking** (el cliente que lo lee deja de encontrarlo). (c) volver obligatorio un parámetro opcional → **breaking** (los clientes que no lo mandaban empiezan a fallar). (d) endpoint nuevo → **no breaking** (nadie dependía de él).
 
-**8.2** **Expand:** la respuesta devuelve **los dos** campos a la vez, `email` (deprecado) y `correo` (nuevo), con el mismo valor; si también recibís input, aceptás ambos. **Migrate:** los consumidores cambian a `correo` a su ritmo; medís con telemetría quién sigue leyendo/mandando `email`, y anunciás la deprecación (headers `Deprecation`/`Sunset`, changelog). **Contract:** cuando el uso de `email` cae a cero o vence el plazo anunciado, lo quitás (eso sí, en una versión nueva si todavía hubiera quien lo use). Nunca quitás y agregás en el mismo paso.
+**8.2** **Expand:** la respuesta devuelve **los dos** campos a la vez, `email` (deprecado) y `correo` (nuevo), con el mismo valor; si también recibís input, aceptás ambos. **Migrate:** los consumidores cambian a `correo` a su ritmo; medís con telemetría quién sigue leyendo/mandando `email`, y anunciás la deprecación (headers `Deprecation`/`Sunset`, changelog). **Contract:** quitar un campo es un cambio **breaking**, así que se materializa en una **versión nueva** (o tras la fecha de `Sunset` anunciada), una vez que el uso del viejo ya es marginal o nulo. Nunca quitás y agregás en el mismo paso.
 
 **8.3** Porque un cambio de **forma** (tipo/nombre) **rompe visiblemente** —el campo desaparece o no parsea, y los tests de schema y los clientes lo detectan al toque—. Un cambio de **semántica** deja la forma intacta (mismo nombre, mismo tipo) pero cambia el *significado* (`total` antes con impuestos, ahora sin): el cliente sigue leyendo el campo sin error y muestra/cobra mal, en silencio. Los tests de schema validan **estructura**, no significado, así que pasan en verde mientras el contrato real ya se rompió. Por eso un cambio de semántica se trata como breaking y se hace con un campo nuevo.
 
@@ -714,41 +768,48 @@ function decodificarCursor(token: string): Cursor {
 **9.3** Porque un stack trace o una query SQL **filtran información interna** (estructura del código, nombres de tablas, versiones, rutas del servidor) que ayuda a un atacante y expone tu implementación. En su lugar devolvés un error `problem+json` limpio y consistente con un **`traceId`** (o `instance`), logueás el detalle completo internamente asociado a ese id, y el usuario/soporte te pasa el `traceId` para que vos encuentres el problema en tus logs. El cliente recibe lo justo para actuar; el detalle sensible se queda adentro.
 
 ### Módulo 10
-**10.1** El status **`429 Too Many Requests`** y el header **`Retry-After`** (segundos o fecha HTTP), que le dice al cliente cuándo puede reintentar.
+**10.1** Una **API key** es un secreto opaco de **larga vida** que identifica a una **aplicación** (server-to-server, una integración de terceros). Un **Bearer token** (OAuth2/OIDC, típicamente un JWT) es de **vida corta** y representa a un **usuario** (o a una app actuando en su nombre), obtenido mediante un flujo OAuth2 y renovado al vencer. El contrato define, en cada caso, cómo se emite/rota/revoca (API key) o cómo se obtiene/expira/refresca (Bearer).
 
-**10.2** Porque sin `Retry-After` los clientes reintentan **a ciegas e inmediatamente**, normalmente todos a la vez; el servidor ya saturado recibe una avalancha de reintentos (aunque los rechace con `429`, el volumen de conexiones lo golpea) → el mecanismo de defensa se vuelve amplificador de carga. Es el **retry storm** de [Concurrencia](concurrencia.md) módulo 19: la recuperación mal hecha agrava la falla. Con `Retry-After` (y backoff + jitter del lado cliente) los reintentos se espacian y desincronizan.
+**10.2** Porque la URL (path + query string) se registra y se reenvía en muchos lugares fuera de tu control: los **access logs** del servidor y de los proxies/CDN, el **historial del browser**, y el header **`Referer`** que se manda a sitios de terceros al navegar. Una credencial ahí queda expuesta a cualquiera que lea esos registros. Por eso siempre viaja en el header `Authorization` (o uno dedicado), sobre HTTPS, nunca en `?api_key=...` ni en el path.
 
-**10.3** Porque `429` es **reactivo** (ya chocaste con el límite), mientras que `RateLimit-Limit/Remaining/Reset` son **proactivos**: le dan al cliente visibilidad de cuánta cuota le queda y cuándo se resetea, para que **baje el ritmo antes** de comerse el `429`. Un cliente bien hecho mira `Remaining` y se autorregula; así evitás el rechazo del todo, que es mejor para ambos lados que rechazar y reintentar.
+**10.3** Devolvés **`403 Forbidden`**: la credencial está **autenticada** (sabés quién es), pero su scope `tareas:leer` **no autoriza** la escritura — es un problema de permiso, no de identidad, así que no es `401`. (`401` sería "no sé quién sos / no mandaste credencial válida".) Si en cambio el token hubiera **vencido**, devolverías `401` acompañado del header **`WWW-Authenticate: Bearer error="invalid_token"`**, para que el cliente sepa que debe refrescar el token y reintentar.
 
 ### Módulo 11
-**11.1** Responde **`304 Not Modified`** (sin cuerpo). Se ahorra **ancho de banda y serialización**: el servidor no retransmite una representación que el cliente ya tiene en caché; el cliente reusa su copia. (Igual hay un round-trip de red, pero sin payload.)
+**11.1** El status **`429 Too Many Requests`** y el header **`Retry-After`** (segundos o fecha HTTP), que le dice al cliente cuándo puede reintentar.
 
-**11.2** El cliente lee el recurso y guarda su `ETag` (ej. `"v3"`); al escribir, manda `If-Match: "v3"` ("actualizá solo si sigue en v3"). Si otro lo editó mientras tanto, el ETag actual ya es `"v4"`, no coincide, y el servidor responde **`412 Precondition Failed`** sin aplicar el cambio → no se pisa la escritura del otro. El cliente releé, re-aplica su cambio sobre la versión fresca y reintenta. Se corresponde con el **optimistic locking** de [PostgreSQL](postgresql.md) (columna `version` que se chequea en el `UPDATE ... WHERE version = ?`): misma idea, expresada en el contrato HTTP.
+**11.2** Porque sin `Retry-After` los clientes reintentan **a ciegas e inmediatamente**, normalmente todos a la vez; el servidor ya saturado recibe una avalancha de reintentos (aunque los rechace con `429`, el volumen de conexiones lo golpea) → el mecanismo de defensa se vuelve amplificador de carga. Es el **retry storm** de [Concurrencia](concurrencia.md) módulo 19: la recuperación mal hecha agrava la falla. Con `Retry-After` (y backoff + jitter del lado cliente) los reintentos se espacian y desincronizan.
 
-**11.3** `private` cuando el recurso es **por-usuario** (el perfil propio, el saldo): solo el browser de ese usuario puede cachearlo, nunca una CDN/proxy compartido. Si por error lo marcás `public`, un caché compartido puede **servirle a un usuario los datos cacheados de otro** — una fuga de datos entre usuarios. Por eso `private` (o `no-store`) es el default seguro para todo lo que dependa de quién pregunta.
+**11.3** Porque `429` es **reactivo** (ya chocaste con el límite), mientras que `RateLimit-Limit/Remaining/Reset` son **proactivos**: le dan al cliente visibilidad de cuánta cuota le queda y cuándo se resetea, para que **baje el ritmo antes** de comerse el `429`. Un cliente bien hecho mira `Remaining` y se autorregula; así evitás el rechazo del todo, que es mejor para ambos lados que rechazar y reintentar.
 
 ### Módulo 12
-**12.1** Porque la red entre el emisor y el receptor también pierde ACKs: el emisor reintenta ante la duda, así que el mismo evento puede llegar más de una vez (at-least-once). Le exige al receptor ser **idempotente**: deduplicar por el `id` del evento (registrarlo como procesado, atómicamente, antes de aplicar el efecto), para que recibir un duplicado no dispare el efecto dos veces.
+**12.1** Responde **`304 Not Modified`** (sin cuerpo). Se ahorra **ancho de banda y serialización**: el servidor no retransmite una representación que el cliente ya tiene en caché; el cliente reusa su copia. (Igual hay un round-trip de red, pero sin payload.)
 
-**12.2** Sirve para **autenticar** el webhook: prueba que el `POST` lo mandó quien dice (que comparte el secreto), no un atacante que descubrió la URL del receptor. La comparación se hace en **tiempo constante** (`timingSafeEqual`) para no filtrar información por *timing*: una comparación normal (`===`) corta en el primer byte distinto, y midiendo cuánto tarda en fallar un atacante puede ir adivinando la firma byte a byte. Tiempo constante = el tiempo de comparar no depende de cuántos bytes coinciden.
+**12.2** El cliente lee el recurso y guarda su `ETag` (ej. `"v3"`); al escribir, manda `If-Match: "v3"` ("actualizá solo si sigue en v3"). Si otro lo editó mientras tanto, el ETag actual ya es `"v4"`, no coincide, y el servidor responde **`412 Precondition Failed`** sin aplicar el cambio → no se pisa la escritura del otro. El cliente releé, re-aplica su cambio sobre la versión fresca y reintenta. Se corresponde con el **optimistic locking** de [PostgreSQL](postgresql.md) (columna `version` que se chequea en el `UPDATE ... WHERE version = ?`): misma idea, expresada en el contrato HTTP. (Para esto el ETag debe ser **fuerte**, no débil `W/"..."`.)
 
-**12.3** Porque el emisor espera un `2xx` **rápido** como acuse de recibo; si el handler hace el trabajo pesado en línea y tarda, el emisor lo interpreta como lento o caído y **reintenta** — y el receptor termina procesando el mismo evento varias veces por su propia lentitud, además de arriesgar timeouts. Patrón correcto: validar la firma, encolar el evento, responder `2xx` enseguida, y procesar en un worker aparte (el "aceptá rápido, procesá después" del `202`).
+**12.3** `private` cuando el recurso es **por-usuario** (el perfil propio, el saldo): solo el browser de ese usuario puede cachearlo, nunca una CDN/proxy compartido. Si por error lo marcás `public`, un caché compartido puede **servirle a un usuario los datos cacheados de otro** — una fuga de datos entre usuarios. Por eso `private` (o `no-store`) es el default seguro para todo lo que dependa de quién pregunta.
 
 ### Módulo 13
-**13.1** Un documento OpenAPI describe el contrato de la API: endpoints, métodos, parámetros, schemas de request/response, errores y auth, en YAML/JSON estándar. **Code-first:** el código (con anotaciones) es la fuente y el spec se genera desde él (cómodo, pero el contrato queda subordinado a la implementación). **Spec-first (design-first):** el spec se escribe **primero** y de él se generan stubs, clientes y mocks — el contrato es el artefacto que se diseña antes de implementar.
+**13.1** Porque la red entre el emisor y el receptor también pierde ACKs: el emisor reintenta ante la duda, así que el mismo evento puede llegar más de una vez (at-least-once). Le exige al receptor ser **idempotente**: deduplicar por el `id` del evento (registrarlo como procesado, atómicamente, antes de aplicar el efecto), para que recibir un duplicado no dispare el efecto dos veces.
 
-**13.2** Tres (de varias): (1) **codegen** de clientes tipados y stubs de servidor en varios lenguajes; (2) **mock servers** para que los consumidores desarrollen contra el contrato antes de que exista el backend; (3) **contract testing** que verifica en CI que la implementación cumple el spec (y que un cambio no rompe a los consumidores). *(También: documentación siempre sincronizada.)*
+**13.2** Sirve para **autenticar** el webhook: prueba que el `POST` lo mandó quien dice (que comparte el secreto), no un atacante que descubrió la URL del receptor. La comparación se hace en **tiempo constante** (`timingSafeEqual`) para no filtrar información por *timing*: una comparación normal (`===`) corta en el primer byte distinto, y midiendo cuánto tarda en fallar un atacante puede ir adivinando la firma byte a byte. Tiempo constante = el tiempo de comparar no depende de cuántos bytes coinciden.
 
-**13.3** El OpenAPI es la **fuente de verdad** del contrato; el contract testing ([API Testing](api-testing.md)) lo usa como referencia para verificar, en CI, que la API real **cumple** lo que el spec promete (validación de schema, testing dirigido por spec con Schemathesis) y que los consumidores siguen siendo compatibles (consumer-driven contracts con Pact). Si un cambio desvía la implementación del contrato acordado, **el build falla antes de deployar**, no en producción frente al consumidor.
+**13.3** Porque el emisor espera un `2xx` **rápido** como acuse de recibo; si el handler hace el trabajo pesado en línea y tarda, el emisor lo interpreta como lento o caído y **reintenta** — y el receptor termina procesando el mismo evento varias veces por su propia lentitud, además de arriesgar timeouts. Patrón correcto: validar la firma, encolar el evento, responder `2xx` enseguida, y procesar en un worker aparte (el "aceptá rápido, procesá después" del `202`).
 
 ### Módulo 14
-**14.1** (a) Éxito: **`201 Created`** con `Location: /tareas/{nuevoId}` (y opcionalmente la tarea en el cuerpo). (b) Header de idempotencia: aceptar **`Idempotency-Key`** para que un reintento no cree una tarea duplicada. (c) Error de validación (ej. `titulo` vacío): **`422`** con cuerpo `application/problem+json` discriminable por `type`. (d) Si el proyecto `{id}` no existe: **`404`** (con el mismo formato de error). *(Y `403` si el proyecto es de otro usuario.)*
+**14.1** Un documento OpenAPI describe el contrato de la API: endpoints, métodos, parámetros, schemas de request/response, errores y auth, en YAML/JSON estándar. **Code-first:** el código (con anotaciones) es la fuente y el spec se genera desde él (cómodo, pero el contrato queda subordinado a la implementación). **Spec-first (design-first):** el spec se escribe **primero** y de él se generan stubs, clientes y mocks — el contrato es el artefacto que se diseña antes de implementar.
 
-**14.2** **No es breaking:** agregar un campo opcional a la respuesta es compatible (los clientes que no lo conocen lo ignoran). Lo introducís **sin tocar la versión**: agregás `prioridad` a la respuesta con un default sensato (ej. `"media"`) y, si se puede setear, como parámetro **opcional** en `POST`/`PATCH`. Documentás el campo nuevo en el changelog y listo — `v1` sigue viva.
+**14.2** Tres (de varias): (1) **codegen** de clientes tipados y stubs de servidor en varios lenguajes; (2) **mock servers** para que los consumidores desarrollen contra el contrato antes de que exista el backend; (3) **contract testing** que verifica en CI que la implementación cumple el spec (y que un cambio no rompe a los consumidores). *(También: documentación siempre sincronizada.)*
 
-**14.3** **(a) Happy path:** recursos, métodos, status codes y paginación (cómo se ve cuando todo sale bien). **(b) Modelo de falla:** errores `problem+json` consistentes, `429`/`Retry-After`, e idempotencia ante reintentos (qué pasa cuando algo sale mal). **(c) Evolución:** cambios no-breaking por default, expand-contract y versionado solo cuando rompe (cómo cambia el contrato sin romper consumidores). Las tres juntas demuestran que pensás la API como un **sistema vivo** con consumidores reales a lo largo del tiempo, no como un set de endpoints para el demo de hoy — y eso es exactamente lo que evalúa una entrevista de diseño senior.
+**14.3** El OpenAPI es la **fuente de verdad** del contrato; el contract testing ([API Testing](api-testing.md)) lo usa como referencia para verificar, en CI, que la API real **cumple** lo que el spec promete (validación de schema, testing dirigido por spec con Schemathesis) y que los consumidores siguen siendo compatibles (consumer-driven contracts con Pact). Si un cambio desvía la implementación del contrato acordado, **el build falla antes de deployar**, no en producción frente al consumidor.
 
-**14.4**
+### Módulo 15
+**15.1** (a) Éxito: **`201 Created`** con `Location: /tareas/{nuevoId}` (y opcionalmente la tarea en el cuerpo). (b) Header de idempotencia: aceptar **`Idempotency-Key`** para que un reintento no cree una tarea duplicada. (c) Error de validación (ej. `titulo` vacío): **`422`** con cuerpo `application/problem+json` discriminable por `type`. (d) Si el proyecto `{id}` no existe: **`404`** (con el mismo formato de error). *(Y `403` si el proyecto es de otro usuario.)*
+
+**15.2** **No es breaking:** agregar un campo opcional a la respuesta es compatible (los clientes que no lo conocen lo ignoran). Lo introducís **sin tocar la versión**: agregás `prioridad` a la respuesta con un default sensato (ej. `"media"`) y, si se puede setear, como parámetro **opcional** en `POST`/`PATCH`. Documentás el campo nuevo en el changelog y listo — `v1` sigue viva. *(Matiz del módulo 8: si `prioridad` es un enum, agregar el campo es no-breaking, pero más adelante agregar un **valor** nuevo (`"urgente"`) sí puede romper a un cliente que haga un `switch` exhaustivo sobre los valores conocidos; documentá que el set de valores puede crecer.)*
+
+**15.3** **(a) Happy path:** recursos, métodos, status codes y paginación (cómo se ve cuando todo sale bien). **(b) Modelo de falla:** errores `problem+json` consistentes, `429`/`Retry-After`, e idempotencia ante reintentos (qué pasa cuando algo sale mal). **(c) Evolución:** cambios no-breaking por default, expand-contract y versionado solo cuando rompe (cómo cambia el contrato sin romper consumidores). Las tres juntas demuestran que pensás la API como un **sistema vivo** con consumidores reales a lo largo del tiempo, no como un set de endpoints para el demo de hoy — y eso es exactamente lo que evalúa una entrevista de diseño senior.
+
+**15.4**
 ```ts
 interface Req { proyectoId: number; body: { titulo?: string }; }
 interface Res { status: number; headers?: Record<string, string>; body: unknown; }
@@ -794,9 +855,9 @@ async function crearTarea(req: Req, repo: TareaRepo): Promise<Res> {
 
 ## Siguientes pasos
 
-Cuando estos 12 módulos te salgan fluidos, tenés el criterio para diseñar un contrato que sobreviva a su éxito: **happy path claro, fallas previstas y evolución sin romper.** Recomendado a continuación:
+Cuando estos 15 módulos te salgan fluidos, tenés el criterio para diseñar un contrato que sobreviva a su éxito: **happy path claro, fallas previstas y evolución sin romper.** Recomendado a continuación:
 
 - **Implementá el contrato** que diseñaste: [Express](express.md) o [NestJS](nestjs.md) para REST, [GraphQL](graphql.md) si elegiste ese estilo.
 - **Probá el contrato:** [API Testing](api-testing.md) — afirmá el contrato (no solo el `200`), contract testing con Pact y testing dirigido por OpenAPI.
-- **Conectá con el sistema:** la idempotencia y el rate limiting viven en [Diseño de sistemas](system-design.md) (módulos 8 y 12) y [Concurrencia](concurrencia.md) (idempotencia bajo carrera, retry storm); la auth del contrato, en [Autenticación](autenticacion.md).
+- **Asegurá el contrato:** la mecánica de la autenticación que acá diseñaste (JWT, OAuth2/PKCE, hashing, refresh) está en [Autenticación](autenticacion.md); la idempotencia y el rate limiting viven en [Diseño de sistemas](system-design.md) (módulos 8 y 12) y [Concurrencia](concurrencia.md) (idempotencia bajo carrera, retry storm).
 - **Diseñá la API de tu portfolio "para terceros":** tomá tu Task API y escribí su OpenAPI spec-first con todo lo de este módulo. Ese documento, hecho con criterio (sin sobre-diseñar), demuestra seniority de diseño.
