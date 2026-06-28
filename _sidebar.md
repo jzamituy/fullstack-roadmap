@@ -75,6 +75,8 @@
   - [🛠️ Replicación: laboratorio práctico](replicacion-practica.md)
   - [🌊 Datos en movimiento: streams y analytics](streams.md)
   - [🛠️ Streams y analytics: laboratorio práctico](streams-practica.md)
+  - [🗃️ Datos a escala y multi-tenancy](datos-escala.md)
+  - [🛠️ Datos a escala: laboratorio práctico](datos-escala-practica.md)
 
 - **Concurrencia**
   - [🔀 Concurrencia en system design](concurrencia.md)
