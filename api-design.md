@@ -10,7 +10,7 @@
 
 **Tipos de ejercicio** (para que sepas cuándo solo pensar y cuándo abrir el editor): 🔁 recordar · 🧠 criterio/análisis · ✍️ implementación (escribís código). Este módulo es mayormente criterio (vas a ver muchos 🧠), porque diseñar una API **es** tomar decisiones y defenderlas.
 
-**El marco que usamos en las fallas.** Para cada decisión de contrato que puede romper a un consumidor, aplicamos las **cuatro capas**: (1) **qué se rompe**, (2) **por qué** a esta escala/forma de uso, (3) **control de corto plazo** que frena el daño, (4) **cambio de diseño** que baja la probabilidad de que se repita. Y una buena respuesta de diseño de API tiene **tres cosas**: una **forma para el happy path** (el contrato feliz), un **modelo de falla** (qué devolvés cuando algo sale mal) y un **camino de evolución** (cómo cambiás sin romper). Lo cerramos en el módulo 12.
+**El marco que usamos en las fallas.** Para cada decisión de contrato que puede romper a un consumidor, aplicamos las **cuatro capas**: (1) **qué se rompe**, (2) **por qué** a esta escala/forma de uso, (3) **control de corto plazo** que frena el daño, (4) **cambio de diseño** que baja la probabilidad de que se repita. Y una buena respuesta de diseño de API tiene **tres cosas**: una **forma para el happy path** (el contrato feliz), un **modelo de falla** (qué devolvés cuando algo sale mal) y un **camino de evolución** (cómo cambiás sin romper). Lo cerramos en el módulo 14.
 
 **Índice de módulos**
 1. El contrato primero: qué es diseñar una API
@@ -23,8 +23,10 @@
 8. Evolución sin romper: breaking vs non-breaking y expand-contract
 9. El contrato de error: problem+json (RFC 9457)
 10. Rate limiting y cuotas en el contrato (429 y Retry-After)
-11. OpenAPI como fuente de verdad: spec-first y contract testing
-12. Caso completo: diseñar la API pública de la Task API
+11. Caching HTTP y concurrencia optimista: ETag, 304 y If-Match
+12. Webhooks: el contrato saliente
+13. OpenAPI como fuente de verdad: spec-first y contract testing
+14. Caso completo: diseñar la API pública de la Task API
 
 Las soluciones de **todos** los ejercicios están al final, en la sección "Soluciones".
 
@@ -201,6 +203,7 @@ WHERE (created_at, id) < ('2026-06-01T10:00', 12345)   -- "después" del cursor
 ORDER BY created_at DESC, id DESC
 LIMIT 20;
 ```
+*(Ojo con el sentido de la comparación: el operador sigue al orden. Con `ORDER BY ... DESC` querés "lo más viejo que el cursor", así que va `<`; con `ORDER BY ... ASC` sería `>`. Si invertís el orden y te olvidás de invertir el operador, la página siguiente te devuelve para atrás.)*
 - **A favor:** **O(1) por página** si hay índice sobre `(created_at, id)` — la base salta directo al punto, no recorre y descarta. Y es **estable**: las inserciones no corren las páginas, porque navegás por *valor de clave*, no por posición.
 - **En contra:** no podés saltar a "la página 7" (solo siguiente/anterior), y necesitás un orden total y estable (por eso el desempate con `id`: dos filas con el mismo `created_at` necesitan un criterio único o el cursor es ambiguo).
 
@@ -351,7 +354,7 @@ Content-Type: application/problem+json
 - **`status`:** repite el HTTP status (conveniencia).
 - **`detail`:** explicación específica de *esta* ocurrencia.
 - **`instance`:** qué recurso/ocurrencia falló.
-- **Campos de extensión** (`errors`, etc.): podés agregar los tuyos (ej. la lista de errores de validación por campo).
+- **Campos de extensión** (`errors`, etc.): podés agregar los tuyos (ej. la lista de errores de validación por campo). *(Acá usamos nombres en español por la convención del proyecto, pero ojo: los campos estándar de RFC 9457 van en inglés, y en una API pública real los de extensión también suelen ir en inglés (`field`, `message`) por interoperabilidad. El nombre lo elegís vos; elegí inglés si esperás consumidores de afuera.)*
 
 ```ts
 // El tipo del cuerpo de error, compartido por toda la API (compila en --strict).
@@ -402,7 +405,7 @@ RateLimit-Limit: 100
 RateLimit-Remaining: 12
 RateLimit-Reset: 30
 ```
-Hay un *draft* de IETF (`RateLimit` fields) que estandariza esto; en la práctica vas a ver mucho los de-facto `X-RateLimit-*`. Lo importante del **contrato**: exponer límite, restante y cuándo se resetea, para que un cliente educado baje el ritmo **antes** de comerse un `429`.
+Hay un *draft* de IETF (`RateLimit` fields) que estandariza esto. Ojo a la versión: las revisiones recientes del draft unifican todo en **un solo header** con sintaxis de *structured fields* (`RateLimit: limit=100, remaining=12, reset=30`), mientras que la forma de campos separados (`RateLimit-Limit/Remaining/Reset`) es de un draft anterior y los `X-RateLimit-*` son el de-facto que más vas a ver en producción hoy. Lo importante del **contrato** no es qué header exacto, sino exponer límite, restante y cuándo se resetea, para que un cliente educado baje el ritmo **antes** de comerse un `429`.
 
 > **4 capas — el `429` sin `Retry-After`:**
 > 1. **Qué se rompe:** los clientes que reciben `429` reintentan de inmediato y en masa; el rate limiter rechaza más rápido pero el volumen de requests (aunque rechazadas) satura el borde.
@@ -419,7 +422,96 @@ Hay un *draft* de IETF (`RateLimit` fields) que estandariza esto; en la práctic
 
 ---
 
-## Módulo 11 — OpenAPI como fuente de verdad: spec-first y contract testing
+## Módulo 11 — Caching HTTP y concurrencia optimista: ETag, 304 e If-Match
+
+**Teoría.** El módulo 2 dijo que REST es "cacheable por la infraestructura HTTP". Eso no es magia: es **contrato**. Vos decidís, en los headers de respuesta, qué pueden cachear el browser, la CDN y los proxies — y de paso resolvés un problema de concurrencia que el módulo 3 dejó abierto (el `409`).
+
+**Cache-Control: la política de cacheo.** El header con el que el servidor declara qué se puede guardar y por cuánto:
+- `Cache-Control: max-age=3600` — cacheable 1 hora.
+- `Cache-Control: no-store` — nunca cachear (datos sensibles).
+- `Cache-Control: private` — solo el browser del usuario, no las CDNs/proxies compartidos (datos por-usuario); `public` permite cachés compartidos.
+
+**ETag: el validador de versión.** Un `ETag` es una "huella" de la representación actual del recurso (un hash, o un número de versión). El servidor lo manda en la respuesta; el cliente lo guarda y, la próxima vez, pregunta *"¿cambió respecto de esta versión?"* con un **GET condicional**:
+
+```http
+GET /tareas/7
+If-None-Match: "v3"
+
+→ 304 Not Modified        # no cambió: el cliente reusa su copia, sin cuerpo en la respuesta
+→ 200 OK + ETag: "v4"     # cambió: te mando la versión nueva
+```
+
+El `304 Not Modified` ahorra **ancho de banda y serialización**: el servidor no retransmite un cuerpo que el cliente ya tiene. Es el mismo trade-off `staleTime` vs revalidación que ya diste con React Query/SWR, ahora en el protocolo.
+
+**Concurrencia optimista: `If-Match` → `412`.** El mismo ETag, del lado de la **escritura**, resuelve el *lost update* (dos clientes editan el mismo recurso y el segundo pisa al primero sin enterarse). El cliente manda la versión que leyó:
+
+```http
+PUT /tareas/7
+If-Match: "v3"            # "actualizá solo si sigue en la versión v3"
+
+→ 200 OK                  # seguía en v3: se aplicó, nueva ETag "v4"
+→ 412 Precondition Failed # ya estaba en v4 (otro la editó): rechazado, releé y reintentá
+```
+
+Esto es **optimistic locking a nivel contrato** — el primo HTTP del lock optimista con columna de versión de [PostgreSQL](postgresql.md) y del `409 Conflict` del módulo 3. El `412` le dice al cliente "tu copia quedó vieja, no te dejo pisar"; el cliente releé, re-aplica su cambio sobre la versión fresca y reintenta.
+
+> **4 capas — el *lost update* por edición concurrente:**
+> 1. **Qué se rompe:** dos usuarios abren la misma tarea, ambos editan, el segundo en guardar **pisa** el cambio del primero sin que nadie se entere. Se pierde una escritura.
+> 2. **Por qué a esta escala/uso:** invisible con un solo editor; aparece cuando varios usuarios (o varias pestañas) editan el mismo recurso, o con un `PATCH` lento y otro rápido encima.
+> 3. **Control de corto plazo:** exigir `If-Match` con el ETag en los `PUT`/`PATCH` de recursos editables concurrentemente; rechazar con `412` si no coincide.
+> 4. **Cambio de diseño:** versionar el recurso (columna `version`/`updated_at` que alimenta el ETag) y documentar en el contrato que esas escrituras son condicionales; el cliente sabe que debe leer-modificar-reintentar.
+
+> **El insight:** caching y concurrencia optimista son **la misma pieza** (el ETag) mirada desde dos lados: en lectura ahorra transferencia (`304`), en escritura previene pisar cambios (`412`). Un contrato senior expone ETags en los recursos que se leen mucho y se editan concurrentemente — gratis te da las dos cosas.
+
+**Ejercicios 11**
+11.1 🔁 ¿Qué responde el servidor a un `GET` con `If-None-Match` cuando el recurso **no** cambió, y qué se ahorra con eso?
+11.2 🧠 Explicá cómo `If-Match` + `412` previene el *lost update*, y con qué patrón de [PostgreSQL](postgresql.md) se corresponde.
+11.3 🧠 ¿Cuándo pondrías `Cache-Control: private` en vez de `public`, y qué pasaría si te equivocás y marcás `public` un recurso por-usuario?
+
+---
+
+## Módulo 12 — Webhooks: el contrato saliente
+
+**Teoría.** Hasta acá tu API **recibe** llamadas. Un **webhook** invierte la dirección: es **tu API la que llama al consumidor** cuando pasa algo (un pago se confirmó, un trabajo terminó). El consumidor registra una URL (`POST /webhooks` con `{ url, eventos }`) y vos le hacés `POST` a esa URL con cada evento. Es el contrato **saliente**, y tiene sus propias reglas — las mismas que ya viste, ahora del otro lado.
+
+**Entrega: at-least-once, así que el receptor debe ser idempotente.** La red entre vos y el consumidor también pierde respuestas: mandás el evento, su servidor lo procesa pero el ACK se pierde, vos reintentás → lo recibe dos veces. Es el at-least-once de [Diseño de sistemas](system-design.md) módulo 8. Por eso cada evento lleva un **id único** y el contrato le pide al receptor que **deduplique por ese id** (la idempotency key del módulo 4, ahora del lado de quien recibe).
+
+**Reintentos y DLQ.** Si la URL del consumidor está caída o responde error, reintentás con **backoff exponencial** (no de inmediato), y tras N fallos parás y marcás el evento como no entregable (una *dead-letter*, ver [event-driven](event-driven.md) y [Redis](redis.md)). El contrato documenta la política: cuántos reintentos, con qué espaciado, y cómo reenviar manualmente.
+
+**Seguridad: firma HMAC.** El receptor necesita probar que el `POST` vino **de vos** y no de un atacante que conoce su URL. La forma estándar: firmás el cuerpo con un **secreto compartido** (HMAC) y mandás la firma en un header; el receptor recalcula la firma y compara. Sumá un **timestamp** firmado para evitar *replay* (reenviar un evento viejo capturado).
+
+```ts
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+// Lado RECEPTOR: verificar que el webhook es auténtico (compila en --strict).
+function webhookEsValido(cuerpoRaw: string, firmaRecibida: string, secreto: string): boolean {
+  const esperada = createHmac("sha256", secreto).update(cuerpoRaw).digest("hex");
+  const a = Buffer.from(esperada, "hex");
+  const b = Buffer.from(firmaRecibida, "hex");
+  // longitudes distintas → timingSafeEqual tira; chequear antes evita la excepción y el leak de timing
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);   // comparación en tiempo constante: no filtra info por timing
+}
+```
+
+> **El receptor responde rápido y procesa async.** El handler del webhook debe devolver `2xx` **enseguida** (encolá el evento y procesalo después), no hacer el trabajo pesado en línea. Si tardás, el emisor te marca como lento/caído y reintenta — y terminás procesando duplicados por tu propia lentitud. "Aceptá rápido, procesá después": el `202` del módulo 4, ahora como receptor.
+
+> **4 capas — el webhook procesado dos veces:**
+> 1. **Qué se rompe:** el consumidor recibe el mismo evento `pago.confirmado` dos veces y le acredita el saldo al cliente dos veces.
+> 2. **Por qué a esta escala/uso:** garantizado por el modelo (at-least-once): basta un ACK perdido o un receptor lento para que reintentes. No es un caso raro, es **el** caso.
+> 3. **Control de corto plazo:** el receptor deduplica por el `id` del evento (lo registra como procesado antes de aplicar el efecto, atómico — la race del módulo 4).
+> 4. **Cambio de diseño:** contrato explícito de at-least-once + id de evento estable + firma HMAC; del lado emisor, reintentos con backoff y DLQ con alerta (un evento no entregado es un problema que alguien debe ver).
+
+**Evolución del payload.** El cuerpo de un webhook es un contrato como cualquier otro: agregar un campo es no-breaking, renombrar/quitar es breaking (módulo 9). Versioná el formato del evento igual que un endpoint y avisá las deprecaciones — tus consumidores tienen código que parsea ese JSON.
+
+**Ejercicios 12**
+12.1 🔁 ¿Por qué un webhook se entrega "al menos una vez" y qué le exige eso al receptor?
+12.2 🧠 ¿Para qué sirve la firma HMAC de un webhook y por qué la comparación se hace en tiempo constante (`timingSafeEqual`)?
+12.3 🧠 ¿Por qué el handler de un webhook debería responder `2xx` rápido y procesar el trabajo después, en vez de hacerlo en línea?
+
+---
+
+## Módulo 13 — OpenAPI como fuente de verdad: spec-first y contract testing
 
 **Teoría.** Un contrato que vive solo en la cabeza (o en un wiki desactualizado) no es un contrato: es folklore. **OpenAPI** (antes Swagger) es la forma estándar de **escribir el contrato como un documento** (YAML/JSON) que describe endpoints, parámetros, schemas de request/response y errores.
 
@@ -435,14 +527,14 @@ Hay un *draft* de IETF (`RateLimit` fields) que estandariza esto; en la práctic
 
 > **El criterio:** el valor de OpenAPI no es "generar lindos docs"; es tener **una sola fuente de verdad del contrato** que sirve a la vez de documentación, de generador de código y de **gate de CI** (el contract testing del módulo de API Testing rompe el build si la implementación se desvía del spec). Diseñar spec-first te fuerza a pensar el contrato antes de teclear el primer handler — que es, justamente, de lo que trató todo este módulo.
 
-**Ejercicios 11**
-11.1 🔁 ¿Qué describe un documento OpenAPI y cuál es la diferencia entre code-first y spec-first?
-11.2 🧠 Nombrá tres cosas que te habilita tener el contrato como spec OpenAPI, más allá de la documentación.
-11.3 🧠 ¿Cómo se conecta OpenAPI con el contract testing de [API Testing](api-testing.md) para evitar que un cambio rompa a un consumidor en producción?
+**Ejercicios 13**
+13.1 🔁 ¿Qué describe un documento OpenAPI y cuál es la diferencia entre code-first y spec-first?
+13.2 🧠 Nombrá tres cosas que te habilita tener el contrato como spec OpenAPI, más allá de la documentación.
+13.3 🧠 ¿Cómo se conecta OpenAPI con el contract testing de [API Testing](api-testing.md) para evitar que un cambio rompa a un consumidor en producción?
 
 ---
 
-## Módulo 12 — Caso completo: diseñar la API pública de la Task API
+## Módulo 14 — Caso completo: diseñar la API pública de la Task API
 
 **Teoría.** Apliquemos todo a la "Task API" del hub (usuarios ↔ proyectos ↔ tareas), ahora como **API pública** que van a consumir terceros.
 
@@ -469,9 +561,15 @@ POST   /tareas/{id}/completar                  # acción no-CRUD (excepción jus
 
 **5. Rate limiting (módulo 10).** `429` + `Retry-After` + headers `RateLimit-*` para que los integradores se autorregulen.
 
-**6. Versionado y evolución (módulos 7-8).** Arranca en `/v1`. Los cambios compatibles (campos opcionales, endpoints nuevos) entran sin versión nueva; un breaking real dispara `/v2` con expand-contract y headers `Deprecation`/`Sunset` para la `v1`.
+**6. Caching y concurrencia optimista (módulo 11).** `ETag` en `GET /tareas/{id}` (lectura barata vía `304`) y `If-Match` → `412` en `PATCH /tareas/{id}` para que dos editores concurrentes no se pisen.
 
-**7. El contrato como spec (módulo 11).** Todo lo anterior vive en un OpenAPI spec-first, que genera el cliente tipado, alimenta el mock para los integradores y es el gate de contract testing en CI.
+**7. Webhooks (módulo 12).** Los integradores se suscriben a eventos (`tarea.completada`) y los reciben firmados con HMAC, con id de evento para deduplicar y reintentos con backoff de nuestro lado.
+
+**8. CORS (si es API de browser).** Si un front en otro origen la consume, el contrato incluye CORS: el browser manda un *preflight* `OPTIONS` y nosotros respondemos qué orígenes, métodos y headers permitimos (`Access-Control-Allow-Origin`, etc.). Es contrato del lado del browser, no implementación: definirlo mal (un `*` permisivo en una API con credenciales) es un agujero de seguridad.
+
+**9. Versionado y evolución (módulos 8-9).** Arranca en `/v1`. Los cambios compatibles (campos opcionales, endpoints nuevos) entran sin versión nueva; un breaking real dispara `/v2` con expand-contract y headers `Deprecation`/`Sunset` para la `v1`.
+
+**10. El contrato como spec (módulo 13).** Todo lo anterior vive en un OpenAPI spec-first, que genera el cliente tipado, alimenta el mock para los integradores y es el gate de contract testing en CI.
 
 **Retrospectiva del método.** Diseñamos **el contrato primero** (recursos, formas, errores, evolución) y dejamos la implementación para después. Ese es el orden senior: la interfaz pública es lo caro y duradero; el código que la cumple es reemplazable.
 
@@ -479,10 +577,19 @@ POST   /tareas/{id}/completar                  # acción no-CRUD (excepción jus
 
 **Las 3 cosas (cierre del marco).** Una respuesta completa de diseño de API tiene: **(a)** una forma para el happy path (recursos, métodos, status, paginación), **(b)** un modelo de falla (errores `problem+json` consistentes, `429`/`Retry-After`, idempotencia ante reintentos) y **(c)** un camino de evolución (no-breaking por default, expand-contract y versionado solo cuando rompe). Si tu diseño cubre las tres, pensaste el contrato como un sistema vivo, no como una foto.
 
-**Ejercicios 12**
-12.1 🧠 Para `POST /proyectos/{id}/tareas`, listá las decisiones de contrato que tomarías (status de éxito, header de idempotencia, forma del error de validación, status si el proyecto no existe).
-12.2 🧠 Te piden agregar un campo `prioridad` a las tareas. ¿Es breaking? ¿Cómo lo introducís sin tocar la versión?
-12.3 🧠 ¿Qué tres cosas (happy path, modelo de falla, evolución) explicitarías al presentar el diseño de esta API en una entrevista, y por qué las tres juntas demuestran criterio?
+**Ejercicios 14**
+14.1 🧠 Para `POST /proyectos/{id}/tareas`, listá las decisiones de contrato que tomarías (status de éxito, header de idempotencia, forma del error de validación, status si el proyecto no existe).
+14.2 🧠 Te piden agregar un campo `prioridad` a las tareas. ¿Es breaking? ¿Cómo lo introducís sin tocar la versión?
+14.3 🧠 ¿Qué tres cosas (happy path, modelo de falla, evolución) explicitarías al presentar el diseño de esta API en una entrevista, y por qué las tres juntas demuestran criterio?
+14.4 ✍️ Escribí un handler `crearTarea(req)` que reúna las piezas del contrato: si falta el título, devolvé `422` con `problem+json`; si el proyecto no existe, `404`; si todo va bien, `201` con header `Location`. Usá los tipos de abajo.
+```ts
+interface Req { proyectoId: number; body: { titulo?: string }; }
+interface Res { status: number; headers?: Record<string, string>; body: unknown; }
+interface TareaRepo {
+  proyectoExiste(id: number): Promise<boolean>;
+  crear(proyectoId: number, titulo: string): Promise<{ id: number }>;
+}
+```
 
 ---
 
@@ -533,7 +640,7 @@ async function manejarPago(
   if (!esNueva) {
     const guardada = await store.leerRespuesta(key);
     if (guardada) return guardada;             // reintento de algo ya cobrado → respuesta cacheada
-    return { status: 409, body: { type: "about:blank", title: "Request en proceso", status: 409 } };
+    return { status: 409, body: { type: "https://miapp.com/errores/idem-en-proceso", title: "Request en proceso", status: 409 } };
   }
   const res = await cobrar();                   // primera vez: cobra de verdad
   await store.guardarRespuesta(key, res.status, res.body);
@@ -541,6 +648,8 @@ async function manejarPago(
 }
 // Nota: la atomicidad la da `reservar` (INSERT con PK única). El 409 cubre el caso raro de
 // dos requests con la misma key llegando casi a la vez: el segundo ve la reserva sin respuesta aún.
+// Usamos un `type` propio (no `about:blank`) para ser coherentes con la doctrina del módulo 9:
+// el cliente discrimina por `type` estable, no por el texto.
 ```
 
 ### Módulo 5
@@ -612,18 +721,74 @@ function decodificarCursor(token: string): Cursor {
 **10.3** Porque `429` es **reactivo** (ya chocaste con el límite), mientras que `RateLimit-Limit/Remaining/Reset` son **proactivos**: le dan al cliente visibilidad de cuánta cuota le queda y cuándo se resetea, para que **baje el ritmo antes** de comerse el `429`. Un cliente bien hecho mira `Remaining` y se autorregula; así evitás el rechazo del todo, que es mejor para ambos lados que rechazar y reintentar.
 
 ### Módulo 11
-**11.1** Un documento OpenAPI describe el contrato de la API: endpoints, métodos, parámetros, schemas de request/response, errores y auth, en YAML/JSON estándar. **Code-first:** el código (con anotaciones) es la fuente y el spec se genera desde él (cómodo, pero el contrato queda subordinado a la implementación). **Spec-first (design-first):** el spec se escribe **primero** y de él se generan stubs, clientes y mocks — el contrato es el artefacto que se diseña antes de implementar.
+**11.1** Responde **`304 Not Modified`** (sin cuerpo). Se ahorra **ancho de banda y serialización**: el servidor no retransmite una representación que el cliente ya tiene en caché; el cliente reusa su copia. (Igual hay un round-trip de red, pero sin payload.)
 
-**11.2** Tres (de varias): (1) **codegen** de clientes tipados y stubs de servidor en varios lenguajes; (2) **mock servers** para que los consumidores desarrollen contra el contrato antes de que exista el backend; (3) **contract testing** que verifica en CI que la implementación cumple el spec (y que un cambio no rompe a los consumidores). *(También: documentación siempre sincronizada.)*
+**11.2** El cliente lee el recurso y guarda su `ETag` (ej. `"v3"`); al escribir, manda `If-Match: "v3"` ("actualizá solo si sigue en v3"). Si otro lo editó mientras tanto, el ETag actual ya es `"v4"`, no coincide, y el servidor responde **`412 Precondition Failed`** sin aplicar el cambio → no se pisa la escritura del otro. El cliente releé, re-aplica su cambio sobre la versión fresca y reintenta. Se corresponde con el **optimistic locking** de [PostgreSQL](postgresql.md) (columna `version` que se chequea en el `UPDATE ... WHERE version = ?`): misma idea, expresada en el contrato HTTP.
 
-**11.3** El OpenAPI es la **fuente de verdad** del contrato; el contract testing ([API Testing](api-testing.md)) lo usa como referencia para verificar, en CI, que la API real **cumple** lo que el spec promete (validación de schema, testing dirigido por spec con Schemathesis) y que los consumidores siguen siendo compatibles (consumer-driven contracts con Pact). Si un cambio desvía la implementación del contrato acordado, **el build falla antes de deployar**, no en producción frente al consumidor.
+**11.3** `private` cuando el recurso es **por-usuario** (el perfil propio, el saldo): solo el browser de ese usuario puede cachearlo, nunca una CDN/proxy compartido. Si por error lo marcás `public`, un caché compartido puede **servirle a un usuario los datos cacheados de otro** — una fuga de datos entre usuarios. Por eso `private` (o `no-store`) es el default seguro para todo lo que dependa de quién pregunta.
 
 ### Módulo 12
-**12.1** (a) Éxito: **`201 Created`** con `Location: /tareas/{nuevoId}` (y opcionalmente la tarea en el cuerpo). (b) Header de idempotencia: aceptar **`Idempotency-Key`** para que un reintento no cree una tarea duplicada. (c) Error de validación (ej. `titulo` vacío): **`422`** con cuerpo `application/problem+json` discriminable por `type`. (d) Si el proyecto `{id}` no existe: **`404`** (con el mismo formato de error). *(Y `403` si el proyecto es de otro usuario.)*
+**12.1** Porque la red entre el emisor y el receptor también pierde ACKs: el emisor reintenta ante la duda, así que el mismo evento puede llegar más de una vez (at-least-once). Le exige al receptor ser **idempotente**: deduplicar por el `id` del evento (registrarlo como procesado, atómicamente, antes de aplicar el efecto), para que recibir un duplicado no dispare el efecto dos veces.
 
-**12.2** **No es breaking:** agregar un campo opcional a la respuesta es compatible (los clientes que no lo conocen lo ignoran). Lo introducís **sin tocar la versión**: agregás `prioridad` a la respuesta con un default sensato (ej. `"media"`) y, si se puede setear, como parámetro **opcional** en `POST`/`PATCH`. Documentás el campo nuevo en el changelog y listo — `v1` sigue viva.
+**12.2** Sirve para **autenticar** el webhook: prueba que el `POST` lo mandó quien dice (que comparte el secreto), no un atacante que descubrió la URL del receptor. La comparación se hace en **tiempo constante** (`timingSafeEqual`) para no filtrar información por *timing*: una comparación normal (`===`) corta en el primer byte distinto, y midiendo cuánto tarda en fallar un atacante puede ir adivinando la firma byte a byte. Tiempo constante = el tiempo de comparar no depende de cuántos bytes coinciden.
 
-**12.3** **(a) Happy path:** recursos, métodos, status codes y paginación (cómo se ve cuando todo sale bien). **(b) Modelo de falla:** errores `problem+json` consistentes, `429`/`Retry-After`, e idempotencia ante reintentos (qué pasa cuando algo sale mal). **(c) Evolución:** cambios no-breaking por default, expand-contract y versionado solo cuando rompe (cómo cambia el contrato sin romper consumidores). Las tres juntas demuestran que pensás la API como un **sistema vivo** con consumidores reales a lo largo del tiempo, no como un set de endpoints para el demo de hoy — y eso es exactamente lo que evalúa una entrevista de diseño senior.
+**12.3** Porque el emisor espera un `2xx` **rápido** como acuse de recibo; si el handler hace el trabajo pesado en línea y tarda, el emisor lo interpreta como lento o caído y **reintenta** — y el receptor termina procesando el mismo evento varias veces por su propia lentitud, además de arriesgar timeouts. Patrón correcto: validar la firma, encolar el evento, responder `2xx` enseguida, y procesar en un worker aparte (el "aceptá rápido, procesá después" del `202`).
+
+### Módulo 13
+**13.1** Un documento OpenAPI describe el contrato de la API: endpoints, métodos, parámetros, schemas de request/response, errores y auth, en YAML/JSON estándar. **Code-first:** el código (con anotaciones) es la fuente y el spec se genera desde él (cómodo, pero el contrato queda subordinado a la implementación). **Spec-first (design-first):** el spec se escribe **primero** y de él se generan stubs, clientes y mocks — el contrato es el artefacto que se diseña antes de implementar.
+
+**13.2** Tres (de varias): (1) **codegen** de clientes tipados y stubs de servidor en varios lenguajes; (2) **mock servers** para que los consumidores desarrollen contra el contrato antes de que exista el backend; (3) **contract testing** que verifica en CI que la implementación cumple el spec (y que un cambio no rompe a los consumidores). *(También: documentación siempre sincronizada.)*
+
+**13.3** El OpenAPI es la **fuente de verdad** del contrato; el contract testing ([API Testing](api-testing.md)) lo usa como referencia para verificar, en CI, que la API real **cumple** lo que el spec promete (validación de schema, testing dirigido por spec con Schemathesis) y que los consumidores siguen siendo compatibles (consumer-driven contracts con Pact). Si un cambio desvía la implementación del contrato acordado, **el build falla antes de deployar**, no en producción frente al consumidor.
+
+### Módulo 14
+**14.1** (a) Éxito: **`201 Created`** con `Location: /tareas/{nuevoId}` (y opcionalmente la tarea en el cuerpo). (b) Header de idempotencia: aceptar **`Idempotency-Key`** para que un reintento no cree una tarea duplicada. (c) Error de validación (ej. `titulo` vacío): **`422`** con cuerpo `application/problem+json` discriminable por `type`. (d) Si el proyecto `{id}` no existe: **`404`** (con el mismo formato de error). *(Y `403` si el proyecto es de otro usuario.)*
+
+**14.2** **No es breaking:** agregar un campo opcional a la respuesta es compatible (los clientes que no lo conocen lo ignoran). Lo introducís **sin tocar la versión**: agregás `prioridad` a la respuesta con un default sensato (ej. `"media"`) y, si se puede setear, como parámetro **opcional** en `POST`/`PATCH`. Documentás el campo nuevo en el changelog y listo — `v1` sigue viva.
+
+**14.3** **(a) Happy path:** recursos, métodos, status codes y paginación (cómo se ve cuando todo sale bien). **(b) Modelo de falla:** errores `problem+json` consistentes, `429`/`Retry-After`, e idempotencia ante reintentos (qué pasa cuando algo sale mal). **(c) Evolución:** cambios no-breaking por default, expand-contract y versionado solo cuando rompe (cómo cambia el contrato sin romper consumidores). Las tres juntas demuestran que pensás la API como un **sistema vivo** con consumidores reales a lo largo del tiempo, no como un set de endpoints para el demo de hoy — y eso es exactamente lo que evalúa una entrevista de diseño senior.
+
+**14.4**
+```ts
+interface Req { proyectoId: number; body: { titulo?: string }; }
+interface Res { status: number; headers?: Record<string, string>; body: unknown; }
+interface TareaRepo {
+  proyectoExiste(id: number): Promise<boolean>;
+  crear(proyectoId: number, titulo: string): Promise<{ id: number }>;
+}
+
+async function crearTarea(req: Req, repo: TareaRepo): Promise<Res> {
+  const titulo = req.body.titulo?.trim();
+  if (!titulo) {
+    return {
+      status: 422,
+      headers: { "Content-Type": "application/problem+json" },
+      body: {
+        type: "https://miapp.com/errores/validacion",
+        title: "La solicitud no pasó la validación",
+        status: 422,
+        errors: [{ campo: "titulo", mensaje: "requerido" }],
+      },
+    };
+  }
+  if (!(await repo.proyectoExiste(req.proyectoId))) {
+    return {
+      status: 404,
+      headers: { "Content-Type": "application/problem+json" },
+      body: { type: "https://miapp.com/errores/no-encontrado", title: "Proyecto inexistente", status: 404 },
+    };
+  }
+  const tarea = await repo.crear(req.proyectoId, titulo);
+  return {
+    status: 201,
+    headers: { Location: `/tareas/${tarea.id}` },
+    body: tarea,
+  };
+}
+// Las tres piezas del contrato en un handler: validación → 422 problem+json,
+// recurso padre inexistente → 404, éxito → 201 + Location. (La idempotency key
+// se sumaría envolviendo esto con el `manejarPago`/`conIdempotencia` del módulo 4.)
+```
 
 ---
 
