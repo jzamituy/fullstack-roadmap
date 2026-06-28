@@ -11,6 +11,7 @@
 
 - **Full Stack web (React)**
   - [⚛️ React: hooks y Context desde los fundamentos](react-fundamentos.md)
+  - [🧭 Ecosistema React: elegir librerías con criterio](react-ecosistema.md)
   - [▲ TanStack Start vs Next.js](tanstack-start.md)
   - [🧩 React Server Components a fondo](rsc.md)
   - [🧱 Microfrontends robustos](microfrontends.md)
