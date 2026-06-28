@@ -69,6 +69,8 @@
   - [📐 Diseño de APIs y contratos](api-design.md)
   - [🤝 Consenso y coordinación distribuida](consenso.md)
   - [🛠️ Consenso: laboratorio práctico](consenso-practica.md)
+  - [🔁 Replicación, multi-región y conflictos](replicacion.md)
+  - [🛠️ Replicación: laboratorio práctico](replicacion-practica.md)
 
 - **Concurrencia**
   - [🔀 Concurrencia en system design](concurrencia.md)
