@@ -30,6 +30,7 @@
     - [🐹 Go para backend (desde TS/Node)](go-backend.md)
     - [🔌 gRPC y Protobuf en Go](go-grpc.md)
     - [📈 Performance y profiling (pprof)](go-performance.md)
+    - [🛡️ Resiliencia y workers de fondo](go-resiliencia.md)
 
 - **Plataforma web**
   - [⚙️ Service Workers a fondo](service-workers.md)
