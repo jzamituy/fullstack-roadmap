@@ -61,6 +61,7 @@
   - [🧱 Domain-Driven Design](ddd.md)
   - [🔀 Event-driven aplicada](event-driven.md)
   - [🏛️ Diseño de sistemas backend](system-design.md)
+  - [📐 Diseño de APIs y contratos](api-design.md)
 
 - **Concurrencia**
   - [🔀 Concurrencia en system design](concurrencia.md)
