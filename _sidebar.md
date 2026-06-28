@@ -28,6 +28,7 @@
     - [🔗 GraphQL a fondo: schema, N+1 y cliente](graphql.md)
   - **Go**
     - [🐹 Go para backend (desde TS/Node)](go-backend.md)
+    - [🔌 gRPC y Protobuf en Go](go-grpc.md)
 
 - **Plataforma web**
   - [⚙️ Service Workers a fondo](service-workers.md)
