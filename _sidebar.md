@@ -67,6 +67,8 @@
   - [🗂️ Banco de casos de diseño](system-design-casos.md)
   - [✅ Checklist de entrevista (4 capas)](system-design-checklist.md)
   - [📐 Diseño de APIs y contratos](api-design.md)
+  - [🤝 Consenso y coordinación distribuida](consenso.md)
+  - [🛠️ Consenso: laboratorio práctico](consenso-practica.md)
 
 - **Concurrencia**
   - [🔀 Concurrencia en system design](concurrencia.md)
