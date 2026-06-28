@@ -6,7 +6,7 @@
 
 **Lo que asumimos.** TypeScript/JavaScript con comodidad, `async/await`, HTTP y APIs REST, qué es una base de datos relacional, y haber tocado una terminal. **No** asumimos que sepas C, punteros ni concurrencia con threads — eso lo construimos acá.
 
-> ⚠️ **Nota sobre versiones.** Go es un lenguaje **muy estable** (la promesa de compatibilidad de Go 1.x es casi sagrada), así que el riesgo de desactualización es bajo. Aun así, este módulo usa features que llegaron en releases recientes: **routing por método en `net/http` (Go 1.22)**, **`log/slog` (1.21)**, `errors.Join` (1.20). Si usás una versión vieja, algunos snippets no compilan — verificá `go version` (asumimos **Go 1.22+**).
+> ⚠️ **Nota sobre versiones.** Go es un lenguaje **muy estable** (la promesa de compatibilidad de Go 1.x es casi sagrada), así que el riesgo de desactualización es bajo. Aun así, este módulo usa features que llegaron en releases recientes: **routing por método en `net/http` (Go 1.22)**, **`log/slog` (1.21)**, `errors.Join` (1.20), y en los módulos avanzados **paquetes `slices`/`maps`/`cmp` (1.21)** e **iteradores `range`-over-func (1.23)**. Si usás una versión vieja, algunos snippets no compilan — verificá `go version` (asumimos **Go 1.23+** para los módulos 11-12; el resto, **1.22+**).
 
 **Índice de módulos**
 1. Por qué Go y el modelo mental viniendo de TS/Node
@@ -19,8 +19,10 @@
 8. Acceso a datos: `database/sql`, `pgx` y el patrón repositorio
 9. Testing idiomático: *table-driven tests*
 10. Producción: build, *graceful shutdown*, logging estructurado
-11. El criterio: cuándo Go, cuándo Node, cuándo Rust
-12. Camino de aprendizaje (de cero a backend en producción)
+11. Concurrencia avanzada: los errores que tumban producción
+12. Generics y la stdlib moderna
+13. El criterio: cuándo Go, cuándo Node, cuándo Rust
+14. Camino de aprendizaje (de cero a backend en producción)
 
 Las soluciones de **todos** los ejercicios están al final, en la sección "Soluciones".
 
@@ -548,7 +550,169 @@ Esto conecta con tus módulos de [Docker y deploy](docker-deploy.md) y [Observab
 
 ---
 
-## Módulo 11 — El criterio: cuándo Go, cuándo Node, cuándo Rust
+## Módulo 11 — Concurrencia avanzada: los errores que tumban producción
+
+**Teoría.** El Módulo 4 te dio goroutines, channels y `select`. Acá van los **errores reales** que aparecen cuando la concurrencia sale del ejemplo de juguete — los que se preguntan en entrevistas y los que tumban servicios a las 3 AM.
+
+**1. Un `panic` en una goroutine mata TODO el proceso.** A diferencia de un `throw` en una promesa de Node (que rechaza esa promesa), un `panic` no recuperado en *cualquier* goroutine termina el programa entero — no solo esa goroutine. Y `recover` **solo funciona en la misma goroutine** que paniquea: no podés atrapar desde afuera el panic de una goroutine que lanzaste con `go`.
+
+```go
+go func() {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("panic en goroutine", "panic", r)
+		}
+	}()
+	hacerTrabajo() // si paniquea, el recover de ESTA goroutine lo atrapa
+}()
+```
+
+**2. Goroutine leaks: la goroutine que nunca muere.** Si lanzás una goroutine que se bloquea para siempre (manda a un channel que nadie lee, lee de uno que nadie llena, espera un `ctx` que no se cancela), queda colgada ocupando memoria y manteniendo vivas sus variables. Por request, se acumulan hasta tumbar el servicio. **Regla: toda goroutine necesita una vía de salida garantizada** — un `ctx` que se cancela, un channel que se cierra, un `select` con `<-ctx.Done()`. (Detectarlas: el goroutine profile de [Performance y profiling](go-performance.md).)
+
+```go
+// LEAK: si nadie lee de ch (o el lector desaparece), esta goroutine queda bloqueada para siempre
+func malo(ch chan int) { go func() { ch <- caro() }() }
+
+// BIEN: con select + ctx, la goroutine sale si el consumidor se va
+func bueno(ctx context.Context, ch chan int) {
+	go func() {
+		select {
+		case ch <- caro():
+		case <-ctx.Done(): // vía de salida
+		}
+	}()
+}
+```
+
+**3. Cerrar channels: reglas que paniquean si las rompés.**
+- **Cierra el *sender*, no el *receiver*.** Solo quien envía sabe que no hay más.
+- **Mandar a un channel cerrado → `panic`.** Cerrar un channel ya cerrado → `panic`.
+- Recibir de un channel cerrado devuelve el zero value al instante; usá `v, ok := <-ch` para distinguir "cerrado".
+
+**4. El patrón pipeline.** Encadenás etapas, cada una una goroutine que lee de un channel y escribe en el siguiente — el "stream processing" de Go, con cancelación por `ctx` y el *sender* cerrando su salida:
+
+```go
+func generar(ctx context.Context, nums ...int) <-chan int {
+	out := make(chan int)
+	go func() {
+		defer close(out) // el sender cierra su propio channel de salida
+		for _, n := range nums {
+			select {
+			case out <- n:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out
+}
+```
+
+`select` con `default` es **no bloqueante** ("¿hay algo ahora?, si no sigo"). Y un truco avanzado: un channel `nil` **bloquea para siempre** en un `select`, lo que sirve para "apagar" dinámicamente un `case` — clásico en un *fan-in* para desactivar una fuente ya agotada:
+
+```go
+// fan-in de dos fuentes: cuando una se agota, la ponemos en nil y su case deja de dispararse
+for in1 != nil || in2 != nil {
+	select {
+	case v, ok := <-in1:
+		if !ok { in1 = nil; continue } // agotada → desactivar este case
+		usar(v)
+	case v, ok := <-in2:
+		if !ok { in2 = nil; continue }
+		usar(v)
+	}
+}
+```
+
+**Ejercicios 11**
+11.1 🔁 ¿Qué le pasa al proceso si una goroutine lanzada con `go` paniquea y no hay `recover` dentro de ella?
+11.2 🧠 ¿Por qué no podés poner un `recover` en la función que llama a `go f()` para atrapar el panic de `f`?
+11.3 🧠 ¿Quién debe cerrar un channel y por qué? ¿Qué pasa si mandás a uno ya cerrado?
+11.4 ✍️ Reescribí esta goroutine para que no haga *leak* si el consumidor desaparece, agregándole `ctx`: `func envia(ch chan int) { go func() { ch <- calcular() }() }`.
+11.5 ✍️ Escribí una segunda etapa de pipeline `duplicar(ctx, in <-chan int) <-chan int` que lea del channel `in`, emita cada valor por dos, y cierre su channel de salida al terminar — respetando la cancelación por `ctx` (encadenable con el `generar` de la teoría).
+
+---
+
+## Módulo 12 — Generics y la stdlib moderna
+
+**Teoría.** Go sumó **genéricos** en 1.18 (2022) y, para 2026, la stdlib los aprovecha con paquetes que te ahorran código repetitivo. Si la última vez que miraste Go "no tenía genéricos", esto es lo que cambió.
+
+**Type parameters.** Una función o tipo parametrizado por un tipo:
+
+```go
+// T y U son parámetros de tipo; any = sin restricción
+func Map[T, U any](s []T, f func(T) U) []U {
+	r := make([]U, len(s))
+	for i, v := range s {
+		r[i] = f(v)
+	}
+	return r
+}
+
+nombres := Map(usuarios, func(u Usuario) string { return u.Nombre }) // []string, tipo inferido
+```
+
+**Constraints (restricciones).** Limitan qué tipos valen: `any` (cualquiera), `comparable` (admite `==`), o `cmp.Ordered` (admite `<`, `>`):
+
+```go
+import "cmp"
+
+func Max[T cmp.Ordered](a, b T) T {
+	if a > b {
+		return a
+	}
+	return b
+}
+```
+
+> 📝 Este `Max` es **didáctico** (ilustra los type parameters). En código real, para dos valores ordenables ya tenés el **builtin `max(a, b)` / `min(a, b)`** (Go 1.21), sin escribir nada.
+
+**La stdlib moderna (1.21+).** Tres paquetes que reemplazan loops manuales:
+- **`slices`** — `slices.Sort`, `slices.Contains`, `slices.Index`, `slices.SortFunc`, `slices.BinarySearch`, `slices.Equal`.
+- **`maps`** — `maps.Keys`, `maps.Values`, `maps.Clone` (en 1.23, `maps.Keys` devuelve un iterador `iter.Seq`).
+- **`cmp`** — `cmp.Ordered`, `cmp.Compare`, `cmp.Or`.
+
+```go
+import (
+	"cmp"
+	"slices"
+)
+
+slices.Sort(nums)                  // ordena in-place, sin sort.Slice + closure
+hay := slices.Contains(ids, "u1")
+slices.SortFunc(us, func(a, b Usuario) int { return cmp.Compare(a.Nombre, b.Nombre) })
+```
+
+**Iteradores `range`-over-func (Go 1.23).** Ahora podés recorrer tus propias secuencias con `for range`, devolviendo una función `iter.Seq[T]`:
+
+```go
+func Pares(s []int) iter.Seq[int] {
+	return func(yield func(int) bool) {
+		for _, v := range s {
+			if v%2 == 0 && !yield(v) {
+				return // el consumidor cortó (hizo break)
+			}
+		}
+	}
+}
+
+for p := range Pares(nums) { // recorrés tu iterador como si fuera un slice
+	fmt.Println(p)
+}
+```
+
+**El criterio (importante):** los genéricos son para **contenedores y algoritmos genéricos** (un `Map`, un cache tipado, un árbol). **No** reemplaces las interfaces por genéricos en todos lados: si solo necesitás polimorfismo de comportamiento, una interface sigue siendo más clara. **Genéricos para *datos*; interfaces para *comportamiento*.** Siguen siendo más acotados que en Rust/TS: un **método no puede declarar sus propios parámetros de tipo** (un `T` nuevo) — aunque los **tipos sí pueden ser genéricos y tener métodos** (`type Cache[T any] struct{…}` con `func (c *Cache[T]) Get(...)`) — y no hay covarianza. Para 2026 son maduros y la propia stdlib se apoya en ellos.
+
+> 📝 **Cuándo NO:** los iteradores `range`-over-func tienen un costo de llamada por elemento y brillan en secuencias **perezosas o infinitas** o cuando evitás materializar un slice; para una colección chica ya en memoria, un `for` directo sobre el slice es más simple y rápido. Genéricos e iteradores son herramientas, no un default — si no agregan claridad o reuso, no los fuerces.
+
+**Ejercicios 12**
+12.1 🔁 ¿Qué es un *constraint* en genéricos y para qué sirve `cmp.Ordered`?
+12.2 🧠 ¿Cuándo usás genéricos y cuándo una interface? Dá la regla mental.
+12.3 ✍️ Escribí una función genérica `Filtrar[T any](s []T, pred func(T) bool) []T` que devuelva los elementos que cumplen `pred`.
+
+---
+
+## Módulo 13 — El criterio: cuándo Go, cuándo Node, cuándo Rust
 
 **Teoría.** Go no reemplaza a Node ni a Rust: ocupa un lugar específico. El criterio honesto:
 
@@ -560,17 +724,17 @@ Esto conecta con tus módulos de [Docker y deploy](docker-deploy.md) y [Observab
 
 Lo que Go te da y conviene no romantizar:
 - ✅ Concurrencia I/O **simple y potente**, compilación rápida, binario único, stdlib fuerte, GC sin tuning para el 99%.
-- ⚠️ **Data races posibles** (corré `-race`), genéricos llegaron tarde y son limitados, manejo de errores verboso, GC = pausas chiquitas pero existen (mal para *low-latency* extremo).
+- ⚠️ **Data races posibles** (corré `-race`), genéricos maduros desde 1.18 pero más acotados que en Rust/TS (sin métodos genéricos; ver Módulo 12), manejo de errores verboso, GC = pausas chiquitas pero existen (mal para *low-latency* extremo).
 
 La regla mental, alineada con tu transición desde Node: **Go es el salto natural para sumar un backend compilado y concurrente sin tirar lo que sabés.** Rust queda como segunda especialización para cuando un número concreto (p95, RAM, throughput/core) lo exija. Esto extiende el criterio del módulo [Concurrencia en system design](concurrencia.md), donde ya viste código en Node/TS **y** Go lado a lado.
 
-**Ejercicios 11**
-11.1 🧠 Tenés que escribir un servicio que recibe webhooks, los valida y los encola en Redis, con picos de 10k req/s. ¿Go, Node o Rust? Justificá en una o dos dimensiones concretas.
-11.2 🧠 ¿En qué caso elegir Rust **por encima** de Go para un backend está justificado, y en qué caso sería sobre-ingeniería?
+**Ejercicios 13**
+13.1 🧠 Tenés que escribir un servicio que recibe webhooks, los valida y los encola en Redis, con picos de 10k req/s. ¿Go, Node o Rust? Justificá en una o dos dimensiones concretas.
+13.2 🧠 ¿En qué caso elegir Rust **por encima** de Go para un backend está justificado, y en qué caso sería sobre-ingeniería?
 
 ---
 
-## Módulo 12 — Camino de aprendizaje (de cero a backend en producción)
+## Módulo 14 — Camino de aprendizaje (de cero a backend en producción)
 
 **Teoría.** No estudies Go "entero": seguí un camino orientado a backend. Cuatro fases, cada una con un **objetivo verificable** y los módulos de esta guía que la cubren. Ritmo realista viniendo de Node: **4-6 semanas** a ~8-10 h/semana.
 
@@ -586,6 +750,9 @@ Acá se vuelve backend. `net/http` (1.22 routing), middleware, JSON, estructura 
 **Fase 3 — Calidad y producción (1 semana).**
 Table-driven tests + `httptest`, `-race`, graceful shutdown, `slog` JSON, Dockerfile multi-stage. Cubre **módulos 9-10**. Hito: la misma API con tests, apagado limpio y un binario en `distroless`.
 
+**Fase 4 — Profundización (continua).**
+Lo que te lleva de "junior Go" a backend Go sólido: los **gotchas de concurrencia** (módulo 11) y **genéricos + stdlib moderna** (módulo 12) de esta misma guía, y después los módulos hermanos de la sección: [gRPC](go-grpc.md) para microservicios, [Performance y profiling](go-performance.md) para medir, y [Resiliencia](go-resiliencia.md) para sobrevivir a fallos. Hito: tu capstone hablando gRPC con otro servicio, perfilado con `pprof` y con timeouts/reintentos/circuit breaker en las llamadas externas.
+
 **Capstone (el proyecto que te hace contratable):** una **API de tareas** (o lo que sea de tu dominio) con: rutas CRUD en `net/http` 1.22, Postgres vía repositorio detrás de interface, validación y errores con `%w`+`errors.Is`, un endpoint que llame a un servicio externo con timeout por `context`, *table-driven tests* + un test de handler con `httptest`, *graceful shutdown*, logs `slog` en JSON, y Docker multi-stage. Eso toca **todos** los módulos y es exactamente lo que se ve en un code-challenge de backend Go.
 
 **Recursos de cabecera** (cuando quieras profundidad, no para arrancar):
@@ -595,9 +762,9 @@ Table-driven tests + `httptest`, `-race`, graceful shutdown, `slog` JSON, Docker
 
 > ⚠️ **Trampa del que viene de otro lenguaje:** no intentes escribir Go "como si fuera TS/Java". Nada de jerarquías de clases, nada de frameworks pesados el primer día, no abuses de goroutines "porque sí". Go premia lo **simple y explícito**; pelear contra eso es la causa #1 de frustración.
 
-**Ejercicios 12**
-12.1 🧠 ¿Por qué la Fase 1 (concurrencia) va **antes** de levantar un servidor HTTP, si el servidor "ya maneja concurrencia solo"?
-12.2 🧠 Mirá el capstone: nombrá tres piezas que un revisor técnico buscaría para distinguir un Go "de juguete" de uno "de producción".
+**Ejercicios 14**
+14.1 🧠 ¿Por qué la Fase 1 (concurrencia) va **antes** de levantar un servidor HTTP, si el servidor "ya maneja concurrencia solo"?
+14.2 🧠 Mirá el capstone: nombrá tres piezas que un revisor técnico buscaría para distinguir un Go "de juguete" de uno "de producción".
 
 ---
 
@@ -849,26 +1016,92 @@ slog.Info("db conectada", "pool", 10)
 
 ### Módulo 11
 ```
-11.1 Go. Es I/O-bound con alta concurrencia (validar + encolar): las goroutines manejan 10k
+11.1 Termina TODO el proceso: un panic no recuperado se propaga hasta el tope de su goroutine
+     y, como nadie lo atrapa, aborta el programa entero (todas las demás goroutines mueren con él).
+11.2 Porque recover solo captura panics de la MISMA goroutine en la que corre (vía un defer en
+     su propia pila). La goroutine lanzada con go f() tiene una pila independiente; el recover
+     del llamador no la cubre. El recover tiene que estar DENTRO de f (o de la func que go lanza).
+11.3 Lo cierra el sender (quien envía), porque es el único que sabe que no habrá más valores.
+     Mandar a un channel ya cerrado paniquea (y cerrarlo dos veces, también). Recibir de uno
+     cerrado NO paniquea: devuelve el zero value al instante (y ok=false con v, ok := <-ch).
+```
+```go
+// 11.4
+func envia(ctx context.Context, ch chan int) {
+	go func() {
+		select {
+		case ch <- calcular(): // ojo: calcular() se evalúa ANTES de entrar al select
+		case <-ctx.Done(): // vía de salida: si el consumidor se fue, no quedamos bloqueados
+		}
+	}()
+}
+// Si calcular() es caro y el ctx pudo cancelarse antes, chequealo primero:
+// if ctx.Err() != nil { return }
+```
+```go
+// 11.5  — segunda etapa de pipeline (encadenable con generar())
+func duplicar(ctx context.Context, in <-chan int) <-chan int {
+	out := make(chan int)
+	go func() {
+		defer close(out) // el sender cierra su salida
+		for v := range in { // termina solo cuando 'in' se cierra
+			select {
+			case out <- v * 2:
+			case <-ctx.Done():
+				return // cancelación: salida limpia (no leak)
+			}
+		}
+	}()
+	return out
+}
+// uso: for n := range duplicar(ctx, generar(ctx, 1, 2, 3)) { ... }
+```
+
+### Módulo 12
+```
+12.1 Un constraint limita qué tipos puede recibir un parámetro de tipo. cmp.Ordered restringe a
+     tipos ordenables (números, strings): los que admiten <, >, <=, >=, así que podés
+     compararlos dentro de la función genérica (ej. un Max/Min).
+12.2 Genéricos para estructuras de datos y algoritmos parametrizados por el tipo del DATO (un
+     Map, Filtrar, un cache o árbol tipado). Interfaces para polimorfismo de COMPORTAMIENTO
+     (varias implementaciones de una operación). Regla: genéricos para datos, interfaces para
+     comportamiento; si dudás, interface.
+```
+```go
+// 12.3
+func Filtrar[T any](s []T, pred func(T) bool) []T {
+	var r []T
+	for _, v := range s {
+		if pred(v) {
+			r = append(r, v)
+		}
+	}
+	return r
+}
+```
+
+### Módulo 13
+```
+13.1 Go. Es I/O-bound con alta concurrencia (validar + encolar): las goroutines manejan 10k
      req/s con código simple y predecible, el binario despliega trivial y el footprint es
      bajo. Node podría, pero un solo hilo + necesitar cluster para usar los cores lo complica;
      Rust sería más rápido pero el cuello acá es I/O (Redis/red), no CPU, así que su ventaja
      no se nota y pagás la curva.
-11.2 Justificado: cuando el servicio es CPU-bound de verdad (cripto, parsing/compresión
+13.2 Justificado: cuando el servicio es CPU-bound de verdad (cripto, parsing/compresión
      pesada, un motor de matching) o exige latencia p99 sin pausas de GC / RAM muy acotada —
      ahí el "sin GC" y el control fino de Rust pagan. Sobre-ingeniería: para una API CRUD
      I/O-bound normal, donde Rust solo te suma curva de aprendizaje y tiempo de desarrollo sin
      una ganancia que el negocio note.
 ```
 
-### Módulo 12
+### Módulo 14
 ```
-12.1 Porque el servidor maneja concurrencia entre requests, pero apenas tu handler hace algo
+14.1 Porque el servidor maneja concurrencia entre requests, pero apenas tu handler hace algo
      no trivial (llamar a otro servicio con timeout, paralelizar trabajo, cancelar al cortar
      el cliente, compartir un cache) necesitás goroutines, channels y context. Sin esa base,
      escribís handlers que bloquean, fugan goroutines o tienen data races. La concurrencia es
      el cimiento, no un adorno posterior.
-12.2 Por ejemplo: (a) context propagado hasta la DB/servicios externos con timeouts (no
+14.2 Por ejemplo: (a) context propagado hasta la DB/servicios externos con timeouts (no
      queries que cuelgan); (b) graceful shutdown ante SIGTERM (no cortar requests en deploy);
      (c) tests reales (table-driven + httptest) y -race limpio; (d) errores envueltos con %w y
      manejados, logs estructurados con slog, capas separadas por interfaces. Cualquiera de
