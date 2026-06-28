@@ -31,6 +31,7 @@
     - [🔌 gRPC y Protobuf en Go](go-grpc.md)
     - [📈 Performance y profiling (pprof)](go-performance.md)
     - [🛡️ Resiliencia y workers de fondo](go-resiliencia.md)
+    - [🛠️ Laboratorio práctico de Go](go-practica.md)
 
 - **Plataforma web**
   - [⚙️ Service Workers a fondo](service-workers.md)
