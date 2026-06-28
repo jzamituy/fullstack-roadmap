@@ -143,10 +143,11 @@ Por qué los user-facing ganan: prueban la app **como la usa la gente**, sobrevi
 
 **1. Auto-waiting (espera automática) en las acciones.** Antes de actuar sobre un elemento (`.click()`, `.fill()`), Playwright corre **actionability checks**: espera a que el elemento esté **adjunto al DOM, visible, estable (no animándose), habilitado y sin nada encima**. Recién cuando está accionable, actúa. No esperás "2 segundos"; esperás **a la condición correcta**, el tiempo que haga falta (hasta un timeout). Esto solo elimina la mayoría de los sleeps.
 
-**2. Web-first assertions (`expect`) que reintentan.** `expect(locator).to_be_visible()` no evalúa una vez y falla: **reintenta** hasta que la condición se cumpla o venza el timeout. Las hay para todo: `to_have_text(...)`, `to_have_count(n)`, `to_be_enabled()`, `to_have_value(...)`, `to_have_url(...)`. La diferencia con un `assert` de pytest es exactamente esa: el `assert` es una foto (evalúa el estado **ahora**); `expect` es una espera (aguanta a que el estado **llegue** a lo esperado).
+**2. Web-first assertions (`expect`) que reintentan.** `expect(locator).to_be_visible()` no evalúa una vez y falla: **reintenta** hasta que la condición se cumpla o venza el timeout. Las hay para todo: `to_have_text(...)`, `to_have_count(n)`, `to_be_enabled()`, `to_have_value(...)`, `to_have_url(...)`. La diferencia con un `assert` de pytest es exactamente esa: el `assert` es una foto (evalúa el estado **ahora**); `expect` es una espera (aguanta a que el estado **llegue** a lo esperado). El **timeout** de esa espera es configurable —global (vía `expect.set_options(timeout=...)` o la config de pytest) y por aserción (`expect(locator).to_have_text(..., timeout=10_000)`)—; subilo para una operación legítimamente lenta, nunca para tapar una condición mal elegida.
 
 ```python
 # ❌ Frágil: foto inmediata + sleep arbitrario
+import time                                       # (solo para mostrar el anti-patrón; no lo uses)
 page.get_by_role("button", name="Cargar").click()
 time.sleep(2)                                   # ¿2s alcanzan? ¿sobran? nadie sabe
 assert page.get_by_role("listitem").count() == 3  # evalúa una vez; si tardó 2.1s, falla
@@ -193,7 +194,7 @@ Y el punto de criterio más importante: **el retry automático es un olor, no un
 **Teoría.** A medida que la suite crece, los tests con locators y pasos repetidos por todos lados se vuelven imposibles de mantener: si cambia el botón "Guardar", lo tenés que arreglar en 40 tests. El patrón clásico para esto es el **Page Object Model (POM)**: encapsulás cada página (o componente) en una clase que expone sus **locators** y **acciones** de alto nivel, y los tests usan esa clase en vez de tocar la página directo.
 
 ```python
-from playwright.sync_api import Page
+from playwright.sync_api import Page, expect
 
 class TaskPage:
     def __init__(self, page: Page):
@@ -244,7 +245,7 @@ page.goto("http://localhost:5173/login")
 page.get_by_label("Email").fill("qa@test.com")
 page.get_by_label("Password").fill("secreto")
 page.get_by_role("button", name="Entrar").click()
-expect(page).to_have_url("**/dashboard")        # esperá a estar logueado
+expect(page).to_have_url("**/dashboard")        # esperá a estar logueado (glob; o re.compile(r"/dashboard"))
 context.storage_state(path="auth.json")          # guardás cookies + localStorage
 
 # 2) En los tests: arrancás un contexto YA autenticado, sin pasar por el login
@@ -255,6 +256,8 @@ import pytest
 def browser_context_args(browser_context_args):
     return {**browser_context_args, "storage_state": "auth.json"}
 ```
+
+> **Ojo con la caducidad.** El `storage_state` guarda cookies/JWT que **expiran**: si el token tiene vida corta, regenerá el estado al inicio de cada corrida (una fixture `scope="session"` que rehace el login si el archivo no existe o está vencido). Mejor todavía: logueate **por API** en esa fixture (un POST al endpoint de login) y serializá el estado —más rápido y sin depender del flujo de UI—.
 
 Las ventajas: **velocidad** (no repetís el login 50 veces), y **foco** (cada test prueba lo suyo, no el login una y otra vez). El login **sí** se prueba —pero en **un** test dedicado a ese flujo, no como prólogo de todos—. Variante para roles: guardás varios `storage_state` (admin, usuario común) y cada test usa el que necesita. Esto conecta directo con el aislamiento del módulo 6: además del estado de sesión, asegurate de que los **datos** de cada test estén en un estado conocido (seteados/limpiados por API o fixtures, no por UI). La frase mental: **no te loguees por la UI en cada test —logueate una vez (mejor por API), guardá cookies+localStorage con `storage_state`, y arrancá cada test en un contexto ya autenticado—; es más rápido y mantiene cada test enfocado en lo suyo, dejando el login probado en su propio test dedicado—.**
 
@@ -304,12 +307,12 @@ El trade-off, y acá está el criterio: **mockear la red en un E2E te quita just
 **Debugging y herramientas:**
 - **Trace viewer**: el arma principal. Playwright graba un **trace** (línea de tiempo con snapshots del DOM, cada acción, requests de red, consola) que abrís y **recorrés paso a paso** —ves exactamente qué había en pantalla cuando falló—. En CI lo configurás para guardarlo **solo en fallo** (`--tracing=retain-on-failure`) y lo inspeccionás con `playwright show-trace trace.zip`. Para un fallo en CI que no reproducís local, el trace es lo que te salva.
 - **Codegen**: `playwright codegen <url>` abre el navegador, **grabás** tus clics y te **genera el código** del test (con buenos locators). Excelente para arrancar un test o descubrir el locator correcto —no para dejar el código generado tal cual, que conviene limpiar—.
-- **Modo headed y debug**: `pytest --headed` (ver el navegador), `--slowmo` (cámara lenta), y `PWDEBUG=1` abre el **inspector** para ir paso a paso. Más screenshots y video en fallo como artefactos.
+- **Modo headed y debug**: `pytest --headed` (ver el navegador), `--slowmo` (cámara lenta), y `PWDEBUG=1` abre el **inspector** para ir paso a paso. Y los mismos artefactos guardados solo en fallo con `--video=retain-on-failure` y `--screenshot=only-on-failure`, junto al `--tracing=retain-on-failure`.
 
 **Correr en CI** (conecta con [Docker y CI/CD](docker-deploy.md)):
 - **Imagen oficial**: Playwright provee una imagen Docker (`mcr.microsoft.com/playwright/python`) con los navegadores y dependencias del SO ya instalados —evitás pelearte con libs faltantes en el runner—. Si no, `playwright install --with-deps` baja navegadores + deps del sistema.
 - **Headless por defecto**: en CI corre sin pantalla.
-- **Paralelización y sharding**: corrés tests en paralelo con `pytest-xdist` (`pytest -n auto`), y repartís la suite en varias máquinas con **sharding** (`--shard=1/3`) para bajar el tiempo total. Los browser contexts aislados (módulo 2) hacen que el paralelismo sea seguro.
+- **Paralelización y sharding**: corrés tests en paralelo dentro de una máquina con `pytest-xdist` (`pytest -n auto`), y repartís la suite entre **varias** máquinas con **sharding** (`--shard=1/3`) para bajar el tiempo total. Ojo: el `--shard` no es magia de Playwright —lo combinás con una **matriz de CI** que levanta N jobs, cada uno corriendo su shard—. Los browser contexts aislados (módulo 2) hacen que el paralelismo sea seguro.
 - **Artefactos en fallo**: configurás CI para subir trace, screenshots y video de los tests que fallaron —así debuggeás un rojo de CI sin reproducirlo localmente—.
 
 La frase mental: **el trace viewer (repetición paso a paso con DOM, red y consola, guardado en fallo) es tu herramienta #1 de debugging, y codegen te arranca tests; en CI corrés headless con la imagen oficial, en paralelo (xdist) y con sharding entre máquinas, subiendo trace/video como artefactos para diagnosticar los rojos sin reproducirlos a mano—.**
@@ -331,6 +334,27 @@ Las estrategias, de la más simple a la más rica:
 1. **Mockear el LLM para los tests de UI.** Lo más importante: **separá dos preguntas distintas**. "¿La UI está bien cableada?" (¿el mensaje aparece, se muestra el spinner, se renderiza el markdown, se maneja el error?) se prueba **mockeando la respuesta del LLM** (módulo 9: `route`/`fulfill` con una respuesta fija) → test **determinista y rápido**. "¿La respuesta del LLM es **buena**?" es **otra cosa** y no se prueba con un E2E: se prueba con **[evals](evals.md)** (golden sets, LLM-as-judge, las online evals de [Deploy de IA](deploy-ai.md)). No mezcles las dos.
 2. **Aserciones sobre estructura/contrato, no texto exacto.** Cuando sí corrés contra el LLM real, afirmá **propiedades** que se cumplen siempre: que llegó una respuesta no vacía, que tiene la **forma** esperada (un JSON con tales campos), que **contiene** entidades clave (`to_contain_text("42")` en vez del texto completo), que no disparó un guardarraíl.
 3. **Aserciones semánticas / LLM-as-judge.** Para validar el *sentido* de una respuesta no determinista, usás otro LLM como juez ("¿esta respuesta contesta la pregunta, sí/no?") —la misma técnica de [evals](evals.md)—, sabiendo que el juez también se equivoca y hay que calibrarlo.
+
+```python
+# Estrategia 1: la UI cableada, con el LLM mockeado → determinista y rápido.
+def test_chat_renderiza_la_respuesta(page):
+    page.route("**/api/chat", lambda route: route.fulfill(
+        status=200, json={"answer": "La capital de Francia es París."},
+    ))
+    page.goto("http://localhost:5173/chat")
+    page.get_by_label("Mensaje").fill("¿Capital de Francia?")
+    page.get_by_role("button", name="Enviar").click()
+    expect(page.get_by_test_id("chat-respuesta")).to_be_visible()   # plomería, no calidad
+
+# Estrategia 2: contra el LLM real, afirmá estructura/contrato, nunca texto exacto.
+def test_respuesta_real_tiene_forma(page):
+    page.goto("http://localhost:5173/chat")
+    page.get_by_label("Mensaje").fill("¿Cuánto es 40 + 2?")
+    page.get_by_role("button", name="Enviar").click()
+    respuesta = page.get_by_test_id("chat-respuesta")
+    expect(respuesta).not_to_be_empty()              # llegó algo
+    expect(respuesta).to_contain_text("42")          # contiene la entidad clave, no el texto completo
+```
 
 La regla de oro del AI QA: **separá lo determinista de lo no determinista.** El E2E (mockeando el LLM) prueba que el producto **funciona** —la plomería—; las evals prueban que la IA **es buena** —la calidad—. Confundirlas te lleva a E2E flaky que reintentás para siempre, o a creer que "pasó el E2E" significa "la IA responde bien" (no lo significa).
 
@@ -366,7 +390,7 @@ El ejercicio que cierra el módulo y que mostrás en una entrevista de QA/SDET. 
 **Extensiones (suben el nivel).**
 - Agregá **Page Objects** (o fixtures) cuando la repetición empiece a doler (módulo 7) —no antes—.
 - **Cross-browser**: corré la suite en Chromium, Firefox y WebKit y resolvé las diferencias.
-- **Visual regression**: agregá `expect(page).to_have_screenshot()` a una pantalla estable y manejá los baselines.
+- **Visual regression**: agregá `expect(page).to_have_screenshot()` a una pantalla estable y manejá los baselines (ojo: las imágenes base dependen del SO/CI y son una trampa de flakiness de píxeles → corré las baselines en el **mismo entorno** que CI, actualizalas con `--update-snapshots` de forma controlada, y tolerá ruido con `max_diff_pixels`/máscaras de zonas dinámicas).
 - **Feature de IA** (módulo 11): testeá una pantalla con un chatbot/resumen **mockeando el LLM** para la plomería, y dejá la calidad de la respuesta para una eval aparte ([evals](evals.md)).
 
 ---
