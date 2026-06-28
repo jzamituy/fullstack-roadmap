@@ -26,6 +26,9 @@
   - **GraphQL**
     - [🔗 GraphQL a fondo: schema, N+1 y cliente](graphql.md)
 
+- **Plataforma web**
+  - [⚙️ Service Workers a fondo](service-workers.md)
+
 - **Bases de datos**
   - [🐘 PostgreSQL + ORM](postgresql.md)
   - [🍃 NoSQL: MongoDB y DynamoDB](nosql.md)
