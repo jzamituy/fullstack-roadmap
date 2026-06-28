@@ -71,6 +71,8 @@
   - [🛠️ Consenso: laboratorio práctico](consenso-practica.md)
   - [🔁 Replicación, multi-región y conflictos](replicacion.md)
   - [🛠️ Replicación: laboratorio práctico](replicacion-practica.md)
+  - [🌊 Datos en movimiento: streams y analytics](streams.md)
+  - [🛠️ Streams y analytics: laboratorio práctico](streams-practica.md)
 
 - **Concurrencia**
   - [🔀 Concurrencia en system design](concurrencia.md)
