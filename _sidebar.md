@@ -26,6 +26,8 @@
     - [🚂 Express: routing, middleware y APIs](express.md)
   - **GraphQL**
     - [🔗 GraphQL a fondo: schema, N+1 y cliente](graphql.md)
+  - **Go**
+    - [🐹 Go para backend (desde TS/Node)](go-backend.md)
 
 - **Plataforma web**
   - [⚙️ Service Workers a fondo](service-workers.md)
