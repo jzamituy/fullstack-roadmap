@@ -62,6 +62,10 @@
   - [🔀 Event-driven aplicada](event-driven.md)
   - [🏛️ Diseño de sistemas backend](system-design.md)
 
+- **Concurrencia**
+  - [🔀 Concurrencia en system design](concurrencia.md)
+  - [🛠️ Concurrencia: laboratorio práctico](concurrencia-practica.md)
+
 - **Mobile**
   - [📱 Mobile System Design](mobile-system-design.md)
 
