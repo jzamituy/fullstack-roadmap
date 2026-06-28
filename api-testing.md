@@ -139,7 +139,7 @@ def test_contrato_de_tarea(client):
 ```
 
 - **Los valores y las reglas de negocio**: que `total = suma de items`, que `completada` arranca en `False`, que la fecha de creación está seteada. El schema valida la *forma*; vos validás el *significado*.
-- **Las respuestas de error** (lo que más se olvida): un input inválido debe dar `422` **con un body de error útil**; un recurso inexistente, `404`; sin permiso, `403`. **El camino de error es parte del contrato tanto como el happy path** —y un test que solo prueba el caso feliz miente sobre la robustez de la API—.
+- **Las respuestas de error** (lo que más se olvida): un input inválido debe dar `422` **con un body de error útil**; un recurso inexistente, `404`; sin permiso, `403`. Y el **body de error también es contrato**: su forma se afirma igual que la del happy path —cada vez más APIs serias lo estandarizan con **`problem+json` (RFC 9457)**, así que el test verifica que el error trae los campos esperados (`type`, `title`, `detail`, `status`), no solo el código—. **El camino de error es parte del contrato tanto como el happy path** —y un test que solo prueba el caso feliz miente sobre la robustez de la API—.
 
 La disciplina: **afirmá el contrato completo —status + estructura + valores + errores—, no un `200` solitario.** Validar el schema con Pydantic conecta directo con lo que [FastAPI](fastapi.md) hace en el borde de entrada: ahí Pydantic valida lo que **entra**; acá lo usás para validar lo que **sale**. La frase mental: **un `200` dice "no explotó", no "devolvió lo correcto"; testeá el contrato —estructura (valida el schema con Pydantic), valores y reglas de negocio, y los caminos de error (4xx con su body)—, porque el camino de error es parte del contrato tanto como el happy path—.**
 
@@ -157,7 +157,7 @@ La disciplina: **afirmá el contrato completo —status + estructura + valores +
 
 - **Funcional (happy path)**: ¿el endpoint hace lo que dice? Crear devuelve el recurso creado, listar devuelve la lista, etc. El **ciclo CRUD completo** es un patrón clave: crear → leerlo → actualizarlo → borrarlo → verificar que ya no está. Prueba la coherencia del recurso de punta a punta.
 - **Validación (inputs inválidos → 4xx)**: campos faltantes, tipos equivocados, valores fuera de rango, formatos inválidos. Cada uno debe dar el error correcto (`400`/`422`), no un `500` ni un `200` que guarda basura. Esto es lo que [FastAPI](fastapi.md)/Pydantic valida en el borde —y vos verificás que efectivamente lo rechaza—.
-- **Autenticación y autorización**: dos cosas distintas que se confunden. **Autenticación** (¿quién sos?): sin token o con token inválido → `401`. **Autorización** (¿podés hacer esto?): un usuario que intenta tocar un recurso de **otro** → `403`. Este último —el control de acceso entre usuarios— es de lo más crítico y de lo que más se escapa: es la base de [seguridad](autenticacion.md) y conecta con el testing detrás de auth de [Testing](testing.md) módulo 8. **Un test que verifica que el usuario A NO puede ver el recurso del usuario B vale oro** (previene fugas de datos, el mismo riesgo multi-tenant de [RAG](rag.md)/[Vector Databases](vector-dbs.md)).
+- **Autenticación y autorización**: dos cosas distintas que se confunden. **Autenticación** (¿quién sos?): sin token o con token inválido → `401`. **Autorización** (¿podés hacer esto?): un usuario que intenta tocar un recurso de **otro** → `403`. Este último —el control de acceso entre usuarios— es de lo más crítico y de lo que más se escapa: es la base de [seguridad](autenticacion.md) y conecta con el testing detrás de auth de [Testing](testing.md) módulo 8. **Un test que verifica que el usuario A NO puede ver el recurso del usuario B vale oro** (previene fugas de datos, el mismo riesgo multi-tenant de [RAG](rag.md)/[Vector Databases](vector-dbs.md)). Esto tiene nombre de mercado: **BOLA** (Broken Object Level Authorization), también llamado **IDOR**, y es el **#1 del OWASP API Security Top 10** —el vocabulario exacto que esperan en una entrevista de SDET—.
 - **Casos borde**: listas vacías, paginación (página fuera de rango, límites), filtros, ordenamientos, valores límite, idempotencia (¿qué pasa si mando el mismo `POST` dos veces?), concurrencia.
 
 La regla: **para cada endpoint, pensá en las cuatro capas, no solo en el happy path.** El happy path es donde menos bugs hay (es lo que el dev probó a mano); los bugs viven en la validación floja, en los permisos mal chequeados y en los casos borde. Por eso un buen test de API es, sobre todo, un buen **catálogo de lo que puede salir mal**. La frase mental: **cada endpoint se prueba por capas —funcional (CRUD completo), validación (inputs inválidos → 4xx), auth (401 sin token) y authz (403 sobre recursos ajenos), y casos borde (vacíos, paginación, idempotencia)—; el happy path es donde menos bugs hay, así que el valor está en probar lo que puede salir mal, y el test de "A no puede ver lo de B" es de los más valiosos—.**
@@ -174,7 +174,7 @@ La regla: **para cada endpoint, pensá en las cuatro capas, no solo en el happy 
 
 **Teoría.** Las mismas reglas de tests confiables de [Testing](testing.md) y [Playwright](playwright.md) (deterministas, aislados, repetibles) aplican al API testing, con sus particularidades de manejo de **estado** y **datos**.
 
-- **Aislamiento y datos deterministas**: cada test arranca de un **estado conocido** y no depende de otros ni del orden. El problema típico: un test que crea una tarea y otro que cuenta tareas y espera "3" —corren juntos y se pisan—. Curas: **datos únicos por test** (un título/email con uuid), y **setup/teardown** que deja el estado limpio. El `POST` de setup y el `DELETE` de teardown pueden hacerse por la **propia API** (más realista) o directo contra la **base de datos** (más rápido); las fixtures de pytest (`yield` + limpieza) son el lugar natural para esto.
+- **Aislamiento y datos deterministas**: cada test arranca de un **estado conocido** y no depende de otros ni del orden. El problema típico: un test que crea una tarea y otro que cuenta tareas y espera "3" —corren juntos y se pisan—. Curas: **datos únicos por test** (un título/email con uuid), y **setup/teardown** que deja el estado limpio. El `POST` de setup y el `DELETE` de teardown pueden hacerse por la **propia API** (más realista) o directo contra la **base de datos** (más rápido); las fixtures de pytest (`yield` + limpieza) son el lugar natural para esto. Y este aislamiento es justo lo que te habilita a **correr la suite en paralelo** (`pytest -n`, xdist) sin que los tests se pisen —ese paralelismo, que acelera el CI, lo retomamos en el módulo 10—.
 
 ```python
 import uuid, pytest
@@ -212,21 +212,51 @@ La solución obvia parece ser tests de **integración E2E entre servicios** (lev
 1. **El consumidor define sus expectativas.** En su propio test, el consumidor declara: "cuando le pido `GET /tasks/1` al proveedor, espero un `200` con un body de esta forma". Ese test corre contra un **mock** del proveedor y, como subproducto, **genera un "pact"**: un archivo (JSON) que es el **contrato** —exactamente lo que el consumidor necesita—.
 
 ```python
-# Lado CONSUMIDOR (pact-python) — forma conceptual, verificá la API de tu versión
-from pact import Consumer, Provider
+# Lado CONSUMIDOR (pact-python v3) — forma conceptual, verificá la API exacta de tu versión.
+# La v3 (core en Rust, default Pact Spec V4) es la API actual; la v2 (Consumer/has_pact_with) quedó legacy.
+from pact import Pact
+from pact.v3 import match
 
-pact = Consumer("frontend").has_pact_with(Provider("task-api"))
+pact = Pact("frontend", "task-api")
 (pact
- .given("existe la tarea 1")                         # estado del provider
  .upon_receiving("un pedido de la tarea 1")
+ .given("existe la tarea 1")                          # estado del provider
  .with_request("GET", "/tasks/1")
- .will_respond_with(200, body={"id": 1, "titulo": "Comprar pan", "completada": False}))
-# el test del consumidor corre contra el mock y genera el pact (el contrato)
+ .will_respond_with(200)
+ .with_body({                                          # MATCHERS: el pact afirma la FORMA/tipo, no valores fijos
+     "id": match.int(),                                # (valores literales → contratos frágiles que rompen ante
+     "titulo": match.str(),                            #  cualquier cambio de dato; un contrato describe estructura)
+     "completada": match.bool(),
+ }))
+
+with pact.serve() as mock:                             # levanta el mock; al cerrar escribe el pact (el contrato)
+    r = httpx.get(f"{mock.url}/tasks/1")
+    assert r.status_code == 200
+# el test del consumidor corre contra el mock y, como subproducto, genera el pact
 ```
 
-2. **El proveedor verifica el contrato.** El proveedor toma ese pact y corre una **verificación**: ¿mi API real cumple lo que el consumidor espera? Si el proveedor cambió algo que rompe el contrato, **su** build falla —antes de deployar, no en producción—.
+2. **El proveedor verifica el contrato.** El proveedor toma ese pact y corre una **verificación**: ¿mi API real cumple lo que el consumidor espera? Si el proveedor cambió algo que rompe el contrato, **su** build falla —antes de deployar, no en producción—. Es la mitad que más cuesta en sistemas reales (hay que saber dejar al provider en el **estado** que el pact declara con `given`).
 
-3. **El Pact Broker** es el intermediario: almacena los pacts y las verificaciones, y habilita el gate **`can-i-deploy`** —"¿es seguro deployar esta versión del proveedor sin romper a ningún consumidor?"— en el CI (módulo 10).
+```python
+# Lado PROVEEDOR (pact-python v3) — forma conceptual, verificá la API de tu versión
+from pact import Verifier
+
+# levantás tu API real (en localhost:8000) y la verificás contra los pacts del broker
+verifier = (Verifier("task-api")
+            .add_transport(url="http://localhost:8000")
+            .broker_source("https://mi-broker.pactflow.io"))   # o .add_source("pacts/") para archivos locales
+verifier.verify()                                               # falla si la API real no cumple algún pact
+```
+
+3. **El Pact Broker** es el intermediario: almacena los pacts y las verificaciones, y habilita el gate **`can-i-deploy`** —"¿es seguro deployar esta versión del proveedor sin romper a ningún consumidor?"— en el CI (módulo 10). El gate es un comando concreto:
+
+```bash
+# ¿puedo deployar esta versión del proveedor a producción sin romper consumidores?
+pact-broker can-i-deploy --pacticipant task-api --version "$GIT_SHA" --to-environment production
+# sale 0 (verde, deploy seguro) o ≠0 (rojo, frena el deploy) según las verificaciones registradas en el broker
+```
+
+> Nota de empaquetado: el paquete se instala como `pact-python` pero se **importa como `pact`**; la v3 trae el **core nativo en Rust** (rueda con FFI, sin Java/Ruby), y el **Pact Broker corre como servicio aparte** (Docker / PactFlow), no es parte de la librería.
 
 La diferencia clave con un test de integración E2E: en contract testing **los servicios nunca corren juntos**. El consumidor prueba contra un mock; el proveedor verifica contra un contrato. Cada uno en su pipeline, rápido y aislado, pero la combinación **garantiza la compatibilidad**. "Consumer-driven" significa que **el consumidor define qué necesita** (no el proveedor qué ofrece) —así el proveedor sabe exactamente qué partes de su API importan y cuáles puede cambiar libremente—. La frase mental: **el contract testing (Pact) evita que un proveedor rompa a sus consumidores sin levantar todos los servicios juntos: el consumidor declara qué espera y genera un contrato (pact), el proveedor verifica que su API real lo cumple, y el broker habilita un gate can-i-deploy —compatibilidad garantizada con tests rápidos y aislados, no con un E2E frágil entre servicios—.**
 
@@ -248,8 +278,10 @@ La diferencia clave con un test de integración E2E: en contract testing **los s
 
 ```bash
 # Schemathesis: genera y corre cientos de casos contra tu API desde su OpenAPI
-schemathesis run http://localhost:8000/openapi.json
-# prueba fuzzing de inputs, conformidad de respuestas al schema, y que no haya 500 inesperados
+schemathesis run http://localhost:8000/openapi.json --checks all
+# Si la spec está en archivo (Schemathesis 4.x), el target va aparte con --url:
+#   schemathesis run openapi.yaml --url http://localhost:8000
+# fases: examples, coverage, fuzzing, stateful — inputs raros/malformados, conformidad al schema y 500 inesperados
 ```
 
 La relación con los otros "contratos" del módulo: el **schema OpenAPI** describe la API de **un** servicio (su forma pública); **Pact** (módulo 7) captura lo que un **consumidor específico** necesita de un proveedor. No compiten: OpenAPI valida que la implementación cumple su spec publicada; Pact valida que dos servicios concretos siguen siendo compatibles. Y ambos conectan con la idea central del módulo: **el testing serio verifica contratos, no anécdotas.** La frase mental: **el OpenAPI que FastAPI genera de tus modelos Pydantic es un contrato machine-readable que podés validar (las respuestas cumplen su propio schema) y explotar con Schemathesis (genera cientos de casos/fuzzing desde la spec, property-based) —complementa a Pact: OpenAPI valida que un servicio cumple su spec, Pact que dos servicios siguen compatibles—.**
@@ -288,7 +320,7 @@ class UsuarioApi(HttpUser):
 # correr:  locust -f load.py --host http://localhost:8000   (UI web para fijar usuarios y rampa)
 ```
 
-(Otra herramienta muy usada, fuera de Python, es **k6**.) Las métricas que mirás son las de [observabilidad](observabilidad.md), ahora del lado del test: **latencia en percentiles (p95/p99, no el promedio** —el promedio esconde la cola que sufren los usuarios reales—), **throughput** (requests/seg), y **tasa de errores** bajo carga. El objetivo suele ser validar un **SLO** ("p95 < 300 ms con 500 usuarios concurrentes").
+(Otra herramienta muy usada, fuera de Python, es **k6** —scripts en JavaScript, muy popular en CI y con buen soporte de SLOs/thresholds—; acá elegimos **Locust** por seguir el stack Python del track, pero saber que k6 existe es criterio de herramienta esperable en un SDET.) Las métricas que mirás son las de [observabilidad](observabilidad.md), ahora del lado del test: **latencia en percentiles (p95/p99, no el promedio** —el promedio esconde la cola que sufren los usuarios reales—), **throughput** (requests/seg), y **tasa de errores** bajo carga. El objetivo suele ser validar un **SLO** ("p95 < 300 ms con 500 usuarios concurrentes").
 
 El criterio: **el load testing es para cuando el rendimiento es un requisito**, no para toda API. Una API interna de bajo tráfico no lo necesita; una que va a recibir picos o tiene SLAs de latencia, sí. Y conecta fuerte con [IA](deploy-ai.md): una API que sirve un LLM tiene un perfil de carga particular (requests largos, caros, I/O-bound) y su load testing mira el costo y la latencia de inferencia, no solo requests/seg. La frase mental: **el load testing (con Locust) simula usuarios concurrentes para validar que la API aguanta la carga y cumple su SLO de latencia —mirás percentiles p95/p99, throughput y tasa de error, no el promedio—; es una dimensión distinta de la correctitud, y se hace cuando el rendimiento es un requisito, no para toda API—.**
 
@@ -328,7 +360,7 @@ Qué **sí** testeás en la API de una feature de IA (determinista, en tu suite 
 
 - **El contrato y la plomería**: status `200`, el body tiene la **forma** esperada (un JSON con `respuesta`, `fuentes`, etc.), el **streaming** funciona (si es SSE, que lleguen los chunks y se ensamble bien), los **errores** se manejan (`429` del proveedor, timeout → un error limpio, no un `500` crudo).
 - **Aserciones de estructura/contrato, no de texto exacto**: `assert "respuesta" in body` y que sea no vacía, que `fuentes` sea una lista, que la respuesta **contenga** una entidad clave —nunca `assert body["respuesta"] == "texto exacto"`, que sería flaky por diseño—.
-- **Guardarraíles y límites**: que un input que debe ser rechazado devuelva el error correcto, que se respeten límites de longitud, que no se filtren datos de otro tenant (el test de authz del módulo 5, **crítico** en RAG).
+- **Guardarraíles y límites**: que un input que debe ser rechazado devuelva el error correcto, que se respeten límites de longitud, que no se filtren datos de otro tenant (el test de authz del módulo 5, **crítico** en RAG). El **red-teaming del endpoint de IA** —prompt injection, jailbreaks, fuga de prompt del sistema— es **otra capa** y vive en [Seguridad de IA](seguridad-ia.md): acá testeás el contrato y la plomería; allá, los ataques específicos de LLM.
 - **SLAs operacionales**: latencia (p95) y, si aplica, costo por request dentro de presupuesto ([Deploy de IA](deploy-ai.md)) —la API de IA tiene SLAs de latencia/costo que un test puede verificar—.
 
 Qué **NO** testeás con un test de API: **si la respuesta del LLM es *buena*.** La calidad de la salida no determinista es trabajo de **[evals](evals.md)** (golden sets, LLM-as-judge) y de las **online evals** en producción ([Deploy de IA](deploy-ai.md)), no de la suite de API. Confundir las dos lleva a tests flaky o a una falsa sensación de cobertura ("pasó el test de API" ≠ "la IA responde bien"). Para tests deterministas de la plomería, **mockeás la llamada al LLM** (módulo 6) y verificás que tu endpoint arma bien el request, parsea bien la respuesta y maneja los errores.
@@ -435,7 +467,8 @@ El ejercicio que cierra el módulo y el track QA, y que mostrás en una entrevis
 5.2 Autenticación (¿quién sos?): sin token o token inválido → 401. Autorización (¿podés hacer esto?): un
     usuario tocando un recurso de otro → 403.
 5.3 Porque previene fugas de datos entre usuarios/tenants: verifica que el control de acceso funciona.
-    Conecta con el riesgo multi-tenant de RAG/Vector Databases (que A reciba data de B) y con seguridad.
+    Es el BOLA/IDOR, #1 del OWASP API Security Top 10. Conecta con el riesgo multi-tenant de
+    RAG/Vector Databases (que A reciba data de B) y con seguridad.
 5.4 Porque el happy path es lo que el dev ya probó a mano; los bugs viven en la validación floja, los
     permisos mal chequeados y los casos borde (vacíos, paginación, idempotencia, concurrencia).
 ```
