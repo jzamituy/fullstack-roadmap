@@ -197,12 +197,14 @@ La solución es el campo `shared`. Config defensiva para React:
 shared: {
   react: {
     singleton: true,        // UNA sola instancia en todo el grafo
-    requiredVersion: '^18.2.0',
+    requiredVersion: '^19.0.0',
     strictVersion: true,    // ⚠️ tira ERROR en mismatch, en vez de cargar dos
   },
-  'react-dom': { singleton: true, requiredVersion: '^18.2.0', strictVersion: true },
+  'react-dom': { singleton: true, requiredVersion: '^19.0.0', strictVersion: true },
 }
 ```
+
+> Los ejemplos fijan `^19.0.0` (React 19, lo normal en 2026 y lo que asume el módulo 11). El número es ilustrativo: `requiredVersion` es un **rango semver**, no una versión exacta — lo que importa es que todos los MFEs declaren rangos **compatibles** entre sí.
 
 Qué hace cada flag:
 - **`singleton: true`** — fuerza UNA sola copia en el "share scope". Si las versiones difieren, carga la más alta y **avisa** (warning). **Obligatorio para React, react-dom, react-router, tu state manager** — todo lo que tenga estado o contexto global.
@@ -351,6 +353,8 @@ Mantra: **acoplamiento bajo o no es microfrontend.** Si los MFEs necesitan conoc
 3. **Props / callbacks** — el host pasa datos y funciones hacia abajo al montar el MFE. Explícito y tipado, pero acopla al host con la interfaz del MFE.
 4. **Estado compartido (store global)** — el **más acoplante**. Recrea el monolito por la puerta de atrás. Si lo usás, solo para un mínimo transversal (ej. usuario autenticado), nunca para estado de dominio.
 
+> La implementación tipada de ese **event bus** (un mapa de eventos sobre `window`) está en la sección 11.5 y el ejercicio 11.7. Vive en el módulo multi-framework porque ahí es indispensable, pero **el patrón aplica igual entre MFEs del mismo framework** (React-con-React): el emisor no sabe quién escucha, y eso es justo lo que querés.
+
 La frase mental: **preferí URL > eventos > props > estado compartido. Cada paso a la derecha es deuda de acoplamiento que pagás después. Un store global compartido es un monolito disfrazado.**
 
 **Ejercicios 8**
@@ -388,6 +392,7 @@ La frase mental: **la integración es en runtime, así que el bug aparece en pro
 9.1 🔁 ¿Por qué el contract testing es especialmente crítico en microfrontends? ¿Qué tipo de bug atrapa que el compilador no?
 9.2 🧠 ¿Por qué un design system compartido es "la pieza más importante" de la governance?
 9.3 🧠 En `componentDidCatch`, ¿qué información mínima tenés que reportar a tu APM y por qué?
+9.4 ✍️ Escribí un test E2E (Playwright) que **simule el remote `cart` caído** —interceptando la petición a su `remoteEntry` y abortándola— y verifique dos cosas: que aparece el fallback del Error Boundary ("El carrito no está disponible…") y que **el resto del shell sigue montado** (ej. el header sigue visible). Es el test que convierte tu resiliencia de teórica en real (cierra con el ejercicio 6.3).
 
 ---
 
@@ -734,8 +739,8 @@ new ModuleFederationPlugin({
 **5.4**
 ```js
 shared: {
-  react: { singleton: true, requiredVersion: '^18.2.0', strictVersion: true },
-  'react-dom': { singleton: true, requiredVersion: '^18.2.0', strictVersion: true },
+  react: { singleton: true, requiredVersion: '^19.0.0', strictVersion: true },
+  'react-dom': { singleton: true, requiredVersion: '^19.0.0', strictVersion: true },
   // Sin `singleton: true`, cada remote podría cargar SU propia instancia de React.
   // Con varias instancias en memoria, los hooks fallan (`Invalid hook call`) porque
   // React guarda estado interno por módulo. singleton fuerza una sola copia compartida.
@@ -816,6 +821,26 @@ El **límite de dueño** está en el `/*`: el host declara `/checkout/*` (es due
 
 **9.3** Mínimo: **el nombre del remote** (qué equipo/MFE falló), su **versión** y la **URL del entry**, además del error/stack. Por qué: sin el nombre del remote, en producción ves "algo se rompió" pero no podés saber **cuál equipo** tiene que arreglarlo — perdés la trazabilidad que justamente necesitás en un sistema con muchos dueños.
 
+**9.4**
+```ts
+import { test, expect } from '@playwright/test'
+
+test('si el remote cart cae, el shell sobrevive y muestra el fallback', async ({ page }) => {
+  // Simulamos la falla de RED: abortamos la descarga del remoteEntry de cart.
+  // (Es exactamente el modo de falla "no carga el remoteEntry" del módulo 6.)
+  await page.route('**/cart/remoteEntry.js', (route) => route.abort())
+
+  await page.goto('/')
+
+  // 1) El Error Boundary POR remote muestra su fallback...
+  await expect(page.getByText('El carrito no está disponible')).toBeVisible()
+
+  // 2) ...pero el resto del shell sigue vivo: el header no se cayó con el carrito.
+  await expect(page.getByRole('banner')).toBeVisible()
+})
+```
+La clave es `page.route(...).abort()`: bloqueás el chunk del remote para **provocar la falla a propósito** y verificás que el fallback aparece **y** que el shell sigue montado. Si no testeás este camino, tu "resiliencia" es una suposición. Variante: en vez de `abort()`, devolvé un `route.fulfill({ status: 500 })` para simular un deploy roto, o hacé que el componente tire una excepción para ejercitar el modo "error al renderizar" (el otro modo de falla del módulo 6).
+
 **10.1** Un "distributed monolith" es cuando tenés MFEs que **igual están acoplados** (comparten estado global, dependencias acopladas, o necesitan desplegarse juntos para no romperse). Es el peor resultado porque pagás **toda la complejidad de un sistema distribuido** (más repos, pipelines, infra, coordinación) **sin obtener la independencia** que era el único motivo para distribuirlo. Lo peor de ambos mundos.
 
 **10.2** Les recomiendo **NO usar microfrontends** y quedarse con un **monolito modular**. Con un solo equipo chico no existe el problema organizacional (escala de equipos) que los microfrontends resuelven; "estar a la moda" no es una razón de ingeniería. Sumarían complejidad distribuida (repos, pipelines, versionado de shared deps, resiliencia) a cambio de cero beneficio real. Es over-engineering de manual.
@@ -834,7 +859,7 @@ El **límite de dueño** está en el `/*`: el host declara `/checkout/*` (es due
 
 **11.5** No podés porque un React Context es una **construcción interna del runtime de React** — vive en su árbol de fibras, y Angular (con su propio runtime y su DI) no tiene forma de verlo. Dos frameworks bootstrappeados por separado **no comparten ningún grafo de objetos**. Lo ÚNICO que comparten es **la plataforma del navegador**: el DOM, `window`, los `CustomEvent`, la URL, el web storage y `BroadcastChannel`.
 
-**11.6** "No compartas estado, compartí eventos" significa: en vez de un objeto de estado común que todos leen y mutan (acoplamiento máximo), emitís **eventos** de "pasó algo" y cada MFE reacciona con su propio estado interno; el emisor no sabe quién escucha (acoplamiento mínimo). Un Redux compartido entre React y Angular es **peor** que entre dos MFEs React porque, además de recrear el monolito, **ni siquiera funciona**: la reactividad de Redux está atada a React; Angular no se entera de los cambios sin pegamento manual (suscripciones + disparar change detection a mano). O sea: pagás el acoplamiento y encima no obtenés la reactividad.
+**11.6** "No compartas estado, compartí eventos" significa: en vez de un objeto de estado común que todos leen y mutan (acoplamiento máximo), emitís **eventos** de "pasó algo" y cada MFE reacciona con su propio estado interno; el emisor no sabe quién escucha (acoplamiento mínimo). Un Redux compartido entre React y Angular es **peor** que entre dos MFEs React porque, además de recrear el monolito, **ni siquiera funciona bien**: el store de Redux en sí es agnóstico, pero su **integración reactiva con la UI está en `react-redux`** (`useSelector` re-renderiza el componente). Angular no tiene ese pegamento: no se entera de los cambios sin **suscribirse a mano al store y disparar change detection** él mismo. O sea: pagás el acoplamiento y encima reimplementás la reactividad que en React venía gratis.
 
 **11.7**
 ```ts
