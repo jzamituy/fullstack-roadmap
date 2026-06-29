@@ -104,12 +104,31 @@ export const Route = createFileRoute('/posts')({
 
 - **Returns de loaders tipados**: lo que devuelve el loader, el componente lo consume con el tipo correcto vía `Route.useLoaderData()`.
 
+Y junto al `loader`/`component`, cada ruta declara sus **estados de carga y error** —no los manejás a mano con un `if (loading)` como en la SPA—:
+
+- **`pendingComponent`**: lo que se muestra mientras el `loader` resuelve (el loading declarativo de la ruta).
+- **`errorComponent`**: la UI cuando el `loader` (o el render) tira — recibe el `error` y un `reset()` para reintentar. Es el Error Boundary de la ruta.
+- **`notFoundComponent`**: la UI para un `notFound()` (recurso inexistente).
+
+```ts
+export const Route = createFileRoute('/posts/$postId')({
+  loader: ({ params }) => fetchPost(params.postId),
+  component: PostComponent,
+  pendingComponent: () => <Skeleton />,
+  errorComponent: ({ error, reset }) => <ErrorBox error={error} onRetry={reset} />,
+  notFoundComponent: () => <p>Post no encontrado</p>,
+})
+```
+
+Es el mismo espíritu del dúo `<Suspense>` + Error Boundary de [react-fundamentos](react-fundamentos.md)/[RSC](rsc.md), pero **declarado por ruta** en vez de envuelto a mano.
+
 La frase mental: **en TanStack Router la URL es estado tipado y validado, no un string que rezás que venga bien.**
 
 **Ejercicios 3**
 3.1 🔁 ¿Qué significa "type-safety de punta a punta en compile time" aplicado a una ruta? Dá un ejemplo de un error que el compilador atrapa.
 3.2 🧠 ¿Por qué tratar los search params como tipados y validables (con Zod) es una ventaja real frente a leerlos como `URLSearchParams`?
 3.3 ✍️ Escribí una ruta `/products/$category` cuyo loader reciba `category` (tipado) y un search param `sort` validado a `'price' | 'name'` con un default.
+3.4 🧠 ¿Qué pasa cuando el `loader` de una ruta tira un error, y cómo lo manejás de forma declarativa? ¿Qué ventaja tiene sobre un `if (error)` manual en el componente?
 
 ---
 
@@ -146,11 +165,38 @@ Resultado: escribís una función, la llamás igual desde cliente o server, y el
 
 **Contraste con Next.js** ⚠️: el equivalente de Next son las **Server Actions** (`"use server"`). Diferencia clave: las Server Actions cruzan un boundary serializado donde **el tipado se rompe** — la Action puede recibir datos que no matchean lo que TS espera, así que **necesitás validación runtime igual**. Las server functions de Start son **RPC tipado de verdad**. Es la diferencia central de type-safety entre ambos (módulo 9).
 
+### Middleware y auth: dónde poner el guard
+
+Una server function puede componer **middleware** (`.middleware([...])`) que corre antes del handler y le **inyecta contexto** —el caso típico: leer la cookie de sesión, resolver el usuario y pasarlo tipado al handler—. Así centralizás la autenticación en vez de repetirla:
+
+```ts
+const authMiddleware = createMiddleware().server(async ({ next }) => {
+  const user = await getUserFromSession()        // lee cookie/sesión en el server
+  if (!user) throw new Error('No autenticado')
+  return next({ context: { user } })             // el handler recibe context.user tipado
+})
+
+export const deletePost = createServerFn({ method: 'POST' })
+  .middleware([authMiddleware])
+  .validator((id: string) => id)
+  .handler(async ({ data, context }) => {
+    // context.user existe y está tipado; autorizá acá (¿es dueño del post?)
+    await db.post.delete(data, context.user.id)
+  })
+```
+
+¿Dónde va el guard de auth? Depende de qué protegés: **`beforeLoad` de la ruta** para bloquear el acceso a una pantalla (redirigir al login antes de cargar), y **middleware de la server function** para proteger la *operación* (porque la server function es un endpoint invocable por sí mismo — no alcanza con esconder el botón en el cliente). En apps reales, los dos: `beforeLoad` para la UX, middleware para la seguridad real.
+
+> ⚠️ **Env vars y secrets.** Vite solo expone al cliente las variables con prefijo público (`VITE_`); **todo lo demás (`process.env.DB_URL`, claves de API) es server-only**. Por eso `process.env.DB_URL` es seguro dentro de un handler de server function (corre en el server) pero **leerlo en un componente lo filtraría al bundle** si fuera público. Regla: los secretos viven en código que solo corre en el server (handlers, `.server.ts`), nunca en un componente ni con prefijo `VITE_`.
+
 **Ejercicios 4**
 4.1 🔁 ¿Qué es una server function y desde dónde la podés invocar?
 4.2 🔁 Explicá las tres versiones que el compilador genera de cada server function y para qué sirve cada una.
 4.3 🧠 ¿Por qué una server function NO es lo mismo que un endpoint de API pública? ¿Qué usás si necesitás un webhook?
 4.4 🔁 (Trampa común) ¿Cuál es el método canónico hoy para validar el input de una server function, y qué nombre alternativo —deprecado— vas a ver en tutoriales y blogs viejos? ¿Por qué este detalle importa?
+4.5 ✍️ Escribí una `createServerFn({ method: 'POST' })` que reciba `{ titulo: string }`, lo valide con un schema de Zod vía `.validator()`, y en el handler cree un post. El return tiene que quedar tipado en el llamador.
+4.6 🧠 Querés que solo usuarios logueados puedan borrar un post. ¿Dónde ponés el guard de auth: en el `loader`, en `beforeLoad` o en la server function? Justificá (pista: ¿qué protege cada uno?).
+4.7 🧠 ¿Por qué `process.env.DB_URL` es seguro dentro de un handler de server function pero sería un problema leerlo en un componente? ¿Qué variables llegan al cliente con Vite?
 
 ---
 
@@ -180,6 +226,7 @@ ssr: ({ params, search }) => (search.preview ? 'data-only' : true)
 5.1 🔁 ¿Qué hace el streaming en SSR y qué problema de UX ataca?
 5.2 🔁 Explicá las tres variantes de `ssr` por ruta y dá un caso de uso para cada una.
 5.3 🧠 Tenés una ruta que renderiza un gráfico con una librería que usa `window`. ¿Qué valor de `ssr` le ponés y por qué?
+5.4 ✍️ Declarás una ruta `/reportes` cuyo loader trae datos pesados de la DB (querés prefetchearlos en el server) pero el componente usa una librería de charts que solo corre en el browser. Escribí la ruta con el valor de `ssr` correcto y justificá la elección en un comentario.
 
 ---
 
@@ -208,10 +255,32 @@ La gran ventaja sobre el modelo de Next: si ya vivís en el ecosistema **TanStac
 
 **Contraste con Next.js** ⚠️: Next usa **async Server Components que hacen `fetch` directo** + el sistema de caché del framework (en Next 16, con "Cache Components" y `"use cache"` opt-in — nombres/versión a verificar en los docs de Next). Es más conciso para páginas content-heavy, pero es **otro modelo mental** de caché que tenés que aprender. Start reusa el que ya conocés.
 
+### El otro lado: mutar e invalidar
+
+Leer es la mitad; el día a día de un dashboard/SaaS es **mutar y refrescar**. El patrón: una **server function de escritura** + `useMutation` de Query, y al terminar **invalidás** lo que quedó stale:
+
+```ts
+function useBorrarPost() {
+  const queryClient = useQueryClient()
+  const router = useRouter()
+  return useMutation({
+    mutationFn: (id: string) => deletePost({ data: id }),   // server function (con su auth middleware)
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['posts'] }) // refresca lo que consume useQuery
+      router.invalidate()                                    // re-corre los loaders de la ruta actual
+    },
+  })
+}
+```
+
+¿`invalidateQueries` o `router.invalidate()`? **Invalidás la query** cuando los datos los consume `useQuery`/`useSuspenseQuery` (Query refetchea y actualiza). **Invalidás el router** cuando lo que quedó viejo lo trajo un **loader** (re-corre `beforeLoad`/`loader` de las rutas activas). Si usás el patrón loader+Query del módulo, muchas veces querés **los dos**. (Y para UX instantánea, `useMutation` te da `onMutate` para optimistic updates, igual que en tu SPA.)
+
 **Ejercicios 6**
 6.1 🔁 ¿Qué significa que un loader sea "isomórfico" y qué problema de las SPA resuelve?
 6.2 🔁 En el patrón loader + Query, ¿por qué el componente no vuelve a hacer fetch si el loader ya trajo la data?
 6.3 🧠 ¿Cuál es la ventaja de data loading de Start específicamente para alguien que ya usa TanStack Query en su SPA?
+6.4 ✍️ Escribí el patrón loader + Query para una ruta `/posts`: el loader hace `ensureQueryData(postsQueryOptions())` y el componente consume con `useSuspenseQuery(postsQueryOptions())`. Explicá en un comentario por qué el componente no re-fetchea.
+6.5 🧠 Después de borrar un post con una mutación, ¿cuándo invalidás con `queryClient.invalidateQueries` y cuándo con `router.invalidate()`? ¿Puede hacer falta usar los dos?
 
 ---
 
@@ -221,7 +290,7 @@ La gran ventaja sobre el modelo de Next: si ya vivís en el ecosistema **TanStac
 
 **Cómo es hoy** ⚠️:
 - En **desarrollo**, Start usa el **dev server de Vite directamente** (cold start de cientos de ms, no segundos).
-- Para **producción**, el camino **"adapterless"** es vía **Nitro** (el motor de servidor sobre H3): agregás su plugin (`nitro()`) y elegís un preset (Node, Bun, Vercel…) para deployar a cualquier target sin reescribir nada. **Ojo:** no es universal — Cloudflare y Netlify usan **plugins de Vite dedicados** (`@cloudflare/vite-plugin`, `@netlify/vite-plugin-tanstack-start`) y no pasan por el preset de Nitro.
+- Para **producción**, el camino **"adapterless"** es vía **Nitro** (el motor de servidor sobre H3): elegís un **preset** (Node, Bun, Vercel…) en la config de `tanstackStart()` y deployás a cualquier target sin reescribir nada — no agregás un plugin `nitro()` a mano, lo gestiona el propio plugin de Start. **Ojo:** no es universal — Cloudflare y Netlify usan **plugins de Vite dedicados** (`@cloudflare/vite-plugin`, `@netlify/vite-plugin-tanstack-start`) y no pasan por el preset de Nitro.
 - Se configura con el **plugin `tanstackStart()` en `vite.config.ts`** (más `viteReact()`, ver abajo).
 
 ```ts
@@ -245,7 +314,7 @@ export default defineConfig({
 > 2. El scaffold actual es **`npx @tanstack/cli@latest create`**, no `create-tsrouter-app` ni `create-start-app`.
 > 3. El validador de server functions es **`.validator()`** (acepta una función o un schema tipo Zod). Vas a ver `.inputValidator()` en blogs y tutoriales: hoy está **deprecado** (el código fuente lo marca `@deprecated` con el mensaje "Use `validator` instead") — ambos funcionan, pero usá `validator`.
 
-La lección de fondo (y esto es criterio senior): **Start es nuevo, y "nuevo" significa que la documentación de terceros envejece rápido.** Cuando trabajes con tecnología joven, **la fuente de verdad son los docs oficiales y los releases**, no el primer blog que aparece en Google. Es así de fácil.
+La lección de fondo (y esto es criterio senior): **Start es nuevo, y "nuevo" significa que la documentación de terceros envejece rápido.** Cuando trabajes con tecnología joven, **la fuente de verdad son los docs oficiales y los releases**, no el primer blog que aparece en Google.
 
 **Ejercicios 7**
 7.1 🔁 ¿Qué hace Vite en Start y qué hace Nitro? ¿En qué etapa interviene cada uno?
@@ -354,7 +423,7 @@ La convención de sufijos (`.functions.ts` / `.server.ts` / `.ts`) **no es oblig
 - Necesitás RSC maduro y battle-tested **hoy**.
 - Querés docs exhaustivas y mil ejemplos copy-paste.
 
-**El consejo que vale oro, de la propia comunidad:** **"No migres por migrar."** No reescribas un Next que funciona. La performance sola (bundles más chicos, dev server más rápido) **no justifica** un rewrite. Probá Start en un proyecto nuevo que encaje con su perfil, o migrá ruta por ruta. La frase mental de cierre: **elegí el framework por el encaje con tu app y tu equipo, no por cuál salió en el último video de YouTube.** Es así de fácil.
+**El consejo que vale oro, de la propia comunidad:** **"No migres por migrar."** No reescribas un Next que funciona. La performance sola (bundles más chicos, dev server más rápido) **no justifica** un rewrite. Probá Start en un proyecto nuevo que encaje con su perfil, o migrá ruta por ruta. La frase mental de cierre: **elegí el framework por el encaje con tu app y tu equipo, no por cuál salió en el último video de YouTube.**
 
 **Ejercicios 10**
 10.1 🧠 Tu equipo arranca un **SaaS dashboard** nuevo, todos vienen de SPA con TanStack Query, y el deploy es en Cloudflare. ¿Cuál elegís y por qué?
@@ -400,6 +469,8 @@ export const Route = createFileRoute('/products/$category')({
 // en el componente: const { sort } = Route.useSearch() // 'price' | 'name'
 ```
 
+**3.4** Cuando el `loader` tira, TanStack Router monta el **`errorComponent`** de esa ruta (recibe `error` y un `reset()` para reintentar) en vez de romper la app; mientras el loader resuelve se muestra el **`pendingComponent`**. La ventaja sobre un `if (error)`/`if (loading)` manual: el loading y el error son **declarativos y por ruta** (no repetís el patrón en cada componente), se integran con el streaming/Suspense, y un error en un segmento se contiene en su boundary sin tumbar el resto del árbol.
+
 **4.1** Es lógica que **solo corre en el servidor** (DB, env, fs) pero invocable **desde cualquier lado** —loaders, componentes, hooks, otras server functions— como una función normal y type-safe. El framework resuelve el transporte.
 
 **4.2** (1) **Handler de servidor**: el body real, solo vive en el server. (2) **Client stub**: en el bundle del cliente el body se reemplaza por un `fetch` a un endpoint interno de server functions (base configurable, por defecto bajo un prefijo tipo `/_serverFn/<id>`). (3) **SSR wrapper**: durante el render en server, importa el handler dinámicamente y lo ejecuta **local, sin HTTP**. Así la misma llamada funciona desde cliente (vía fetch) o desde server (local).
@@ -408,17 +479,66 @@ export const Route = createFileRoute('/products/$category')({
 
 **4.4** El método canónico es **`.validator()`** (acepta una función validadora o un schema tipo Zod). El nombre alternativo es **`.inputValidator()`**, que hoy está **deprecado** (el código fuente lo marca `@deprecated` con "Use `validator` instead"; ambos siguen funcionando porque apuntan a la misma implementación). Importa porque es justo el tipo de dato que cambia entre versiones: vas a encontrar blogs y respuestas que usan `inputValidator` y te conviene saber que el canónico hoy es `validator`. La lección de fondo: en tecnología joven, **verificá contra los docs/código oficial, no contra el primer blog.**
 
+**4.5**
+```ts
+import { createServerFn } from '@tanstack/react-start'
+import { z } from 'zod'
+
+const nuevoPost = z.object({ titulo: z.string().min(1) })
+
+export const crearPost = createServerFn({ method: 'POST' })
+  .validator(nuevoPost)                       // schema Zod: valida y tipa `data`
+  .handler(async ({ data }) => {
+    return db.post.create({ titulo: data.titulo })  // el return queda tipado en el llamador
+  })
+// en un componente/loader:  const post = await crearPost({ data: { titulo: 'Hola' } })  // post: tipado
+```
+Pasar el schema de Zod a `.validator()` te da validación en runtime (el input es no confiable) **y** el tipo de `data` en compile time, sin escribir la interfaz a mano.
+
+**4.6** En la **server function** (con middleware de auth), porque la función es un **endpoint invocable por sí solo**: esconder el botón en el cliente no impide que alguien llame al endpoint con el `id`. `beforeLoad` de la ruta sirve para la **UX** (redirigir al login antes de mostrar la pantalla), pero no protege la *operación*. En una app real: `beforeLoad` para bloquear el acceso a la vista **y** middleware/validación de autorización en la server function para la seguridad real. El `loader` no es el lugar del guard de una mutación.
+
+**4.7** Porque el handler **solo corre en el server** (su body nunca entra al bundle del cliente, módulo 4), así que `process.env.DB_URL` queda del lado seguro. Vite expone al cliente **solo** las variables con prefijo público (`VITE_`); el resto es server-only. Si leyeras `process.env.DB_URL` en un componente, dependerías de que NO sea público para no filtrarlo —frágil—; la regla segura es que los secretos vivan en código server-only (handlers, `.server.ts`) y nunca con prefijo `VITE_`.
+
 **5.1** El streaming manda el HTML al cliente **apenas está listo**, en chunks, en vez de esperar a renderizar todo. Ataca el **time-to-first-byte / contenido visible**: el usuario ve algo antes, y las partes lentas (que esperan data) llegan después sin bloquear el resto.
 
 **5.2** `ssr: true` (default): `beforeLoad`, `loader` y render, todo en el server — para contenido que se beneficia de SSR/SEO. `ssr: false`: todo en el cliente — para rutas que dependen de APIs browser-only (`localStorage`, `canvas`, `window`). `ssr: 'data-only'`: loaders en el server (data lista) pero render en el cliente — cuando querés la data prefetcheada pero el componente solo funciona client-side.
 
 **5.3** `ssr: false` (o `'data-only'` si necesitás prefetchear data en server). La librería usa `window`, que no existe en el server, así que renderizarla server-side rompería. Con `ssr: false` el componente solo se monta en el cliente.
 
+**5.4**
+```ts
+export const Route = createFileRoute('/reportes')({
+  // 'data-only': el loader corre en el server (prefetch de la data pesada),
+  // pero el render se hace en el cliente, donde sí existe `window` para los charts.
+  ssr: 'data-only',
+  loader: ({ context }) => context.queryClient.ensureQueryData(reportesQueryOptions()),
+  component: Reportes,
+})
+```
+La clave: `ssr: false` perdería el prefetch en el server; `ssr: true` rompería al intentar renderizar la librería de charts server-side. `'data-only'` te da lo mejor de ambos: data lista temprano (server) + render donde el `window` existe (cliente).
+
 **6.1** "Isomórfico" = el mismo loader corre en el **server** durante el SSR inicial y en el **cliente** durante las navegaciones siguientes. Resuelve el **waterfall** de las SPA puras (renderizo → recién ahí pido data → spinner): con loaders, la data se pide **antes** del render.
 
 **6.2** Porque el loader hace `ensureQueryData(postsQueryOptions())` —deja la data en el cache de TanStack Query— y el componente consume **las mismas `queryOptions`**. Query ve que ya está en cache (y fresca) y **no re-fetchea**: reusa lo que el loader trajo.
 
 **6.3** Que es **el mismo TanStack Query que ya usás en tu SPA**, ahora con SSR encima. No tenés que aprender un modelo de caché nuevo (como el de Next): reusás SWR, optimistic updates, invalidaciones y `queryOptions` que ya conocés. Curva de aprendizaje mínima.
+
+**6.4**
+```ts
+export const Route = createFileRoute('/posts')({
+  loader: ({ context }) => context.queryClient.ensureQueryData(postsQueryOptions()),
+  component: Posts,
+})
+
+function Posts() {
+  const { data } = useSuspenseQuery(postsQueryOptions())
+  return <PostList posts={data} />
+}
+// No re-fetchea porque el loader ya dejó la data en el cache de Query (mismas postsQueryOptions
+// = misma queryKey); useSuspenseQuery la encuentra fresca en cache y la usa sin pedirla de nuevo.
+```
+
+**6.5** **`invalidateQueries`** cuando la data la consume `useQuery`/`useSuspenseQuery` (Query la marca stale y refetchea). **`router.invalidate()`** cuando lo que quedó viejo lo trajo un **loader** (re-corre `beforeLoad`/`loader` de las rutas activas). Si usás el patrón loader + Query (el loader hace `ensureQueryData` y el componente consume con `useSuspenseQuery`), a menudo querés **los dos**: invalidar la query para los componentes y el router para que el loader vuelva a asegurar la data en la próxima entrada a la ruta.
 
 **7.1** **Vite**: el dev server (HMR rápido) y el bundler. Interviene en **desarrollo** y en el **build** del cliente. **Nitro**: el motor de servidor (sobre H3) que construye el artefacto de **producción** y lo hace deployable a cualquier target ("adapterless"). Interviene al **buildear para producción**.
 
@@ -446,4 +566,4 @@ export const Route = createFileRoute('/products/$category')({
 
 ---
 
-> **Para seguir.** La fuente de verdad de este módulo, dado lo volátil que es, son los docs oficiales: `tanstack.com/start`, `tanstack.com/router` y los releases en `github.com/TanStack/router`. Antes de implementar, re-verificá todo lo marcado con ⚠️ — versión, estado de RSC, comando de scaffold y forma de configurar. Es así de fácil: con tecnología joven, **leés la fuente, no el primer blog de Google.**
+> **Para seguir.** La fuente de verdad de este módulo, dado lo volátil que es, son los docs oficiales: `tanstack.com/start`, `tanstack.com/router` y los releases en `github.com/TanStack/router`. Antes de implementar, re-verificá todo lo marcado con ⚠️ — versión, estado de RSC, comando de scaffold y forma de configurar. Dos temas que quedan fuera del scope de este módulo introductorio pero que vas a querer enseguida: **[TanStack Form](https://tanstack.com/form)** (formularios tipados con validación, el complemento natural de las server functions) y el **testing** de server functions y loaders (todavía terreno en evolución; hoy lo más sólido es E2E con Playwright + testear la capa de datos por separado). Con tecnología joven, **leés la fuente, no el primer blog de Google.**
