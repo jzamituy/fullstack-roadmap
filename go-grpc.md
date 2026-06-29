@@ -76,7 +76,7 @@ service UsuarioService {
 
 Reglas que importan en producción:
 
-- **Los field numbers son sagrados.** Una vez asignado el `= 1`, **nunca lo cambies ni lo reuses** para otro campo: romperías a todos los clientes viejos. Para agregar, usás un número nuevo; para borrar, marcás el número como `reserved`.
+- **Los field numbers son sagrados.** Una vez asignado el `= 1`, **nunca lo cambies ni lo reuses** para otro campo: romperías a todos los clientes viejos. Para agregar, usás un número nuevo; para borrar, marcás el número como `reserved`. Y **cambiar el tipo** de un campo manteniendo el número también rompe la decodificación en el cable (un `int32` que pasa a `string` corrompe los bytes): reservá el número, no lo recicles ni con otro tipo.
 - **Compatibilidad hacia adelante/atrás.** Agregar un campo nuevo (número nuevo) es compatible: los clientes viejos lo ignoran, los nuevos lo leen. Por eso Protobuf escala entre versiones de servicios.
 - **Zero values, como en Go.** En proto3 no hay "campo ausente" para escalares: un `int32` no enviado llega como `0`, un `string` como `""`. Si necesitás distinguir "no enviado" de "cero", usás tipos *wrapper* (`google.protobuf.Int32Value`) o `optional`.
 - **Versioná el `package`** (`usuarios.v1`): cuando haya un cambio incompatible, creás `v2` y convivís.
@@ -214,9 +214,9 @@ func main() {
 }
 ```
 
-- **`grpc.NewClient`** (no `Dial`): no se conecta de inmediato, conecta *lazy* en la primera llamada — por eso no necesita el viejo `grpc.WithBlock`. Consecuencia clave: el `err` que devuelve `NewClient` solo valida el *target* y las opciones; **los fallos de red reales recién afloran en el primer RPC**, no acá (`WithBlock`/`FailOnNonTempDialError` quedaron deprecados en este flujo). Y ojo en Kubernetes: para un target sin esquema el *resolver* por defecto es `dns:///`, lo que importa para el balanceo (Módulo 10).
+- **`grpc.NewClient`** (no `Dial`): no se conecta de inmediato, conecta *lazy* en la primera llamada — por eso no necesita el viejo `grpc.WithBlock`. Consecuencia clave: el `err` que devuelve `NewClient` solo valida el *target* y las opciones; **los fallos de red reales recién afloran en el primer RPC**, no acá (`WithBlock`/`FailOnNonTempDialError` quedaron deprecados en este flujo). Y ojo en Kubernetes: para un target sin esquema el *resolver* por defecto es `dns:///`, lo que importa para el balanceo (Módulo 10) — el viejo `Dial` usaba `passthrough`, que **no re-resuelve DNS**, así que `NewClient` ya ayuda a que el balanceo funcione.
 - **`defer conn.Close()`** descarta el error que devuelve `Close()`; en código real conviene capturarlo. Acá lo dejamos así por brevedad.
-- **`insecure.NewCredentials()`** es **solo para desarrollo local**. En producción va TLS (Módulo 9). gRPC te obliga a ser explícito sobre la seguridad: no hay "modo inseguro por accidente".
+- **`insecure.NewCredentials()`** es **solo para desarrollo local**. En producción va TLS (Módulo 9). gRPC te obliga a ser explícito sobre la seguridad: no hay "modo inseguro por accidente". Y ojo con la combinación: la **auth por metadata** del Módulo 9 **exige TLS** — sin canal cifrado, el token viajaría en texto plano por la red.
 - El `ctx` con timeout viaja con la llamada: si expira, el servidor lo ve cancelado (propagación de deadline, Módulo 8).
 
 **Ejercicios 5**
@@ -273,7 +273,7 @@ for {
 }
 ```
 
-> 📝 Acá `err == io.EOF` se compara **directo** (no con `errors.Is`): los streams generados devuelven `io.EOF` sin envolver para señalar "fin del stream", así que es la convención idiomática de grpc-go — la excepción a la regla de `errors.Is` que viste en [Go para backend](go-backend.md).
+> 📝 Acá `err == io.EOF` se compara **directo** (no con `errors.Is`): los streams generados devuelven `io.EOF` sin envolver para señalar "fin del stream", así que es la convención idiomática de grpc-go — la excepción a la regla de `errors.Is` que viste en [Go para backend](go-backend.md). Ojo: `io.EOF` es el fin **limpio**; cualquier **otro** error de `Recv()` es un `status` real (p. ej. `Unavailable` si el transporte se cae a mitad de stream) y se inspecciona con `status.FromError` (Módulo 7) — no lo trates como fin de stream.
 
 **Client streaming** es el espejo: el server recibe en un loop y responde **una sola vez** al final con `SendAndClose`:
 
@@ -295,6 +295,8 @@ func (s *servidor) SubirUsuarios(stream pb.UsuarioService_SubirUsuariosServer) e
 ```
 
 (El **bidireccional** combina ambos: `Recv` y `Send` en goroutines independientes sobre el mismo stream.)
+
+> ⚠️ **Streaming gRPC ≠ mensajería.** Un stream es **una conexión** entre dos extremos: no es pub/sub, no hace fan-out a varios consumidores y **no sobrevive a una reconexión** (si se cae, lo reabrís y reanudás vos). Si necesitás fan-out, durabilidad o desacople productor/consumidor, eso es una cola/event bus, no un stream — ver [Event-driven](event-driven.md).
 
 **Ejercicios 6**
 6.1 🔁 Nombrá los cuatro tipos de RPC y un caso de uso de cada streaming.
@@ -389,7 +391,7 @@ func logUnario(ctx context.Context, req any, info *grpc.UnaryServerInfo,
 s := grpc.NewServer(grpc.ChainUnaryInterceptor(logUnario, authUnario))
 ```
 
-> 💡 **Recovery obligatorio:** como viste en [Go para backend](go-backend.md), un `panic` en una goroutine tumba el proceso. En gRPC, cada RPC corre en su goroutine, así que un interceptor de **recover** (o `grpc_recovery` del ecosistema) que convierta el panic en `codes.Internal` es prácticamente obligatorio en producción.
+> 💡 **Recovery obligatorio:** como viste en [Go para backend](go-backend.md), un `panic` en una goroutine tumba el proceso. En gRPC, cada RPC corre en su goroutine, así que un interceptor de **recover** que convierta el panic en `codes.Internal` es prácticamente obligatorio en producción. No lo escribas a mano: la librería estándar de interceptors es **`github.com/grpc-ecosystem/go-grpc-middleware`** (recovery, logging y auth ya hechos y encadenables).
 
 **Ejercicios 8**
 8.1 🔁 ¿Qué es la *metadata* en gRPC y para qué se usa típicamente?
@@ -414,7 +416,7 @@ s := grpc.NewServer(grpc.Creds(creds))
 
 - **mTLS (mutual TLS)** — además, el **server verifica al cliente** por su certificado. Es el estándar para tráfico service-to-service en una malla (service mesh como Istio/Linkerd lo hacen por vos). La identidad del servicio queda probada por el certificado, sin tokens. En código, mTLS no se arma con el `NewServerTLSFromFile` de arriba (eso es solo TLS server-side) sino con `credentials.NewTLS(&tls.Config{...})` configurando `ClientCAs` y `ClientAuth: tls.RequireAndVerifyClientCert`.
 
-**Autenticación de usuario/llamador** (cuando no alcanza mTLS): el token va en la **metadata** (`authorization`), y un **interceptor** lo valida antes de llegar al handler — exactamente el patrón de middleware de auth, pero a nivel RPC:
+**Autenticación de usuario/llamador** (cuando no alcanza mTLS): el token va en la **metadata** (`authorization`), y un **interceptor** (el mismo patrón del Módulo 8, ahora aplicado a auth) lo valida antes de llegar al handler — exactamente el patrón de middleware de auth, pero a nivel RPC:
 
 ```go
 func authUnario(ctx context.Context, req any, info *grpc.UnaryServerInfo,
@@ -447,7 +449,8 @@ func authUnario(ctx context.Context, req any, info *grpc.UnaryServerInfo,
 - **Observabilidad** — instrumentás con **interceptors de OpenTelemetry** (`otelgrpc`): trazas y métricas por RPC automáticamente, con propagación del trace por la metadata. Esto enchufa directo con tu módulo de [Observabilidad](observabilidad.md): el `FullMethod` es tu etiqueta, y el deadline propagado ya te da el span padre.
 - **Balanceo de carga** — gRPC usa conexiones **de larga vida** sobre HTTP/2, así que un balanceador L4 (por conexión) manda todo a un solo backend. Necesitás **balanceo L7 / client-side** (resolver + `round_robin`) o un proxy que entienda gRPC (Envoy, o el de tu service mesh). Es la trampa #1 de gRPC en Kubernetes: "escalé las réplicas y el tráfico no se reparte".
 - **gRPC-Web / gateway** — el browser no habla gRPC nativo. Si necesitás exponer al frontend, usás **gRPC-Web** (con un proxy como Envoy) o **grpc-gateway** (genera un REST/JSON que traduce a gRPC). Esto refuerza el criterio del Módulo 11: gRPC adentro, REST en el borde.
-- **ConnectRPC (Buf)** — ⚠️ evolución del ecosistema `buf` que aparece cada vez más en ofertas 2026: un servidor que habla **gRPC, gRPC-Web y REST/JSON desde el mismo handler**, sin proxy aparte. Resuelve de raíz el "gRPC adentro + browser/REST afuera" que en gRPC clásico te obliga a gateway/proxy. Tenelo en el radar como el camino que simplifica este problema.
+- **Reintentos y timeouts declarativos (service config).** Del lado cliente, gRPC permite una *service config* (JSON, vía el resolver o `grpc.WithDefaultServiceConfig`) con **retry policy** (reintentos con backoff por código, típicamente `Unavailable`) y deadlines por método — sin escribir el loop a mano. Es de lo primero que se configura en producción junto al balanceo. Ojo con la **idempotencia**: reintentá solo lo seguro (ver [Resiliencia](go-resiliencia.md)).
+- **ConnectRPC (Buf)** — ⚠️ evolución del ecosistema `buf` que aparece cada vez más en ofertas 2026: un servidor que habla **gRPC, gRPC-Web y el protocolo Connect** (HTTP/1.1 + JSON, estilo REST para llamadas unary) **desde el mismo handler**, sin proxy aparte. Resuelve de raíz el "gRPC adentro + browser/REST afuera" que en gRPC clásico te obliga a gateway/proxy. (Para transcodificación REST completa con rutas custom estilo `google.api.http`, los mismos autores tienen **Vanguard**.) Tenelo en el radar como el camino que simplifica este problema.
 
 **Ejercicios 10**
 10.1 🔁 ¿Para qué sirve el health checking estándar de gRPC y quién lo consume?
