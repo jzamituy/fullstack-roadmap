@@ -1,8 +1,8 @@
-# Banco de casos de diseño de sistemas: 15 problemas resueltos de punta a punta
+# Banco de casos de diseño de sistemas: 16 problemas resueltos de punta a punta
 
-**Los casos clásicos de entrevista senior, resueltos con el método · feed, chat, notificaciones, typeahead, archivos, rate limiter, crawler, reservas/pagos, proximidad, métricas en streaming, edición colaborativa, caché distribuida, streaming de video, ledger de pagos, matching de órdenes · el recorrido importa más que la respuesta · 2026**
+**Los casos clásicos de entrevista senior, resueltos con el método · feed, chat, notificaciones, typeahead, archivos, rate limiter, crawler, reservas/pagos, proximidad, métricas en streaming, edición colaborativa, caché distribuida, streaming de video, ledger de pagos, matching de órdenes, asistente RAG/LLM · el recorrido importa más que la respuesta · 2026**
 
-> Cómo usar este banco: este módulo es la **práctica** de [Diseño de sistemas backend](system-design.md). Ahí aprendiste el método y el criterio; acá los aplicamos a los 15 problemas que más caen en entrevistas. Para cada caso, **tapá la solución y resolvelo vos primero en voz alta** siguiendo los 6 pasos; después contrastá. Lo que se evalúa no es si llegás a *mi* diseño, sino si recorrés bien: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs. Son **15 casos**.
+> Cómo usar este banco: este módulo es la **práctica** de [Diseño de sistemas backend](system-design.md). Ahí aprendiste el método y el criterio; acá los aplicamos a los 16 problemas que más caen en entrevistas. Para cada caso, **tapá la solución y resolvelo vos primero en voz alta** siguiendo los 6 pasos; después contrastá. Lo que se evalúa no es si llegás a *mi* diseño, sino si recorrés bien: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs. Son **16 casos**.
 
 **El método, en una línea** (de [system-design](system-design.md) módulo 1): **(1)** aclarar requisitos (sobre todo los **no funcionales**: escala, lectura/escritura, latencia, consistencia), **(2)** estimar (back-of-the-envelope), **(3)** API + modelo de datos, **(4)** diseño de alto nivel, **(5)** profundizar **donde duele**, **(6)** discutir trade-offs. No hay respuestas correctas, hay **decisiones justificadas**.
 
@@ -26,6 +26,7 @@
 13. YouTube / Netflix: streaming de video — *transcoding paralelo + adaptive bitrate + CDN*
 14. Payment ledger / billetera — *contabilidad de doble entrada + log inmutable*
 15. Order matching engine (exchange) — *order book en memoria + matching secuencial determinista (event sourcing)*
+16. Sistema RAG / asistente LLM — *recuperación + generación fundamentada con citas (el LLM como dependencia cara/lenta/no determinista)*
 
 > **El patrón que se repite.** Vas a ver que los mismos ladrillos reaparecen en casi todos los casos: **fan-out** (¿escribo a muchos en la escritura o leo de muchos en la lectura?), **caché del camino caliente**, **idempotencia ante reintentos**, **colas para desacoplar y absorber picos**, **sharding por la clave de acceso**, y **el caso patológico** (la celebridad, el prefijo popular, el archivo gigante). Aprender a *reconocer* qué ladrillo aplica es la mitad de la entrevista.
 
@@ -799,6 +800,76 @@ interface Trade {
 
 ---
 
+## Caso 16 — Sistema RAG / asistente LLM (diseñar un "chatea con tus documentos")
+
+> Este caso es la versión **system design de entrevista** del pipeline que [RAG](rag.md), [Vector DBs](vector-dbs.md) y [Agentes](agentes.md) cubren a nivel implementación. Acá no enseñamos a programar el RAG: aplicamos el método para **dimensionarlo, costearlo y decidir trade-offs** como en una entrevista — porque el system design de IA ya entra en el loop para roles senior.
+
+**1. Requisitos.**
+- Funcionales: el usuario pregunta en **lenguaje natural** sobre un corpus (docs internos, base de conocimiento, tickets de soporte); el sistema **recupera** los pasajes relevantes y **genera** una respuesta **fundamentada en ellos, con citas** a la fuente; soporta **conversación multi-turno** (follow-ups); y dice **"no lo sé"** cuando no hay evidencia, en vez de inventar.
+- No funcionales: **fundamentación (*groundedness*)** — la respuesta se apoya en fuentes reales y citables, no alucina; es **la métrica que más importa**. **Latencia** tolerable de chat (primer token en <~1 s con streaming; respuesta completa en segundos). **Costo por consulta acotado** (el LLM cobra **por token**, de entrada y de salida — no por request). **Frescura** sin reentrenar (si cambia un doc, la respuesta lo refleja en minutos, no hay que tocar el modelo). **Evaluable en producción** (el LLM es **no determinista** → no hay `assert` clásico).
+
+**2. Estimación — el napkin math de tokens, costo y latencia.** Lo que distingue al system design de IA: la unidad de costo y latencia es el **token**, no el request.
+- **Corpus e índice (una sola vez):** 100k documentos × ~1000 tokens ≈ **100M tokens**. Chunking en ~500 tokens → **~200k chunks**. Un embedding por chunk (dim ~1024) → 200k × 1024 × 4 bytes ≈ **~820 MB** de vectores → entra holgado en RAM de un índice HNSW (pgvector o un motor vectorial; HNSW vive **en memoria**, por eso después la búsqueda es de milisegundos). El embedding lo hace un **proveedor de embeddings dedicado** (Voyage, OpenAI, Cohere), no el LLM de generación.
+- **Por consulta:** recuperás top-k (k≈6) chunks ≈ 6×500 = 3000 tokens de contexto + system prompt (~1k) + pregunta (~200) ≈ **~4200 tokens de entrada**; salida ≈ **~400 tokens**.
+- **Costo por consulta** con un modelo tier-alto a $5/1M entrada y $25/1M salida: 4200 × $5/1M = **$0.021** + 400 × $25/1M = **$0.010** → **~$0.031/consulta**. A 1M consultas/mes ≈ **~$31k/mes** solo en generación. **Tres palancas:** (a) **modelo más barato** para lo simple ($1/$5 → ~5× menos); (b) **prompt caching** del system prompt e instrucciones estables (~0.1× la lectura) si el prefijo se repite; (c) **Batch API** (~50%) para lo no interactivo. El embedding de la query es **despreciable** (1 vector por consulta).
+- **Latencia:** embed de la query (~50 ms) + búsqueda vectorial (~10–50 ms, con el índice HNSW **en RAM**) + **el LLM, que domina** (primer token en cientos de ms, luego ~50–100 tokens/s). Con **streaming** el usuario ve el primer token enseguida aunque la respuesta total tarde varios segundos. Conclusión de la estimación: **el LLM domina costo y latencia**; todo lo demás es ruido.
+
+**3. API y datos — el pipeline de recuperación + generación.**
+```
+POST /chat  { conversationId, message }  → (stream SSE de tokens) + { fuentes[] } al cierre
+```
+- **Streaming es la decisión de UX clave:** sin él, el usuario espera segundos en blanco; con SSE, ve la respuesta formarse token a token.
+- **Datos:** tabla `chunks` (`id | documentId | texto | embedding(vector) | metadata`: tenant, fecha, **permisos**) + el documento original en object storage + el **índice vectorial (HNSW)** sobre el embedding + el historial por `conversationId`.
+- **El pipeline RAG, en una línea:** query → **embed** de la query → **búsqueda vectorial** top-k (filtrando por metadata/permisos) → **armar contexto** (chunks + system prompt + historial, dentro del presupuesto de tokens) → **LLM** con instrucción de citar → **stream + fuentes**.
+
+**4. La decisión clave — fundamentar la generación (RAG) en vez de confiar en el modelo.** El LLM solo "sabe" lo de su entrenamiento (con *cutoff*) y **alucina con seguridad**. RAG inyecta **evidencia recuperada** en el prompt para que la respuesta se base en **tus** datos, actuales y citables. Tres piezas:
+- **Recuperación:** índice vectorial (semántica) e idealmente **híbrida** con léxica (BM25, ver [Búsqueda a escala](busqueda.md)) fusionada con **RRF** (que combina por **posición de ranking**, no por el score crudo —que no es comparable entre vectorial y BM25) — la vectorial sola falla con nombres propios, códigos o términos exactos.
+- **Generación fundamentada:** el system prompt instruye *"respondé SOLO con el contexto; si no está, decí que no lo sabés; citá la fuente"*. El LLM es una **dependencia no determinista** → la misma pregunta puede dar respuestas distintas.
+- **Citas:** cada afirmación apunta a un chunk fuente, **verificable** por el usuario. (Matiz de API: el structured output suele ser **incompatible con las citas nativas** del proveedor —el modo JSON ocupa el canal de salida que el proveedor usaría para emitir las citas— → las fuentes van como un **campo del esquema** o se mapean por `documentId`.)
+
+**5. Donde duele — alucinación, presupuesto de contexto, latencia/costo, frescura y eval en producción.**
+- **Alucinación / *groundedness* (el modo de falla central).** El modelo puede ignorar el contexto o inventar. Mitigación: prompt estricto + **buena evidencia** (si el retrieval trae basura, la generación es basura — *garbage in, garbage out*); **umbral de score** (si el mejor chunk está por debajo, responder "no tengo información"); **fallback a "no sé"**; verificación opcional con un **LLM-juez** que chequea que la respuesta esté soportada por las fuentes (suma latencia/costo → reservar para alto riesgo o muestrear offline, como en [Evals](evals.md)). Aguas arriba, la **estrategia de chunking** (tamaño + solapamiento, corte fijo vs semántico) es una palanca de groundedness tan decisiva como el prompt: chunks mal cortados parten una idea en dos y el top-k nunca trae la evidencia completa (el detalle vive en [RAG](rag.md)).
+- **Presupuesto de contexto.** No metés todo: k muy grande → caro **y** *lost in the middle* (el modelo ignora el medio del contexto). Armás el contexto priorizando los chunks de mayor score + historial reciente comprimido. **Ojo:** la ventana de 1M de los modelos actuales no cambia que **cada token se re-paga en cada turno**.
+- **Latencia y costo.** El LLM domina; las palancas del napkin math (streaming, modelo más chico, prompt caching) + **caché de respuestas** para preguntas idénticas o muy similares (*semantic cache*).
+- **Frescura sin reentrenar (la gracia de RAG).** Cuando un doc cambia, **re-ingestás solo ese doc** (re-chunk + re-embed + **upsert por `documentId`**, borrando los chunks viejos) y la próxima consulta ya lo ve — **no se toca el modelo**. Es el "día 2" del ingest, **idempotente por `documentId`** (reusa la idempotencia del caso 8).
+- **Eval en producción.** No hay `assert` clásico (no determinista). **Offline:** *golden set* de preguntas con respuesta/fuentes esperadas; métricas de **groundedness** (¿soportado por las fuentes?), **recall@k** del retrieval (¿el chunk correcto entró en el top-k?) y **corrección** (LLM-juez calibrado contra humano). **Online:** loggear cada consulta (pregunta, chunks, respuesta, latencia, costo, 👍/👎) para cazar regresiones.
+
+> **4 capas — el modelo que alucina una respuesta con cita inventada:**
+> 1. **Qué se rompe:** el usuario pregunta algo fuera del corpus (o el retrieval trae chunks irrelevantes) y el LLM **inventa** una respuesta plausible y falsa, a veces con una cita inexistente.
+> 2. **Por qué a esta escala/uso:** el LLM es no determinista y está entrenado para **sonar seguro**; sin evidencia buena, rellena. A escala, una fracción de respuestas falsas erosiona la confianza, y en dominios regulados es responsabilidad legal.
+> 3. **Control de corto plazo:** prompt estricto ("solo con el contexto; si no está, decí que no lo sabés"); **umbral de score** del retrieval (por debajo → "no tengo información"); **citar fuentes verificables**.
+> 4. **Cambio de diseño:** retrieval **híbrido + reranking** para subir la calidad de la evidencia; **LLM-juez de groundedness** en el camino (alto riesgo) o muestreado (offline); **golden set + logging + feedback** para medir y atajar regresiones; **human-in-the-loop** donde el error sale caro.
+
+**6. Trade-offs.**
+- **RAG vs fine-tuning vs contexto largo.** RAG para conocimiento **que cambia y necesita citas** (la mayoría de los casos); **fine-tuning** para **estilo/formato/tarea**, no para hechos frescos; meter **todo el corpus** en la ventana de 1M es **caro** (se re-paga por turno) y sufre *lost in the middle* — RAG recupera solo lo relevante. No son excluyentes; se combinan.
+- **Calidad del retrieval vs costo.** Vectorial sola es barata pero floja en exactitud léxica; **híbrida + reranker** mejora groundedness pero suma latencia y un modelo más. Trade-off **recall ↔ latencia/costo** al subir k.
+- **Modelo caro vs barato + routing.** Modelo tier-alto para respuestas difíciles/razonamiento; modelo chico para clasificación y respuestas simples; **routing** (un modelo barato evalúa la complejidad y enruta) baja el costo. El **tiering es la palanca de costo #1**.
+- **Frescura del índice.** Re-ingest inmediato (caro, muchas escrituras) vs batch nocturno (barato, *stale*) — el mismo dilema que el *freshness* de [Búsqueda](busqueda.md).
+- **Determinismo: no hay.** Misma pregunta, respuestas distintas. Para evals reproducibles fijás el golden set y medís **distribuciones**, no igualdad exacta (caso [Evals](evals.md)).
+
+> **El cierre de criterio — no sobre-diseñar.** ¿Pocos documentos que **entran en la ventana de contexto** (un manual, un puñado de PDFs)? Metelos **directo en el prompt** (con prompt caching si la consulta se repite) y salteate el índice vectorial entero — es "RAG" sin vector DB. El pipeline de embeddings, el índice HNSW, el retrieval híbrido y el reranking son para cuando el corpus **no entra en contexto**, **cambia seguido**, o necesitás **citar y filtrar por permisos**. Para casi todo lo demás, **"poné los docs en el prompt" es la respuesta correcta** — no construyas un pipeline de recuperación sin necesidad. La implementación de todo esto vive en [RAG](rag.md), [Vector DBs](vector-dbs.md), [Búsqueda](busqueda.md) y [Evals](evals.md).
+
+**Ejercicios — Caso 16**
+16.1 🔁 ¿Qué problema del LLM resuelve **RAG**, y en qué se diferencia de **fine-tuning**?
+16.2 🧠 Napkin math: con k=6 chunks de ~500 tokens, system prompt ~1k, pregunta ~200 y salida ~400, a $5/1M (entrada) y $25/1M (salida), ¿cuánto cuesta **una** consulta y qué **tres palancas** la abaratan?
+16.3 🧠 El modelo alucina una respuesta con una cita inventada. Recorré las **4 capas** (qué se rompe / por qué / control de corto plazo / cambio de diseño).
+16.4 🧠 ¿Por qué meter **todo el corpus** en la ventana de 1M **no** reemplaza al retrieval, y **cuándo sí** saltearías el índice vectorial?
+16.5 ✍️ Implementá `armarContexto(pregunta, chunks, presupuestoTokens, estimarTokens)`: los `chunks` vienen **ordenados por score descendente**; incluí los de mayor score hasta **agotar el presupuesto de tokens** (sin pasarte), construí el prompt con la instrucción de fundamentar + citar, y devolvé el prompt junto con las **fuentes únicas** (por `documentId`, en orden de aparición). Usá los tipos de abajo.
+```ts
+interface Chunk {
+  id: string;
+  documentId: string;
+  texto: string;
+  score: number;
+}
+interface Contexto {
+  prompt: string;
+  fuentes: string[]; // documentId de cada chunk incluido, para citar
+}
+```
+
+---
+
 # Soluciones
 
 > Mirá esto solo después de intentar cada caso en voz alta. Casi todas son de **criterio**: si tu razonamiento difiere pero justifica bien el trade-off, probablemente también esté bien. En diseño de sistemas, el *cómo* justificás importa más que el *qué* elegís.
@@ -1212,8 +1283,64 @@ function matchearCompra(
 
 **15.6** Porque el `float` (IEEE-754) **no puede representar exactamente** la mayoría de los decimales: el clásico `0.1 + 0.2 === 0.30000000000000004`, y en JS `number` *es* un float de 64 bits (enteros exactos solo hasta 2⁵³). En un matching engine eso es catastrófico por dos razones encadenadas: **(1) correctitud** — comparar precios para decidir si dos órdenes cruzan (`bid >= ask`) con floats da resultados erráticos (dos precios "iguales" que no lo son por un epsilon), sumar fills acumula error de redondeo, y terminás ejecutando trades a precios mal calculados o casando órdenes que no debían cruzar; **(2) determinismo** — el redondeo de coma flotante puede depender del orden de las operaciones y de la plataforma, así que rompe la reconstrucción exacta del book por replay (el riesgo de divergencia silenciosa del 15.3). La solución es la misma del ledger del caso 14: **enteros en la unidad mínima** (precios en *ticks*, montos en centavos) o un decimal de precisión fija de la DB (`NUMERIC`); toda la aritmética del engine es entera, exacta y reproducible.
 
-Estos 15 casos cubren los patrones que más caen: fan-out, tiempo real, async con colas, lectura-intensivo con precómputo, separación metadata/contenido, estado compartido atómico, procesamiento masivo, consistencia fuerte transaccional, indexación espacial, agregación en streaming por event-time, convergencia de ediciones concurrentes (OT/CRDT), particionado por consistent hashing, distribución de contenido por CDN, contabilidad de doble entrada y matching secuencial determinista. Para seguir:
+### Caso 16 — Sistema RAG / asistente LLM
+**16.1** RAG resuelve dos límites del LLM: su conocimiento **está congelado en el *cutoff*** del entrenamiento (no sabe nada posterior ni nada privado tuyo) y **alucina con seguridad** cuando no sabe. Recuperando evidencia de **tu** corpus e inyectándola en el prompt, la respuesta se **fundamenta en datos actuales, propios y citables**, y podés instruir al modelo a decir "no sé" cuando la evidencia no alcanza. La diferencia con **fine-tuning**: fine-tuning ajusta los **pesos** del modelo para enseñarle un **estilo, formato o tarea** (cómo responder), y es caro de re-hacer cuando los hechos cambian; RAG no toca el modelo, le da **hechos frescos en el contexto** (qué responder) y se actualiza re-ingestando un documento. Regla: ¿conocimiento que cambia y hay que citar? → RAG. ¿Comportamiento/estilo consistente? → fine-tuning. Se combinan.
+
+**16.2** Entrada = 6×500 + 1000 + 200 = **4200 tokens**; salida = **400 tokens**. Costo = 4200 × $5/1.000.000 + 400 × $25/1.000.000 = **$0.021 + $0.010 = ~$0.031 por consulta** (a 1M consultas/mes ≈ **~$31k/mes** solo en generación). Tres palancas: **(1) modelo más barato** para lo simple (a $1/$5 la misma consulta sale ~$0.0062, ~5× menos) con **routing** que manda lo difícil al modelo caro; **(2) prompt caching** del system prompt + instrucciones estables (la lectura cacheada cuesta ~0.1× → si el prefijo de ~1k se repite, casi desaparece de la cuenta de entrada); **(3) Batch API** (~50%) para todo lo que no sea interactivo (reindexar respuestas, evals, generación offline). El embedding de la query es ~1 vector → costo despreciable frente a la generación.
+
+**16.3** **(1) Qué se rompe:** la pregunta cae fuera del corpus —o el retrieval trae chunks irrelevantes— y el LLM **inventa** una respuesta plausible y falsa, a veces citando una fuente que no existe. **(2) Por qué a esta escala/uso:** el modelo es no determinista y está entrenado para **sonar seguro**; sin evidencia buena, **rellena** en vez de abstenerse, y a volumen una fracción de respuestas falsas erosiona la confianza (y en dominios regulados es responsabilidad legal). **(3) Control de corto plazo:** prompt estricto ("respondé **solo** con el contexto; si no está, decí que no lo tenés"); **umbral de score** del retrieval (si el mejor chunk no supera el umbral → "no tengo información", no generes); exigir **citas verificables** que el usuario pueda abrir. **(4) Cambio de diseño:** retrieval **híbrido + reranking** para que la evidencia que llega sea buena (si entra basura, sale basura); un **LLM-juez de groundedness** que verifica que cada afirmación esté soportada por las fuentes —en el camino crítico para alto riesgo, o muestreado offline para no pagar latencia siempre—; **golden set + logging + feedback 👍/👎** para medir groundedness y detectar regresiones; **human-in-the-loop** donde el costo del error es alto.
+
+**16.4** Porque **cada token del contexto se re-paga en cada turno** (costo lineal en el tamaño del corpus inyectado, multiplicado por la longitud de la conversación) y porque los modelos sufren *lost in the middle* —ignoran la información sepultada en el medio de un contexto enorme—, así que meter 100M tokens de corpus en la ventana es a la vez **carísimo y menos preciso** que recuperar los 6 chunks que importan. El retrieval es, en el fondo, **traer solo lo relevante** para no pagar ni diluir. **Sí saltearías el índice vectorial** cuando el corpus **entra cómodo en la ventana de contexto** (un manual, unos pocos PDFs, una política): metés los docs directo en el prompt —idealmente con **prompt caching** si la consulta se repite— y te ahorrás todo el pipeline de embeddings + HNSW + reranking. El índice vectorial recién se justifica cuando el corpus **no entra**, **cambia seguido** o necesitás **filtrar por permisos y citar**.
+
+**16.5**
+```ts
+interface Chunk {
+  id: string;
+  documentId: string;
+  texto: string;
+  score: number;
+}
+interface Contexto {
+  prompt: string;
+  fuentes: string[]; // documentId de cada chunk incluido, para citar
+}
+
+// `chunks` viene ordenado por score descendente. `estimarTokens` cuenta tokens de un string
+// (en producción: la API count_tokens del proveedor, NUNCA un tokenizer de otro modelo —
+// undercuenta y rompe el presupuesto).
+function armarContexto(
+  pregunta: string,
+  chunks: Chunk[],
+  presupuestoTokens: number,
+  estimarTokens: (s: string) => number,
+): Contexto {
+  const incluidos: Chunk[] = [];
+  let usados = estimarTokens(pregunta);
+  for (const c of chunks) {
+    const costo = estimarTokens(c.texto);
+    if (usados + costo > presupuestoTokens) break; // no entra: corto (los de mayor score ya entraron)
+    incluidos.push(c);
+    usados += costo;
+  }
+  const prompt = [
+    "Respondé SOLO con el siguiente contexto. Si la respuesta no está, decí que no la tenés.",
+    ...incluidos.map((c) => `[${c.documentId}] ${c.texto}`),
+    `Pregunta: ${pregunta}`,
+  ].join("\n\n");
+  // Fuentes únicas, preservando el orden de aparición (mayor score primero).
+  const fuentes = [...new Set(incluidos.map((c) => c.documentId))];
+  return { prompt, fuentes };
+}
+// Notas: (1) asume `chunks` YA ordenado por score desc; corto con `break` en el PRIMER chunk que
+// no entra en vez de saltearlo y seguir buscando uno más chico — así preservo la prioridad de
+// score y no relleno el contexto con chunks de score bajo "porque caben" (eso mete ruido y
+// agrava el "lost in the middle"). (2) En producción el presupuesto se reparte: ANTES del loop
+// hay que restar el costo del system prompt de fundamentación + la instrucción de citar +
+// el historial; acá modelamos solo los chunks. (3) Las `fuentes` son lo que se cita al usuario.
+```
+
+Estos 16 casos cubren los patrones que más caen: fan-out, tiempo real, async con colas, lectura-intensivo con precómputo, separación metadata/contenido, estado compartido atómico, procesamiento masivo, consistencia fuerte transaccional, indexación espacial, agregación en streaming por event-time, convergencia de ediciones concurrentes (OT/CRDT), particionado por consistent hashing, distribución de contenido por CDN, contabilidad de doble entrada, matching secuencial determinista y recuperación aumentada (RAG). Para seguir:
 
 - **Resolvé en voz alta los que faltan**, reusando los mismos ladrillos: "diseñá un full-text search" (índice invertido + el caso 4 de precómputo — ya hay un módulo dedicado en [Búsqueda a escala](busqueda.md)), "diseñá un distributed job scheduler" (las colas del caso 3/7 + leader election, con la teoría en [Workflows durables](workflows.md)). Lo que se evalúa es el recorrido, no la respuesta.
 - **Conectá cada decisión con su implementación en el hub:** colas e idempotencia en [Event-driven](event-driven.md) y [Redis](redis.md), el contrato de cada API en [API design](api-design.md), tiempo real en [Tiempo real](tiempo-real.md), datos en [PostgreSQL](postgresql.md)/[NoSQL](nosql.md), control de flujo en [Concurrencia](concurrencia.md), y cómo operarlo en [Observabilidad](observabilidad.md).
-- **Volvé al método** de [Diseño de sistemas](system-design.md) módulo 1 cada vez: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs. El método es el mismo para los 15 casos y para cualquier problema nuevo que te tiren.
+- **Volvé al método** de [Diseño de sistemas](system-design.md) módulo 1 cada vez: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs. El método es el mismo para los 16 casos y para cualquier problema nuevo que te tiren.
