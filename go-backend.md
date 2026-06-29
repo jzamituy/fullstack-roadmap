@@ -187,8 +187,8 @@ Para esperar a que **un grupo** de goroutines termine, usás `sync.WaitGroup`. P
 ```go
 func procesar(trabajos []int) []int {
 	jobs := make(chan int, len(trabajos))
-	out := make(chan int, len(trabajos))
-	var wg sync.WaitGroup
+	out := make(chan int, len(trabajos)) // buffer = total: si fuera sin buffer, los workers se bloquearían
+	var wg sync.WaitGroup                 //   escribiendo en out mientras main está en wg.Wait() (deadlock)
 
 	for w := 0; w < 3; w++ { // 3 workers
 		wg.Add(1)
@@ -218,6 +218,16 @@ func procesar(trabajos []int) []int {
 > ⚠️ **La trampa clásica:** los **data races** existen en Go (a diferencia de Rust, el compilador no los previene). Si dos goroutines tocan la misma variable y al menos una escribe, tenés un bug. Corré tus tests con `go test -race` para detectarlos.
 
 > 💡 **El patrón de producción:** `WaitGroup` es la base para entender el fan-out, pero en código real se usa **`golang.org/x/sync/errgroup`**, que combina `WaitGroup` + **propagación del primer error** + **cancelación por `context`** del resto de las goroutines cuando una falla. Cuando varias goroutines pueden devolver error, `errgroup.Group` es lo idiomático; el `WaitGroup` crudo se queda para cuando no hay errores que coordinar.
+>
+> ```go
+> g, ctx := errgroup.WithContext(ctx) // ctx se cancela apenas una goroutine devuelve error
+> for _, u := range usuarios {
+> 	g.Go(func() error { return enviarEmail(ctx, u) }) // Go 1.22+: u ya no se comparte entre iteraciones
+> }
+> if err := g.Wait(); err != nil { // espera a todas; devuelve el PRIMER error
+> 	return fmt.Errorf("enviar emails: %w", err)
+> }
+> ```
 
 **Ejercicios 4**
 4.1 🔁 ¿Qué diferencia hay entre un channel con buffer y uno sin buffer respecto al bloqueo?
@@ -701,7 +711,7 @@ for p := range Pares(nums) { // recorrés tu iterador como si fuera un slice
 }
 ```
 
-**El criterio (importante):** los genéricos son para **contenedores y algoritmos genéricos** (un `Map`, un cache tipado, un árbol). **No** reemplaces las interfaces por genéricos en todos lados: si solo necesitás polimorfismo de comportamiento, una interface sigue siendo más clara. **Genéricos para *datos*; interfaces para *comportamiento*.** Siguen siendo más acotados que en Rust/TS: un **método no puede declarar sus propios parámetros de tipo** (un `T` nuevo) — aunque los **tipos sí pueden ser genéricos y tener métodos** (`type Cache[T any] struct{…}` con `func (c *Cache[T]) Get(...)`) — y no hay covarianza. Para 2026 son maduros y la propia stdlib se apoya en ellos.
+**El criterio (importante):** los genéricos son para **contenedores y algoritmos genéricos** (un `Map`, un cache tipado, un árbol). **No** reemplaces las interfaces por genéricos en todos lados: si solo necesitás polimorfismo de comportamiento, una interface sigue siendo más clara. **Genéricos para *datos*; interfaces para *comportamiento*.** Siguen siendo más acotados que en Rust/TS: un **método no puede declarar sus propios parámetros de tipo** (un `T` nuevo) — aunque los **tipos sí pueden ser genéricos y tener métodos** (`type Cache[T any] struct{…}` con `func (c *Cache[T]) Get(...)`) — y no hay covarianza. La prohibición de métodos genéricos es una **decisión de diseño** deliberada (un método genérico complicaría el *dispatch* de interfaces), no una limitación temporal — si venís de TS, donde los métodos genéricos sí existen, este es el límite que más choca. Para 2026 son maduros y la propia stdlib se apoya en ellos.
 
 > 📝 **Cuándo NO:** los iteradores `range`-over-func tienen un costo de llamada por elemento y brillan en secuencias **perezosas o infinitas** o cuando evitás materializar un slice; para una colección chica ya en memoria, un `for` directo sobre el slice es más simple y rápido. Genéricos e iteradores son herramientas, no un default — si no agregan claridad o reuso, no los fuerces.
 
@@ -796,8 +806,8 @@ Lo que te lleva de "junior Go" a backend Go sólido: los **gotchas de concurrenc
 ```go
 // 2.3
 type Producto struct {
-	ID            string
-	Nombre        string
+	ID             string
+	Nombre         string
 	PrecioCentavos int
 }
 
@@ -911,6 +921,9 @@ func salud(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 // registro: mux.HandleFunc("GET /salud", salud)
+// Nota: acá el payload es trivial y no puede fallar, por eso escribimos el status directo;
+// no aplica la "trampa del ResponseWriter" del callout (serializar a buffer primero), que sí
+// importa cuando el Encode de una respuesta real puede fallar a mitad de la escritura.
 ```
 
 ### Módulo 7
@@ -1035,8 +1048,10 @@ func envia(ctx context.Context, ch chan int) {
 		}
 	}()
 }
-// Si calcular() es caro y el ctx pudo cancelarse antes, chequealo primero:
-// if ctx.Err() != nil { return }
+// Ojo con el alcance del fix: el select evita quedar bloqueado MANDANDO el resultado a un
+// channel que nadie lee; NO interrumpe el cómputo de calcular() en sí (eso ya está corriendo).
+// Para cortar el trabajo mismo, calcular() tiene que recibir el ctx y chequearlo por dentro:
+// if ctx.Err() != nil { return } al inicio, o pasar ctx a sus operaciones de I/O.
 ```
 ```go
 // 11.5  — segunda etapa de pipeline (encadenable con generar())
