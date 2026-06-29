@@ -163,6 +163,8 @@ upstream node_app {
 }
 ```
 
+> ⚠️ Para que ese `keepalive` al upstream realmente reuse conexiones, en el `location` necesitás `proxy_http_version 1.1;` **y** `proxy_set_header Connection "";` (vaciar el header `Connection`, que por defecto sería `close`). Es el mismo HTTP/1.1-hacia-el-backend que piden los WebSockets (módulo 3): desde nginx 1.29.7 el `proxy_http_version 1.1` ya es el default, pero el `Connection ""` para keepalive lo seguís poniendo.
+
 Los métodos principales (todos en el nginx open-source): **round-robin** (default, por turnos), **`least_conn`** (al menos cargado), **`ip_hash`** (sticky: el mismo cliente siempre al mismo backend, útil si tenés estado en memoria — aunque lo mejor es **no** tener estado, y guardarlo en [Redis](redis.md)).
 
 > ⚠️ **Health checks — ojo con esto que confunde a todos:**
@@ -246,7 +248,7 @@ La frase mental: **terminás TLS en el proxy: HTTPS muere en nginx, HTTP plano h
 gzip            on;                 # default: off
 gzip_comp_level 5;
 gzip_min_length 1000;               # no comprimas cositas chiquitas
-gzip_types      text/plain text/css application/json application/javascript;  # text/html ya se comprime por default; estos son adicionales
+gzip_types      text/plain text/css application/json application/javascript;  # text/html SIEMPRE está incluido cuando gzip on; (no se lista); estos son los adicionales
 ```
 ⚠️ **Brotli no está en el nginx core** — es un módulo de terceros (`ngx_brotli`) que hay que compilar/cargar aparte. Si ves `brotli on;` en un ejemplo, asumí que tienen ese módulo.
 
@@ -282,6 +284,7 @@ La frase mental: **el proxy ve todo, así que ahí hacés compresión (gzip; bro
 6.2 🧠 Pusiste security headers en el bloque `http` y andan, pero al agregar un `add_header` dentro de un `location` desaparecen. ¿Qué pasó y cómo lo arreglás?
 6.3 🧠 ¿Conviene poner el CORS en el proxy o en la app Express? Justificá.
 6.4 ✍️ Escribí un `location /api/` con rate limiting de 5 requests por segundo por IP (burst de 10) que haga proxy a `node_app`. Incluí la directiva `limit_req_zone` donde corresponde.
+6.5 ✍️ Tenés tres security headers (`Strict-Transport-Security`, `X-Content-Type-Options`, `X-Frame-Options`) en el bloque `server`. Necesitás agregar `Cache-Control "no-store"` **solo** en `location /api/`. Escribí ese `location` cuidando la trampa de herencia del `add_header` (los tres del `server` deben seguir aplicándose dentro del `location`).
 
 ---
 
@@ -365,7 +368,7 @@ Con eso, `req.ip`, `req.protocol`, `req.secure` y `req.hostname` reflejan al **c
 - `true` — confía en el primer valor de `X-Forwarded-For` (⚠️ **peligroso**, ver abajo).
 
 > ⚠️ **La trampa de seguridad (cae en entrevistas y rompe en producción):**
-> 1. **No uses `trust proxy: true` a lo bobo.** Si confiás ciegamente en `X-Forwarded-For`, **cualquier cliente puede falsificar ese header** y hacerse pasar por otra IP. La defensa: `nginx` con `X-Forwarded-For $proxy_add_x_forwarded_for` **le appendea la IP real del socket** al final de la cadena (no descarta lo que mandó el cliente, pero al combinarlo con un número exacto de hops, Express lee la posición correcta y la falsificación no sirve). Si querés descartar del todo lo que mandó el cliente, usás `proxy_set_header X-Forwarded-For $remote_addr;`. La regla: usá un **número exacto de hops** (`1`), no `true`.
+> 1. **No uses `trust proxy: true` a lo bobo.** Si confiás ciegamente en `X-Forwarded-For`, **cualquier cliente puede falsificar ese header** y hacerse pasar por otra IP. La defensa: `nginx` con `X-Forwarded-For $proxy_add_x_forwarded_for` **le appendea la IP real del socket** al final de la cadena (no descarta lo que mandó el cliente, pero al combinarlo con un número exacto de hops, Express lee la posición correcta y la falsificación no sirve). Concretamente: con `N` hops, Express toma la IP que está **`N` posiciones desde el final** de la cadena XFF (la que appendeó tu proxy), **no la primera** (que el cliente controla y puede inventar). Si querés descartar del todo lo que mandó el cliente, usás `proxy_set_header X-Forwarded-For $remote_addr;`. La regla: usá un **número exacto de hops** (`1`), no `true`.
 > 2. **Esto rompe el rate limiting.** Si usás `express-rate-limit` con `trust proxy` mal configurado, un atacante puede forjar un `X-Forwarded-For` distinto en cada request, conseguir una **clave de límite distinta cada vez** y **saltarse el limitador por completo**. La librería incluso tira error si detecta un `trust proxy` demasiado permisivo. La regla: poné el **número exacto** de proxies que tenés delante.
 
 La frase mental: **detrás de un proxy, Express ve al proxy, no al cliente — hasta que `app.set('trust proxy', N)` le dice que lea los `X-Forwarded-*`. Usá el número EXACTO de proxies, nunca `true` a ciegas: confiar de más deja falsificar la IP y saltar el rate limiting.**
@@ -503,6 +506,27 @@ http {
 }
 ```
 (`limit_req_zone` va en el contexto `http`; `limit_req` en el `location`. `rate=5r/s` = 5 req/seg por IP, `burst=10` = colchón de 10.)
+
+**6.5**
+```nginx
+server {
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+
+    location /api/ {
+        # Al definir un add_header acá, nginx DESCARTA los tres heredados del server.
+        # Hay que REDEFINIRLOS junto al nuevo:
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "SAMEORIGIN" always;
+        add_header Cache-Control "no-store" always;   # el nuevo
+
+        proxy_pass http://node_app;
+    }
+}
+```
+La trampa: si solo ponés `add_header Cache-Control ...` dentro del `location`, los tres del `server` **desaparecen en silencio** (la herencia de `add_header` es "todo o nada" por nivel). Por eso se repiten los tres heredados + el nuevo. (En nginx 1.29.3+ podrías usar `add_header_inherit merge;` para fusionar en vez de pisar, pero redefinir es lo portable.)
 
 **7.1** Porque todos —load balancer, API gateway, ingress controller, nodo de CDN— **son reverse proxies** en su base (se paran delante de los backends y reenvían), y se diferencian por **qué trabajo extra enfatizan**. Especies: **load balancer** (AWS ALB) enfatiza distribuir carga; **API gateway** (Kong, AWS API Gateway) enfatiza temas de API (auth, rate limit, transformación); **ingress controller** (nginx/Traefik en k8s) enfatiza ejecutar config declarativa; **CDN** (Cloudflare) enfatiza caché geográfica de borde.
 
