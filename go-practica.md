@@ -95,6 +95,9 @@ func main() {
 	pb.RegisterPedidoServiceServer(s, grpcserver.Nuevo())
 
 	go func() {
+		// Este err es un fallo de arranque (listener roto, puerto ocupado): hay que verlo.
+		// En el apagado normal, GracefulStop hace que Serve devuelva nil, así que esta rama
+		// NO se dispara en el shutdown — es solo para fallos reales del servidor.
 		if err := s.Serve(lis); err != nil {
 			slog.Error("serve", "err", err)
 		}
@@ -117,6 +120,10 @@ type Servidor struct {
 }
 
 func Nuevo() *Servidor { return &Servidor{svc: pedido.NuevoServicio()} }
+
+// ⚠️ Ojo: este Nuevo() se fabrica el servicio adentro solo para que el Build 1 corra solo.
+// En el Build 2 cambia a recibir el servicio ya construido por parámetro (DI por constructor).
+// No lo tomes como definitivo.
 
 func (s *Servidor) CrearPedido(ctx context.Context, req *pb.CrearPedidoRequest) (*pb.Pedido, error) {
 	if len(req.GetProductoIds()) == 0 {
@@ -203,10 +210,11 @@ func (r *Repo) Crear(ctx context.Context, idemKey string, p *Pedido) (*Pedido, e
 
 **🚩 Red flag.** Cualquier "buscar-y-si-no-está-crear" en una operación concurrente es una *race condition* esperando a pasar. La idempotencia real se apoya en una **restricción de la base** (`UNIQUE` + `ON CONFLICT`), no en un `if` de Go. Esto conecta con [PostgreSQL](postgresql.md) y el módulo de [Resiliencia](go-resiliencia.md) (idempotency key).
 
-**✅ Verificá.** Disparale 50 `CrearPedido` concurrentes con la **misma** `idemKey` y comprobá que la tabla tiene **una sola** fila:
+**✅ Verificá.** Disparale 50 `CrearPedido` concurrentes con la **misma** `idemKey`, comprobá que la tabla tiene **una sola** fila **y** que las 50 respuestas devuelven el **mismo `id`** (esto último prueba que el camino de conflicto realmente *lee y devuelve* el pedido previo a los 49 perdedores, no solo que no duplica):
 ```bash
 # en un test Go, o con un script que lance 50 goroutines a la vez
 psql -c "SELECT count(*) FROM pedidos WHERE idem_key = 'k1';"  # debe dar 1
+# en el test Go: junta los 50 ids devueltos y verificá que todos son iguales
 ```
 
 ---
@@ -247,6 +255,11 @@ func NuevoCliente(h httpPagos) *PagosCliente {
 		ReadyToTrip: func(c gobreaker.Counts) bool {
 			// abrir por PROPORCIÓN de fallos, no por consecutivos (más robusto bajo tráfico)
 			return c.Requests >= 10 && float64(c.TotalFailures)/float64(c.Requests) > 0.6
+		},
+		OnStateChange: func(name string, from, to gobreaker.State) {
+			// hacer VISIBLE la transición: un breaker que abre/cierra en silencio es
+			// un incidente que no ves. Esto es el puente con Observabilidad.
+			slog.Warn("circuit breaker cambió de estado", "name", name, "de", from, "a", to)
 		},
 	})
 	return &PagosCliente{http: h, cb: cb}
@@ -357,9 +370,13 @@ func (p *Procesador) Correr(ctx context.Context, jobs <-chan Job) {
 			}
 		}()
 	}
-	wg.Wait() // drena: espera a que los workers terminen lo en curso
+	wg.Wait() // espera a que cada worker termine el job EN VUELO y salga
 }
 ```
+
+> 💡 **Dos vías de salida, y qué drena cada una.** Los workers salen por dos caminos: `ctx.Done()` (apagado por señal) o `jobs` cerrado (no hay más trabajo). Ojo con el matiz: al cancelar el `ctx`, cada worker termina **el job que tiene en la mano** y sale — los jobs que quedaron **encolados en el channel se descartan**. `wg.Wait()` drena lo *en vuelo*, no la cola pendiente. Si querés vaciar la cola antes de cerrar, el patrón es el otro: el productor **cierra `jobs`** y los workers hacen `for job := range jobs` (sin el `case <-ctx.Done()`), así procesan todo lo pendiente y recién ahí salen.
+
+> 💡 **El cableado con el Build 1.** El círculo del shutdown limpio se cierra así: llega `SIGTERM` → el productor **deja de encolar y cierra `jobs`** → los workers drenan y `wg.Wait()` retorna → recién entonces el `main` llama a `GracefulStop()`. Es la misma idea del Build 1, extendida al pool: nadie corta trabajo a la mitad.
 
 > 💡 Para `procesados`, un `atomic.Int64` (con `.Add(1)`/`.Load()`) sería aún más simple que el mutex para un solo contador. El mutex se vuelve necesario apenas tengas **dos** campos que deban cambiar juntos.
 
@@ -451,6 +468,7 @@ R2. ✍️ Agregá al `PedidoService` un RPC **server-streaming** `SeguirPedido(
 R3. 🧠 En el Build 3, el circuit breaker abre por *proporción* de fallos (`> 0.6` sobre ≥10 requests) en vez de por fallos consecutivos. ¿Por qué es más robusto bajo tráfico real?
 R4. ✍️ En el Build 4, reemplazá el `sync.Mutex` + `int` del contador por un `atomic.Int64`. Mostrá el campo, el incremento y la lectura.
 R5. 🧠 En el Build 5, después del fix con `strings.Builder`, ¿qué te diría que todavía tenés asignaciones de más, y qué perfil mirarías para confirmarlo?
+R6. ✍️ Escribí el **test** que prueba la idempotencia del Build 2: lanzá `N` goroutines que llamen a `Crear` con la **misma** `idemKey` a la vez, y asegurá (a) que termina con **una sola** fila y (b) que **todas** las llamadas devuelven el **mismo `id`**. Pensalo para correr con `go test -race`.
 
 ---
 
@@ -520,6 +538,56 @@ reutilizado. Lo confirmás con el heap profile en alloc_space (go tool pprof
 -sample_index=alloc_space) y un benchmark con -benchmem: mirás si allocs/op sigue alto y
 list Resumen para ver qué línea asigna. Regla: solo seguís optimizando si el profile dice que
 Resumen todavía pesa; si no, pará.
+```
+
+### Reto R6
+```go
+func TestCrear_Idempotente_Concurrente(t *testing.T) {
+	repo := nuevoRepoDeTest(t) // helper: DB limpia (testcontainers o DB de test) — ver testing.md
+	const N = 50
+	const idemKey = "k1"
+
+	var wg sync.WaitGroup
+	ids := make([]string, N) // cada goroutine escribe SU índice ⇒ sin data race compartido
+	errs := make([]error, N)
+
+	wg.Add(N)
+	for i := 0; i < N; i++ {
+		go func(i int) {
+			defer wg.Done()
+			// id distinto por intento: solo el ganador del ON CONFLICT debería quedar
+			p := &Pedido{ID: fmt.Sprintf("p-%d", i), Estado: "creado", TotalCentavos: 100}
+			got, err := repo.Crear(context.Background(), idemKey, p)
+			errs[i] = err
+			if got != nil {
+				ids[i] = got.ID
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	// (a) ningún error y una sola fila
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("goroutine %d falló: %v", i, err)
+		}
+	}
+	var n int
+	if err := repo.db.QueryRow(`SELECT count(*) FROM pedidos WHERE idem_key = $1`, idemKey).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("se esperaba 1 fila, hay %d (la carrera duplicó)", n)
+	}
+	// (b) las N respuestas devuelven el MISMO id (el camino de conflicto leyó y devolvió)
+	for i, id := range ids {
+		if id != ids[0] {
+			t.Fatalf("respuesta %d devolvió id %q, distinto del primero %q", i, id, ids[0])
+		}
+	}
+}
+// Corré con: go test -race -run TestCrear_Idempotente_Concurrente ./internal/store
+// El -race confirma además que el Repo no tiene escrituras concurrentes sin sincronizar.
 ```
 
 ---
