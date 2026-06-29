@@ -1,8 +1,8 @@
-# Banco de casos de diseño de sistemas: 14 problemas resueltos de punta a punta
+# Banco de casos de diseño de sistemas: 15 problemas resueltos de punta a punta
 
-**Los casos clásicos de entrevista senior, resueltos con el método · feed, chat, notificaciones, typeahead, archivos, rate limiter, crawler, reservas/pagos, proximidad, métricas en streaming, edición colaborativa, caché distribuida, streaming de video, ledger de pagos · el recorrido importa más que la respuesta · 2026**
+**Los casos clásicos de entrevista senior, resueltos con el método · feed, chat, notificaciones, typeahead, archivos, rate limiter, crawler, reservas/pagos, proximidad, métricas en streaming, edición colaborativa, caché distribuida, streaming de video, ledger de pagos, matching de órdenes · el recorrido importa más que la respuesta · 2026**
 
-> Cómo usar este banco: este módulo es la **práctica** de [Diseño de sistemas backend](system-design.md). Ahí aprendiste el método y el criterio; acá los aplicamos a los 14 problemas que más caen en entrevistas. Para cada caso, **tapá la solución y resolvelo vos primero en voz alta** siguiendo los 6 pasos; después contrastá. Lo que se evalúa no es si llegás a *mi* diseño, sino si recorrés bien: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs.
+> Cómo usar este banco: este módulo es la **práctica** de [Diseño de sistemas backend](system-design.md). Ahí aprendiste el método y el criterio; acá los aplicamos a los 15 problemas que más caen en entrevistas. Para cada caso, **tapá la solución y resolvelo vos primero en voz alta** siguiendo los 6 pasos; después contrastá. Lo que se evalúa no es si llegás a *mi* diseño, sino si recorrés bien: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs. Son **15 casos**.
 
 **El método, en una línea** (de [system-design](system-design.md) módulo 1): **(1)** aclarar requisitos (sobre todo los **no funcionales**: escala, lectura/escritura, latencia, consistencia), **(2)** estimar (back-of-the-envelope), **(3)** API + modelo de datos, **(4)** diseño de alto nivel, **(5)** profundizar **donde duele**, **(6)** discutir trade-offs. No hay respuestas correctas, hay **decisiones justificadas**.
 
@@ -25,6 +25,7 @@
 12. Caché distribuida (diseñar un Redis/Memcached a escala) — *consistent hashing + defensa contra stampede*
 13. YouTube / Netflix: streaming de video — *transcoding paralelo + adaptive bitrate + CDN*
 14. Payment ledger / billetera — *contabilidad de doble entrada + log inmutable*
+15. Order matching engine (exchange) — *order book en memoria + matching secuencial determinista (event sourcing)*
 
 > **El patrón que se repite.** Vas a ver que los mismos ladrillos reaparecen en casi todos los casos: **fan-out** (¿escribo a muchos en la escritura o leo de muchos en la lectura?), **caché del camino caliente**, **idempotencia ante reintentos**, **colas para desacoplar y absorber picos**, **sharding por la clave de acceso**, y **el caso patológico** (la celebridad, el prefijo popular, el archivo gigante). Aprender a *reconocer* qué ladrillo aplica es la mitad de la entrevista.
 
@@ -728,6 +729,76 @@ interface Entry {
 
 ---
 
+## Caso 15 — Order matching engine (motor de matching de órdenes de un exchange)
+
+**1. Requisitos.**
+- Funcionales: aceptar **órdenes** (compra/venta, límite o market) sobre un símbolo; mantener un **order book** (libro de órdenes) por símbolo; **casar** (*match*) órdenes cuando se cruzan los precios (un compra a precio ≥ la mejor venta); ejecutar **trades** con **fills parciales** (una orden grande se come varias del otro lado); **cancelar/modificar** órdenes; publicar **market data** (mejor bid/ask, profundidad, trades) a los participantes.
+- No funcionales: **latencia ultrabaja y predecible** (p99 en microsegundos–milisegundos; el **jitter** acotado importa tanto como el promedio); **fairness y correctitud** (prioridad **precio-tiempo** estricta: nadie se cuela); **throughput alto** (cientos de miles a millones de órdenes/s en picos, agregado); **recovery exacto** (tras un crash reconstruís el book *idéntico*, sin perder ni duplicar órdenes); **auditabilidad** regulatoria (reconstruir qué pasó y por qué). Acá **la latencia es el producto** y la fairness está regulada.
+
+**2. Estimación.** No es un problema de storage como un feed. El reto es **latencia/throughput por símbolo** y **determinismo**. El order book de un símbolo líquido tiene a lo sumo **decenas de miles de órdenes vivas**: 10 000 órdenes × ~100 bytes ≈ **1 MB** → entra holgado en RAM (incluso 1 M de órdenes ≈ 100 MB). El **match** en memoria son **nanosegundos–microsegundos**; el costo real está en la **red, la serialización y la persistencia**, no en cruzar dos órdenes. Un solo core casa millones de órdenes simples por segundo. Para anclar por qué la DB no puede estar en el camino crítico: un match en RAM son **decenas–cientos de nanosegundos**, contra los **milisegundos** de un round-trip a una DB relacional — un factor de **10⁴–10⁶**. La estimación acá no dimensiona discos: justifica que **el book vive en memoria** y que el cuello de botella no es el matching.
+
+**3. API y datos — el order book + prioridad precio-tiempo.**
+```
+POST  /orders            { symbol, side, type, price, qty, clientOrderId }  → { orderId, seq }
+PATCH /orders/{orderId}  { price?, qty? }                                  → { orderId, seq }
+DELETE /orders/{orderId}
+(stream) market data: trades + cambios del book   (WebSocket / multicast)
+```
+- En un exchange real el protocolo es **binario** (FIX/SBE sobre TCP/UDP), no JSON/HTTP — cada microsegundo cuenta. El REST de arriba es la versión didáctica del contrato.
+- **Modificar tiene una trampa de fairness:** cambiar el **precio** o **subir** la cantidad de una orden viva la trata como **cancel + nueva orden** → **pierde la prioridad de tiempo** (va al final de la cola FIFO de su nivel). Solo **bajar** la cantidad la conserva. Es un detalle entrevistable: un *modify* no es un update barato, es reordenar en el book.
+- El **order book** de un símbolo tiene **dos lados**: *bids* (compras, ordenadas de mayor a menor precio) y *asks* (ventas, de menor a mayor). Cada **nivel de precio** es una **cola FIFO** de órdenes.
+- **Prioridad precio-tiempo (*price-time priority*):** se ejecuta primero el **mejor precio** (el bid más alto contra el ask más bajo); a **igual precio**, la que **llegó antes** (FIFO dentro del nivel). Esto se refleja en la estructura: un mapa **ordenado** de precio→nivel (árbol/skip-list, o arrays indexados por precio para baja latencia) y, dentro de cada nivel, una **cola**.
+
+**4. La decisión clave — procesamiento secuencial determinista por símbolo.**
+- El matching de un símbolo se hace **single-threaded**: un único hilo procesa el flujo de órdenes **en orden de llegada**. ¿Por qué no paralelizar? Porque el book es **estado compartido mutable** y el resultado depende del **orden exacto** (fairness/time priority). Serializar **elimina los locks**, vuelve el resultado **determinista** (mismo input → mismo output) y es **más rápido** que coordinar threads: sin contención, todo el estado caliente vive en cache de CPU. Es el patrón **LMAX Disruptor** / *mechanical sympathy*.
+- **Secuenciador (*sequencer*):** antes del engine, un componente asigna a cada orden un **número de secuencia monótono** y la escribe al **log de entrada** (event sourcing) **antes** de procesarla. El engine consume ese log en orden. Ese log + el determinismo son lo que después da el recovery.
+- **Sharding por símbolo:** distintos símbolos corren en **engines/cores distintos en paralelo** (no comparten book). Un trade siempre ocurre **dentro** de un símbolo, así que ningún match cruza shards → escalás horizontalmente por símbolo sin coordinación.
+
+**5. Donde duele — recovery, fills parciales, fan-out de market data y fairness en ráfaga.**
+- **Recovery determinista (el corazón).** El engine es una **máquina de estados en memoria**: si el proceso muere, el book desaparece. Solución = **event sourcing** (el *event sourcing* del caso 11/14): el secuenciador persiste **toda** entrada (órdenes, cancelaciones) al log **antes** de procesarla, y se toman **snapshots** periódicos del book. Para recuperar: cargás el último snapshot y **reproducís** el log desde ahí. Como el matching es **determinista**, el replay reconstruye el book **exacto** (mismas secuencias → mismo estado).
+- **Alta disponibilidad (hot standby).** Un engine por símbolo es un **SPOF por diseño**. La réplica corre como **hot standby** consumiendo el **mismo log secuenciado** y aplicando las mismas transiciones → mantiene un book **idéntico** (replicación de **máquina de estados**, el terreno de [consenso](consenso.md)). En el failover, el standby toma el control desde la **última secuencia confirmada**. La clave: ambos consumen el log en el **mismo orden**, por eso convergen al mismo estado.
+- **Fills parciales.** Una orden grande puede **comerse varios niveles** del otro lado → genera **múltiples trades** y deja un **remanente**: si es límite, entra al book; si es market (o IOC) y no hay más liquidez, se descarta. El matching **itera**: mientras la entrante cruce el mejor precio contrario y le quede cantidad, ejecuta contra la **primera de la cola FIFO**, descontando de ambas.
+- **Fan-out de market data.** Cada trade y cambio del book debe llegar a **miles de participantes** con baja latencia → el engine **no** lo hace en el hot path (lo frenaría). El engine **emite** un stream de eventos y un **publisher aparte** hace el fan-out, típicamente por **multicast UDP** (un mensaje, N receptores) en lugar de N envíos. Es el **fan-out de lectura del caso 1**, llevado al límite de latencia.
+- **Fairness en ráfaga.** Ante un *burst*, las órdenes se **encolan en el secuenciador** y se procesan **en orden de secuencia**: la latencia sube, pero la **fairness se mantiene** (nadie se cuela). No se descartan órdenes en silencio; si la cola se llena, se aplica **backpressure** o se **rechaza explícitamente** — un silencio acá es una orden perdida, inaceptable.
+
+> **4 capas — el engine que se cae con el book en RAM:**
+> 1. **Qué se rompe:** el proceso de matching de un símbolo crashea → el order book (estado en memoria) **desaparece** en pleno trading; las órdenes vivas se pierden.
+> 2. **Por qué a esta escala/uso:** el book vive **solo en RAM** por latencia y es **un único hilo por símbolo** (SPOF por diseño); cada microsegundo de caída son trades perdidos y exposición regulatoria.
+> 3. **Control de corto plazo:** un **hot standby** que consumió el **mismo log secuenciado** ya tiene el book idéntico → toma el control desde la última secuencia confirmada (failover en milisegundos).
+> 4. **Cambio de diseño:** **event sourcing** — secuenciador que persiste cada entrada al log **antes** de procesar + **snapshots** periódicos; recovery = snapshot + **replay determinista**; **replicación de máquina de estados** para HA.
+
+**6. Trade-offs.**
+- **Single-thread vs paralelizar (contraintuitivo).** Para *este* problema un solo hilo es **más rápido** que muchos: sin locks, datos calientes en cache, predicción de saltos estable. Paralelizás **entre símbolos**, nunca dentro de uno. El techo de un símbolo es **un core**; si un único símbolo satura un core (rarísimo), es un problema de producto, no de arquitectura.
+- **In-memory vs DB transaccional.** A diferencia del caso 8/14 (Postgres, ACID en el hot path), acá una DB relacional en el camino crítico es **demasiado lenta** (importan los microsegundos). El estado vive en RAM; la **durabilidad** la da el **log de eventos** (append secuencial, lo más rápido que hay), no la DB. Es **event sourcing puro**: el log es la fuente de verdad, el book es una **proyección**.
+- **El determinismo cuesta disciplina.** Para que el replay reconstruya el book exacto, el engine **no puede** usar nada no determinista en el hot path: ni **reloj de pared** (los timestamps los pone el secuenciador y van en el log), ni random, ni orden de iteración de un hashmap, ni I/O bloqueante. Es el **mismo principio que las *activities* deterministas** de [workflows durables](workflows.md).
+- **Latencia vs durabilidad.** Persistir/replicar **antes** de confirmar el match agrega latencia; hacerlo **después** arriesga perder una orden ya ackeada. En finanzas el balance es claro: persistir al log y replicar al standby **antes** de confirmar — perder una orden confirmada es inaceptable.
+- **Precios y cantidades: enteros, jamás `float`.** Como el caso 14, se trabaja en **enteros de la unidad mínima** (*ticks*, centavos): un error de redondeo binario en un precio es un **trade mal ejecutado**, no un detalle cosmético.
+
+> **El cierre de criterio — no sobre-diseñar.** ¿Un marketplace que casa compradores y vendedores **sin** urgencia de microsegundos (clasificados, una subasta que cierra en horas, asignar pedidos a repartidores)? Una **DB transaccional** con `SELECT ... FOR UPDATE` y un job que casa órdenes alcanza y sobra — es el **caso 8**. El order book en memoria, el secuenciador, el replay determinista y el hot standby son para cuando la **latencia es el producto** y la **fairness está regulada**: un exchange financiero, un *ad exchange* en tiempo real, un motor de subastas de alta frecuencia. Para casi todo lo demás, **"casá en la DB con una transacción" es la respuesta correcta** — no construyas un Disruptor sin necesidad.
+
+**Ejercicios — Caso 15**
+15.1 🔁 ¿Qué es la **prioridad precio-tiempo** y cómo se refleja en la **estructura de datos** del order book?
+15.2 🧠 ¿Por qué el matching de un símbolo se procesa **single-threaded** en vez de paralelizarlo con varios hilos, y dónde sí paralelizás?
+15.3 🧠 El engine tiene el book **solo en RAM**. ¿Cómo lo recuperás **exacto** tras un crash, y por qué el **determinismo** es justo lo que lo vuelve posible?
+15.4 🧠 ¿Por qué el **fan-out de market data** no lo hace el matching engine en el hot path, y qué patrón de qué caso anterior reusás?
+15.5 ✍️ Implementá `matchearCompra(entrante, asks)`: la orden de compra entrante se casa contra el lado de **asks** (ya ordenado por precio ascendente; dentro de cada precio, la primera del array es la más vieja → FIFO). Generá los **trades** por prioridad precio-tiempo, soportá **fills parciales**, ejecutá cada trade **al precio de la orden que ya estaba en el book**, y devolvé los trades más el **remanente** sin casar de la entrante. En la solución, explicá además qué pasa con ese remanente según el **tipo** de orden (límite → entra al book; market/IOC → se descarta). Usá los tipos de abajo.
+```ts
+interface Order {
+  id: string;
+  qty: number;   // cantidad restante (entero, unidad mínima)
+  price: number; // en ticks (entero); nunca float
+}
+interface Trade {
+  buyOrderId: string;
+  sellOrderId: string;
+  qty: number;
+  price: number;
+}
+```
+15.6 🧠 ¿Por qué precios y cantidades se guardan como **enteros** en la unidad mínima (ticks/centavos) y **nunca** como `float`? ¿Qué se rompe si usás coma flotante en un matching engine?
+
+---
+
 # Soluciones
 
 > Mirá esto solo después de intentar cada caso en voz alta. Casi todas son de **criterio**: si tu razonamiento difiere pero justifica bien el trade-off, probablemente también esté bien. En diseño de sistemas, el *cómo* justificás importa más que el *qué* elegís.
@@ -1074,8 +1145,75 @@ function asientosTransferencia(from: string, to: string, amountCentavos: number)
 // idealmente junto con la idempotency key, para que un reintento no genere otra transferencia.
 ```
 
-Estos 14 casos cubren los patrones que más caen: fan-out, tiempo real, async con colas, lectura-intensivo con precómputo, separación metadata/contenido, estado compartido atómico, procesamiento masivo, consistencia fuerte transaccional, indexación espacial, agregación en streaming por event-time, convergencia de ediciones concurrentes (OT/CRDT), particionado por consistent hashing, distribución de contenido por CDN y contabilidad de doble entrada. Para seguir:
+### Caso 15 — Order matching engine
+**15.1** La **prioridad precio-tiempo** es la regla de fairness del matching: se ejecuta primero la orden con **mejor precio** (el bid más alto contra el ask más bajo) y, **a igual precio**, la que **llegó antes**. Se refleja en la estructura del book en **dos niveles**: un mapa **ordenado por precio** (un árbol/skip-list, o arrays indexados por precio para baja latencia) te da el "mejor precio primero" en O(1)/O(log n); y dentro de **cada nivel de precio**, una **cola FIFO** te da el "primero en llegar, primero en ejecutar". Casar = tomar siempre el mejor nivel del lado contrario y, dentro de él, la **cabeza de la cola**. Esa doble estructura *es* la prioridad precio-tiempo materializada en datos.
 
-- **Resolvé en voz alta los que faltan**, reusando los mismos ladrillos: "diseñá un full-text search" (índice invertido + el caso 4 de precómputo), "diseñá un order matching engine" (order book en memoria + secuenciador determinista), "diseñá un distributed job scheduler" (las colas del caso 3/7 + leader election). Lo que se evalúa es el recorrido, no la respuesta.
+**15.2** Porque el order book es **estado compartido mutable** y el resultado **depende del orden exacto** de procesamiento (la time priority). Si dos hilos tocaran el mismo book, necesitarías **locks** —que serializan igual pero con contención y latencia impredecible— y perderías el **determinismo** (el orden de ejecución dejaría de ser reproducible, y sin reproducibilidad no hay replay ni auditoría). Un **solo hilo** procesando en orden de secuencia es **más rápido**: cero locks, todo el estado caliente en cache de CPU, predicción de saltos estable (el patrón LMAX Disruptor). Donde **sí** paralelizás es **entre símbolos**: cada símbolo tiene su propio book y su propio engine/core, y como un trade nunca cruza símbolos, no hay nada que coordinar. El techo de **un** símbolo es **un core** — un límite que en la práctica casi nunca se toca.
+
+**15.3** El recovery se apoya en **event sourcing**: el **secuenciador** persiste **toda entrada** (cada orden y cada cancelación, con su número de secuencia monótono) a un **log append-only** *antes* de que el engine la procese, y periódicamente se toma un **snapshot** del book en memoria. Para recuperar tras un crash: cargás el **último snapshot** y **reproducís** el log desde la secuencia de ese snapshot en adelante. El **determinismo** es lo que lo vuelve posible: como el engine no usa nada no determinista (sin reloj de pared —los timestamps viajan en el log—, sin random, sin orden de hashmap, sin I/O bloqueante), **reproducir las mismas secuencias en el mismo orden produce exactamente el mismo book**. Si el replay no fuera determinista, reconstruirías *un* book, no *el* book —y en un exchange eso es inaceptable. El determinismo acá **no es elegancia, es la condición** que hace que el replay (y el hot standby) reconstruyan el book *idéntico*: si se cuela algo no determinista en el hot path (el orden de iteración de un `Map`, un redondeo de `float`, un `Date.now()`), los books **divergen en silencio** —sin ninguna excepción que te avise— y recién lo descubrís cuando una reconciliación no cuadra. Ese silencio es justo lo que lo vuelve peligroso. El mismo determinismo permite además un **hot standby** que consume el mismo log y mantiene un book idéntico para failover instantáneo.
+
+**15.4** Porque publicar cada trade y cada cambio del book a **miles de participantes** es trabajo de fan-out que, hecho **en el hot path**, frenaría el matching —y el matching es justo lo que tiene que ser ultrarrápido y de jitter acotado. El engine se limita a **emitir** un stream de eventos; un **publisher separado** hace la difusión, idealmente por **multicast UDP** (un mensaje, N receptores) en vez de N envíos individuales. Es el **fan-out de lectura del caso 1** (feed): separar la **generación** del evento de su **distribución** a muchos, para que el camino crítico de escritura no pague el costo de los lectores. Acá llevado al extremo de latencia.
+
+**15.5**
+```ts
+interface Order {
+  id: string;
+  qty: number;   // cantidad restante (entero, unidad mínima)
+  price: number; // en ticks (entero); nunca float
+}
+interface Trade {
+  buyOrderId: string;
+  sellOrderId: string;
+  qty: number;
+  price: number;
+}
+
+// `asks` viene ordenado por precio ascendente; dentro de cada precio, la primera del
+// array es la más vieja (FIFO). La función MUTA `asks`: descuenta cantidades y saca del
+// libro los asks que se llenan del todo. Devuelve los trades y el remanente sin casar.
+function matchearCompra(
+  entrante: Order,
+  asks: Order[],
+): { trades: Trade[]; remanente: number } {
+  const trades: Trade[] = [];
+  let restante = entrante.qty;
+
+  // Mientras me quede cantidad Y exista un mejor ask que CRUCE mi precio de compra.
+  while (restante > 0 && asks.length > 0) {
+    const mejorAsk = asks[0]; // con noUncheckedIndexedAccess es Order | undefined
+    // El precio de compra debe ser >= la mejor venta; si no, no hay cruce → corto.
+    if (mejorAsk === undefined || mejorAsk.price > entrante.price) break;
+
+    const qty = Math.min(restante, mejorAsk.qty); // fill parcial: lo que alcance
+    trades.push({
+      buyOrderId: entrante.id,
+      sellOrderId: mejorAsk.id,
+      qty,
+      price: mejorAsk.price, // se ejecuta al precio de la orden que YA estaba en el book
+    });
+
+    restante -= qty;
+    mejorAsk.qty -= qty;
+    if (mejorAsk.qty === 0) asks.shift(); // se llenó del todo → sale del libro
+  }
+
+  return { trades, remanente: restante };
+}
+// Notas: (1) el trade se ejecuta al precio del ask EN REPOSO (el del maker) — prioridad
+// PRECIO; al tomar siempre asks[0] respeto la prioridad TIEMPO (FIFO). Hay *price improvement*
+// para el agresor SOLO cuando su límite cruza POR ENCIMA del ask en reposo (compra a 50 contra
+// ask a 49 → fill a 49, mejora de 1); si entran al mismo precio, no hay mejora.
+// (2) Si queda `remanente > 0`: una orden LÍMITE lo deja en el book como nuevo bid; una IOC
+// (Immediate-Or-Cancel) ejecuta lo que pueda y DESCARTA el resto; una FOK (Fill-Or-Kill) es
+// todo-o-nada → si no se llena completa, se rechaza entera (ni un fill parcial).
+// (3) La función MUTA el book in-place (`mejorAsk.qty -= qty`, `asks.shift()`): refleja que el
+// matching CONSUME liquidez del libro real. (4) Enteros en ticks: nunca float para precios.
+```
+
+**15.6** Porque el `float` (IEEE-754) **no puede representar exactamente** la mayoría de los decimales: el clásico `0.1 + 0.2 === 0.30000000000000004`, y en JS `number` *es* un float de 64 bits (enteros exactos solo hasta 2⁵³). En un matching engine eso es catastrófico por dos razones encadenadas: **(1) correctitud** — comparar precios para decidir si dos órdenes cruzan (`bid >= ask`) con floats da resultados erráticos (dos precios "iguales" que no lo son por un epsilon), sumar fills acumula error de redondeo, y terminás ejecutando trades a precios mal calculados o casando órdenes que no debían cruzar; **(2) determinismo** — el redondeo de coma flotante puede depender del orden de las operaciones y de la plataforma, así que rompe la reconstrucción exacta del book por replay (el riesgo de divergencia silenciosa del 15.3). La solución es la misma del ledger del caso 14: **enteros en la unidad mínima** (precios en *ticks*, montos en centavos) o un decimal de precisión fija de la DB (`NUMERIC`); toda la aritmética del engine es entera, exacta y reproducible.
+
+Estos 15 casos cubren los patrones que más caen: fan-out, tiempo real, async con colas, lectura-intensivo con precómputo, separación metadata/contenido, estado compartido atómico, procesamiento masivo, consistencia fuerte transaccional, indexación espacial, agregación en streaming por event-time, convergencia de ediciones concurrentes (OT/CRDT), particionado por consistent hashing, distribución de contenido por CDN, contabilidad de doble entrada y matching secuencial determinista. Para seguir:
+
+- **Resolvé en voz alta los que faltan**, reusando los mismos ladrillos: "diseñá un full-text search" (índice invertido + el caso 4 de precómputo — ya hay un módulo dedicado en [Búsqueda a escala](busqueda.md)), "diseñá un distributed job scheduler" (las colas del caso 3/7 + leader election, con la teoría en [Workflows durables](workflows.md)). Lo que se evalúa es el recorrido, no la respuesta.
 - **Conectá cada decisión con su implementación en el hub:** colas e idempotencia en [Event-driven](event-driven.md) y [Redis](redis.md), el contrato de cada API en [API design](api-design.md), tiempo real en [Tiempo real](tiempo-real.md), datos en [PostgreSQL](postgresql.md)/[NoSQL](nosql.md), control de flujo en [Concurrencia](concurrencia.md), y cómo operarlo en [Observabilidad](observabilidad.md).
-- **Volvé al método** de [Diseño de sistemas](system-design.md) módulo 1 cada vez: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs. El método es el mismo para los 14 casos y para cualquier problema nuevo que te tiren.
+- **Volvé al método** de [Diseño de sistemas](system-design.md) módulo 1 cada vez: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs. El método es el mismo para los 15 casos y para cualquier problema nuevo que te tiren.
