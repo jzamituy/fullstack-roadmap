@@ -1,8 +1,8 @@
-# Banco de casos de diseño de sistemas: 12 problemas resueltos de punta a punta
+# Banco de casos de diseño de sistemas: 13 problemas resueltos de punta a punta
 
-**Los casos clásicos de entrevista senior, resueltos con el método · feed, chat, notificaciones, typeahead, archivos, rate limiter, crawler, reservas/pagos, proximidad, métricas en streaming, edición colaborativa, caché distribuida · el recorrido importa más que la respuesta · 2026**
+**Los casos clásicos de entrevista senior, resueltos con el método · feed, chat, notificaciones, typeahead, archivos, rate limiter, crawler, reservas/pagos, proximidad, métricas en streaming, edición colaborativa, caché distribuida, streaming de video · el recorrido importa más que la respuesta · 2026**
 
-> Cómo usar este banco: este módulo es la **práctica** de [Diseño de sistemas backend](system-design.md). Ahí aprendiste el método y el criterio; acá los aplicamos a los 12 problemas que más caen en entrevistas. Para cada caso, **tapá la solución y resolvelo vos primero en voz alta** siguiendo los 6 pasos; después contrastá. Lo que se evalúa no es si llegás a *mi* diseño, sino si recorrés bien: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs.
+> Cómo usar este banco: este módulo es la **práctica** de [Diseño de sistemas backend](system-design.md). Ahí aprendiste el método y el criterio; acá los aplicamos a los 13 problemas que más caen en entrevistas. Para cada caso, **tapá la solución y resolvelo vos primero en voz alta** siguiendo los 6 pasos; después contrastá. Lo que se evalúa no es si llegás a *mi* diseño, sino si recorrés bien: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs.
 
 **El método, en una línea** (de [system-design](system-design.md) módulo 1): **(1)** aclarar requisitos (sobre todo los **no funcionales**: escala, lectura/escritura, latencia, consistencia), **(2)** estimar (back-of-the-envelope), **(3)** API + modelo de datos, **(4)** diseño de alto nivel, **(5)** profundizar **donde duele**, **(6)** discutir trade-offs. No hay respuestas correctas, hay **decisiones justificadas**.
 
@@ -23,6 +23,7 @@
 10. Ad-click aggregator / métricas en tiempo real — *agregación en streaming por ventanas de event-time*
 11. Google Docs / edición colaborativa en tiempo real — *convergencia de ediciones concurrentes (OT / CRDT)*
 12. Caché distribuida (diseñar un Redis/Memcached a escala) — *consistent hashing + defensa contra stampede*
+13. YouTube / Netflix: streaming de video — *transcoding paralelo + adaptive bitrate + CDN*
 
 > **El patrón que se repite.** Vas a ver que los mismos ladrillos reaparecen en casi todos los casos: **fan-out** (¿escribo a muchos en la escritura o leo de muchos en la lectura?), **caché del camino caliente**, **idempotencia ante reintentos**, **colas para desacoplar y absorber picos**, **sharding por la clave de acceso**, y **el caso patológico** (la celebridad, el prefijo popular, el archivo gigante). Aprender a *reconocer* qué ladrillo aplica es la mitad de la entrevista.
 
@@ -610,6 +611,64 @@ function hash(s: string): number {
 
 ---
 
+## Caso 13 — YouTube / Netflix: streaming de video
+
+**1. Requisitos.**
+- Funcionales: alguien **sube** un video (archivo grande); el sistema lo **procesa** y lo deja disponible para que millones lo **miren** en cualquier dispositivo y calidad; reproducción fluida con *seek*. (YouTube: contenido de usuarios (UGC) infinito; Netflix: catálogo curado y acotado.)
+- No funcionales: subida resumible de archivos enormes (como el caso 5); **lectura-intensivo extremo** (un video se ve millones de veces); **arranque rápido** y reproducción **sin buffering** aunque la red del usuario varíe; durabilidad del original; y el dato que manda el diseño: el costo dominante es **almacenamiento + ancho de banda de salida (egress)**, no CPU.
+
+**2. Estimación.** El *write path* es chico comparado con el *read path*: se suben cientos de horas de video por minuto, pero se miran **miles de millones de horas por día**. Un video popular: millones de vistas, cada una transfiriendo cientos de MB a GB → el egress agregado es del orden de **petabytes/día**. Esa sola cifra dicta la arquitectura: **servir todo eso desde tus datacenters es inviable** (ni el ancho de banda ni la geografía dan) → el **CDN** no es un add-on, es la pieza central del read path.
+
+**3. API y datos.** Separá tajantemente el **write path** (upload + processing) del **read path** (playback).
+```
+POST /videos                  { título, ... }   → { videoId, uploadUrl }   # presigned URL (caso 5)
+PUT  (subida del archivo original al blob store)
+GET  /videos/{id}/manifest                       → manifiesto HLS/DASH (renditions + listas de segmentos)
+GET  (segmentos .ts/.m4s)                         → servidos por el CDN, no por el origin
+```
+- **Original** a **object storage** (S3/GCS): durable, barato (como el caso 5).
+- Un **pipeline de transcoding** produce varias **renditions** (240p/480p/720p/1080p/4K) en uno o más códecs, cada una partida en **segmentos** de pocos segundos.
+- **Metadata** (título, estado de procesamiento, manifiestos) en una DB; los **segmentos** viven en el blob store y se sirven **vía CDN**.
+
+**4. La decisión clave — transcoding paralelo + adaptive bitrate (ABR).** Dos piezas que definen el caso:
+- **Transcoding como fan-out de jobs.** Subir el original no alcanza: hay que transcodificarlo a muchas resoluciones/códecs/bitrates. Se **parte** el video en trozos en **límites de GOP/keyframe** (cada chunk arranca en un *IDR-frame*, para que se pueda decodificar solo) y cada trozo × rendition se transcodifica **en paralelo** sobre una flota de workers (es el patrón **cola de trabajos** del caso 7), y después se ensambla. (La *scene-cut detection* es otra cosa: ayuda a **colocar keyframes** y mejorar la calidad, no es la unidad de reparto.) Es *embarrassingly parallel* → escala agregando workers. Es **asíncrono**: el video queda "procesando" hasta que termina (avisás por webhook/notificación — caso 3).
+- **Adaptive Bitrate (HLS / DASH).** No se sirve un archivo monolítico. Cada rendition se corta en **segmentos** de ~2–10 s y un **manifiesto** (playlist `.m3u8` de HLS / MPD de DASH) lista las renditions disponibles y, para cada una, sus segmentos. El **reproductor del cliente** mide su ancho de banda y, **segmento a segmento, elige la calidad** que la red aguanta: arranca bajo (para empezar rápido), sube si hay banda, baja si se congestiona → reproducción sin cortes. La decisión de calidad vive en el **cliente**, no en el server.
+
+**5. Donde duele — servir el egress (CDN) y el video viral.**
+- **El CDN es el read path.** Servir petabytes desde el origin es imposible por ancho de banda y por latencia geográfica. El CDN **cachea los segmentos** en *edge PoPs* cerca del usuario; el origin solo se toca en *cache miss*. El arranque es rápido porque el primer segmento sale del edge más cercano. Los segmentos son **inmutables** (un segmento transcodificado nunca cambia) → cacheables con TTL larguísimo, ideales para CDN.
+- **El video viral y la cola larga.** Cuando un video explota, todos piden **los mismos** segmentos: el CDN lo absorbe naturalmente, porque el contenido es **idéntico para todos** y cacheable (a diferencia de un feed personalizado, que no se puede cachear igual). El problema inverso es la **cola larga**: millones de videos que casi nadie ve no conviene pre-transcodificarlos en todas las calidades (storage carísimo) → se transcodifican **bajo demanda**, o se difieren las renditions caras (4K/AV1) hasta que el video **acumule vistas** (las básicas/H.264 primero, las pesadas cuando gana tracción).
+
+> **4 capas — el origin que se funde sin CDN:**
+> 1. **Qué se rompe:** un video se vuelve viral y sus segmentos no están en el CDN (nunca se cachearon, o venció el TTL) → millones de requests caen al **origin**, que colapsa por ancho de banda.
+> 2. **Por qué a esta escala/uso:** el egress de video es el recurso más caro y escaso; un solo video popular genera **terabytes/hora**, imposible de servir desde el datacenter (banda y geografía).
+> 3. **Control de corto plazo:** TTL largo para los segmentos (son inmutables); **pre-warming** del CDN para estrenos esperados (Netflix **empuja** el contenido a los edges *antes* del lanzamiento).
+> 4. **Cambio de diseño:** segmentos **inmutables** cacheados en un CDN **multi-tier** (edge → regional → *origin shield*, para que un miss no golpee al origin directo), **ABR** para que el cliente **degrade** la calidad en vez de buffer-ear, y transcoding **diferido/por demanda** para la cola larga (las renditions caras solo cuando el video gana tracción).
+
+**6. Trade-offs.**
+- **Pre-transcoding (Netflix) vs on-demand (cola larga).** Pre-transcodificar todo el catálogo da playback instantáneo en toda calidad, pero cuesta storage por cada rendition de cada título; on-demand ahorra storage a costa de latencia la primera vez que alguien pide esa calidad. La decisión la fija la **distribución de la demanda**: catálogo curado y muy visto (Netflix pre-transcodifica todo, e incluso hace **per-title encoding**: elige la *escalera* de bitrates óptima **según el contenido** —animación plana vs acción ruidosa— en vez de una escalera fija, y ese costo extra se amortiza por las millones de vistas) vs UGC con cola larga brutal (YouTube, más *lazy*).
+- **Tamaño de segmento:** chico = adaptación más fina y arranque más rápido, pero más requests/overhead; grande = lo inverso.
+- **Códecs:** H.264 (lo decodifica todo) vs H.265/VP9/AV1 (mejor compresión → menos banda, pero más CPU de transcoding y no todos los dispositivos lo soportan) → servís varios y el cliente elige el que puede.
+- **DRM:** Netflix necesita protección (Widevine/FairPlay → segmentos cifrados + intercambio de licencias); YouTube en general no. Cambia el pipeline.
+- **VOD vs live:** todo lo anterior es *video on demand*. El **live** agrega encoding en tiempo real y segmentos muy cortos para bajar la latencia — otro problema; declaralo fuera de scope salvo que lo pidan.
+
+> **El cierre de criterio — no sobre-diseñar.** ¿Tu app tiene unos pocos videos (un tutorial, un demo, clips cortos)? Subilos a S3, servilos con un **CDN administrado** (CloudFront/Cloudflare) y embebé un `<video>` o un player como **Mux / Cloudflare Stream**, que ya te dan transcoding y ABR llave en mano. El pipeline de transcoding propio, el per-title encoding y el CDN multi-tier son para cuando **distribuir video ES el producto** a escala de millones de horas. Para todos los demás, un servicio administrado de video es la respuesta correcta.
+
+**Ejercicios — Caso 13**
+13.1 🔁 ¿Por qué no se sirve un único archivo de video sino **varias renditions partidas en segmentos**, y qué es el **manifiesto**?
+13.2 🧠 ¿Por qué el **transcoding** se modela como un fan-out de jobs paralelos, y qué patrón de un caso anterior reusa?
+13.3 🧠 ¿Cómo funciona el **adaptive bitrate** y por qué la decisión de qué calidad servir vive en el **cliente** y no en el server?
+13.4 🧠 ¿Por qué el **CDN** es la pieza central del read path de video, y por qué los segmentos son ideales para cachear (a diferencia de un feed personalizado)?
+13.5 🧠 Netflix pre-transcodifica todo su catálogo; YouTube no necesariamente. ¿Por qué difiere la estrategia y qué la decide?
+13.6 ✍️ Implementá el selector de ABR del cliente: `elegirRendition(anchoBandaKbps, renditions)` que devuelva la rendition de **mayor** calidad cuyo bitrate quepa en el ancho de banda disponible (con un **factor de seguridad** para no saturar); si **ninguna** entra, devolvé la **más baja** (degradar antes que cortar); si no hay renditions, `undefined`. Usá el tipo de abajo.
+```ts
+interface Rendition {
+  altura: number;     // 240, 480, 720, 1080, ...
+  bitrateKbps: number;
+}
+```
+
+---
+
 # Soluciones
 
 > Mirá esto solo después de intentar cada caso en voz alta. Casi todas son de **criterio**: si tu razonamiento difiere pero justifica bien el trade-off, probablemente también esté bien. En diseño de sistemas, el *cómo* justificás importa más que el *qué* elegís.
@@ -884,8 +943,46 @@ class ConsistentHashRing {
 
 **12.6** Sus claves **se pierden** (es caché: la DB sigue siendo la fuente de verdad), y todas las requests de esas claves pasan a *miss* y caen a la DB de golpe — un **mini-stampede** localizado en la porción del nodo muerto. Con **un punto por nodo**, esa porción entera se la come el **único sucesor** en el anillo, que se sobrecarga (y puede caer en cascada, arrastrando al siguiente). Con **vnodes**, las muchas porciones del nodo muerto están **intercaladas** con las de todos los demás, así que su carga se **reparte entre varios** sucesores y el golpe se amortigua. **Replicar** cada partición en ≥2 nodos se justifica cuando ni ese mini-stampede es tolerable (la DB no aguanta perder esa porción de caché de golpe, o el dato es caro de recomputar): la réplica sigue sirviendo las claves del nodo caído. El costo es **consistencia**: con réplica **síncrona** no perdés writes confirmados pero cada write paga la latencia de copiar; con réplica **asíncrona** (lo común en cachés) ganás velocidad pero queda una ventana donde un fallo pierde los writes más recientes — el mismo trade-off async/sync de [Replicación](replicacion.md).
 
-Estos 12 casos cubren los patrones que más caen: fan-out, tiempo real, async con colas, lectura-intensivo con precómputo, separación metadata/contenido, estado compartido atómico, procesamiento masivo, consistencia fuerte transaccional, indexación espacial, agregación en streaming por event-time, convergencia de ediciones concurrentes (OT/CRDT) y particionado por consistent hashing. Para seguir:
+### Caso 13 — YouTube / Netflix: streaming de video
+**13.1** Porque un único archivo monolítico obliga a todos a descargar **una sola calidad**: si es alta, el que tiene mala red no puede reproducir (buffering); si es baja, el que tiene fibra ve un video feo. Servir **varias renditions** (240p…4K) deja que cada cliente use la que su red aguanta, y **partir cada una en segmentos** de pocos segundos permite **cambiar de calidad sobre la marcha** (segmento a segmento) y empezar a reproducir sin bajar el archivo entero (arranque rápido + *seek* barato). El **manifiesto** (`.m3u8` de HLS / MPD de DASH) es el índice que el reproductor lee primero: lista qué renditions hay y, para cada una, la secuencia de segmentos con sus URLs — el mapa que el cliente usa para pedir lo que necesita.
 
-- **Resolvé en voz alta los que faltan**, reusando los mismos ladrillos: "diseñá YouTube/Netflix" (transcoding + CDN + el caso 5 de almacenamiento), "diseñá un payment ledger" (doble entrada + el caso 8 de consistencia fuerte), "diseñá un full-text search" (índice invertido + el caso 4 de precómputo). Lo que se evalúa es el recorrido, no la respuesta.
+**13.2** Porque transcodificar un video a muchas resoluciones/códecs/bitrates es trabajo **pesado, independiente y paralelizable**: se parte el original en trozos (por GOP/escenas) y cada (trozo × rendition) es un job que no depende de los demás → se reparten en una **flota de workers** que escala horizontalmente, y al final se ensambla. Reusa el patrón **cola de trabajos a escala** del **caso 7** (frontier/workers/reintentos): productores encolan jobs de transcoding, los workers los consumen, los fallidos van a DLQ. Y como tarda, es **asíncrono**: el video queda "procesando" y se avisa al terminar (las colas del caso 3).
+
+**13.3** El **adaptive bitrate** parte cada calidad en segmentos cortos; el reproductor del cliente **mide su ancho de banda real** (cuánto tardó en bajar los últimos segmentos) y, antes de pedir el próximo, **elige la rendition** cuyo bitrate entra en esa banda: arranca bajo (para empezar ya), sube si sobra banda, baja si se congestiona. Vive en el **cliente** porque es **el único que conoce su situación real** momento a momento: su ancho de banda, el tamaño de su buffer, el tipo de pantalla, la CPU para decodificar. El server no puede saber que *a este* usuario se le saturó el WiFi hace 2 segundos; el cliente sí, y reacciona al instante sin un round-trip. El server solo publica las opciones (el manifiesto); el cliente decide.
+
+**13.4** Porque el egress de video es **petabytes/día** y servirlo desde el origin es inviable por **ancho de banda** (no tenés esa capacidad de salida) y por **geografía** (la latencia a un usuario lejano mata el arranque). El CDN **replica los segmentos en edges cercanos** al usuario, absorbe la mayor parte del tráfico y solo va al origin en *miss*. Los segmentos son **ideales para cachear** porque son **inmutables e idénticos para todos**: el segmento 47 de la rendition 720p de un video es el mismo byte a byte para cualquiera que lo mire → un objeto cacheable con TTL larguísimo y altísimo *hit rate*. Un **feed personalizado**, en cambio, es distinto para cada usuario → no se puede cachear igual (cada respuesta es única). Contenido estático y compartido = el caso perfecto para un CDN.
+
+**13.5** Por la **distribución de la demanda**. **Netflix** tiene un catálogo **curado y acotado**, y cada título se ve **millones de veces** → pre-transcodificar todo (y hasta optimizar el bitrate por título, *per-title encoding*) se amortiza enseguida y da playback instantáneo en toda calidad; el costo de storage por rendition vale la pena porque el contenido se reusa muchísimo. **YouTube** recibe **UGC infinito** con una **cola larga** brutal: la enorme mayoría de los videos casi no se ven → pre-transcodificar cada uno en todas las calidades sería tirar storage. Conviene transcodificar **on-demand** (o solo en calidades básicas) y reservar el procesamiento caro para lo que **demuestra** demanda. La regla: pre-computás cuando el resultado se va a reusar mucho; lazy cuando la mayoría no se usa.
+
+**13.6**
+```ts
+interface Rendition {
+  altura: number;
+  bitrateKbps: number;
+}
+
+function elegirRendition(
+  anchoBandaKbps: number,
+  renditions: Rendition[],
+): Rendition | undefined {
+  const presupuesto = anchoBandaKbps * 0.8; // factor de seguridad: no usar el 100% de la banda
+  const ordenadas = [...renditions].sort((a, b) => a.bitrateKbps - b.bitrateKbps);
+  // Arranco con la más baja (o undefined si la lista viene vacía). Tipar como
+  // `Rendition | undefined` deja el código a salvo de noUncheckedIndexedAccess.
+  let elegida: Rendition | undefined = ordenadas[0];
+  for (const r of ordenadas) {
+    if (r.bitrateKbps <= presupuesto) elegida = r; // la mejor que entra en el presupuesto
+  }
+  return elegida;
+}
+// El factor 0.8 deja headroom para que un bajón de banda no vacíe el buffer de inmediato.
+// `undefined` SOLO si no hay renditions; si hay pero ninguna entra en la banda, se devuelve
+// la más baja (degradar a una imagen fea es mejor que cortar la reproducción).
+// Un ABR de producción además mira el nivel del buffer, no solo la banda (evita oscilar de calidad).
+```
+
+Estos 13 casos cubren los patrones que más caen: fan-out, tiempo real, async con colas, lectura-intensivo con precómputo, separación metadata/contenido, estado compartido atómico, procesamiento masivo, consistencia fuerte transaccional, indexación espacial, agregación en streaming por event-time, convergencia de ediciones concurrentes (OT/CRDT), particionado por consistent hashing y distribución de contenido por CDN. Para seguir:
+
+- **Resolvé en voz alta los que faltan**, reusando los mismos ladrillos: "diseñá un payment ledger" (doble entrada + el caso 8 de consistencia fuerte), "diseñá un full-text search" (índice invertido + el caso 4 de precómputo), "diseñá un order matching engine" (order book en memoria + secuenciador determinista). Lo que se evalúa es el recorrido, no la respuesta.
 - **Conectá cada decisión con su implementación en el hub:** colas e idempotencia en [Event-driven](event-driven.md) y [Redis](redis.md), el contrato de cada API en [API design](api-design.md), tiempo real en [Tiempo real](tiempo-real.md), datos en [PostgreSQL](postgresql.md)/[NoSQL](nosql.md), control de flujo en [Concurrencia](concurrencia.md), y cómo operarlo en [Observabilidad](observabilidad.md).
-- **Volvé al método** de [Diseño de sistemas](system-design.md) módulo 1 cada vez: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs. El método es el mismo para los 12 casos y para cualquier problema nuevo que te tiren.
+- **Volvé al método** de [Diseño de sistemas](system-design.md) módulo 1 cada vez: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs. El método es el mismo para los 13 casos y para cualquier problema nuevo que te tiren.
