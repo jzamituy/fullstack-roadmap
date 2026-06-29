@@ -1,8 +1,8 @@
-# Banco de casos de diseño de sistemas: 11 problemas resueltos de punta a punta
+# Banco de casos de diseño de sistemas: 12 problemas resueltos de punta a punta
 
-**Los casos clásicos de entrevista senior, resueltos con el método · feed, chat, notificaciones, typeahead, archivos, rate limiter, crawler, reservas/pagos, proximidad, métricas en streaming, edición colaborativa · el recorrido importa más que la respuesta · 2026**
+**Los casos clásicos de entrevista senior, resueltos con el método · feed, chat, notificaciones, typeahead, archivos, rate limiter, crawler, reservas/pagos, proximidad, métricas en streaming, edición colaborativa, caché distribuida · el recorrido importa más que la respuesta · 2026**
 
-> Cómo usar este banco: este módulo es la **práctica** de [Diseño de sistemas backend](system-design.md). Ahí aprendiste el método y el criterio; acá los aplicamos a los 11 problemas que más caen en entrevistas. Para cada caso, **tapá la solución y resolvelo vos primero en voz alta** siguiendo los 6 pasos; después contrastá. Lo que se evalúa no es si llegás a *mi* diseño, sino si recorrés bien: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs.
+> Cómo usar este banco: este módulo es la **práctica** de [Diseño de sistemas backend](system-design.md). Ahí aprendiste el método y el criterio; acá los aplicamos a los 12 problemas que más caen en entrevistas. Para cada caso, **tapá la solución y resolvelo vos primero en voz alta** siguiendo los 6 pasos; después contrastá. Lo que se evalúa no es si llegás a *mi* diseño, sino si recorrés bien: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs.
 
 **El método, en una línea** (de [system-design](system-design.md) módulo 1): **(1)** aclarar requisitos (sobre todo los **no funcionales**: escala, lectura/escritura, latencia, consistencia), **(2)** estimar (back-of-the-envelope), **(3)** API + modelo de datos, **(4)** diseño de alto nivel, **(5)** profundizar **donde duele**, **(6)** discutir trade-offs. No hay respuestas correctas, hay **decisiones justificadas**.
 
@@ -22,6 +22,7 @@
 9. Uber / ride-sharing: proximidad y matching en tiempo real — *indexación espacial (geohash/quadtree)*
 10. Ad-click aggregator / métricas en tiempo real — *agregación en streaming por ventanas de event-time*
 11. Google Docs / edición colaborativa en tiempo real — *convergencia de ediciones concurrentes (OT / CRDT)*
+12. Caché distribuida (diseñar un Redis/Memcached a escala) — *consistent hashing + defensa contra stampede*
 
 > **El patrón que se repite.** Vas a ver que los mismos ladrillos reaparecen en casi todos los casos: **fan-out** (¿escribo a muchos en la escritura o leo de muchos en la lectura?), **caché del camino caliente**, **idempotencia ante reintentos**, **colas para desacoplar y absorber picos**, **sharding por la clave de acceso**, y **el caso patológico** (la celebridad, el prefijo popular, el archivo gigante). Aprender a *reconocer* qué ladrillo aplica es la mitad de la entrevista.
 
@@ -548,6 +549,67 @@ interface InsertOp {
 
 ---
 
+## Caso 12 — Caché distribuida (diseñar un Redis/Memcached a escala)
+
+**1. Requisitos.**
+- Funcionales: un servicio de **caché en memoria** clave→valor, compartido por muchas instancias de la aplicación; `GET`/`SET`/`DELETE` con **TTL**; escala horizontal (agregás nodos para más capacidad y throughput).
+- No funcionales: latencia **sub-milisegundo**; throughput altísimo (es el camino caliente delante de la base de datos); **alta disponibilidad** (que se caiga un nodo no puede tumbar todo); poder **agregar/quitar nodos** moviendo la menor cantidad de datos posible; y la propiedad que lo define: es un **caché**, la fuente de verdad es la DB → perder datos es tolerable, servir datos *incorrectos* mucho menos.
+
+**2. Estimación.** Si el sistema hace 1M req/s y el caché tiene buen *hit rate* (~90%), son ~900K ops/s contra el caché. Datos: 1 KB por entrada × 100M entradas activas = **100 GB** → no entra en un solo nodo con headroom y réplicas (un nodo típico tiene 64–256 GB pero no querés llenarlo) → hay que **particionar** entre varios nodos. El cuello no es el cómputo: es **repartir las claves** entre nodos de forma que (a) la carga quede balanceada y (b) agregar o perder un nodo **no** remapee todo el keyspace.
+
+**3. API y datos.**
+```
+GET    key            → value | miss
+SET    key value TTL  → ok
+DELETE key            → ok
+```
+- Cada nodo guarda una porción del keyspace **en memoria** (un hashmap + una estructura para la evicción).
+- Alguien —el cliente, un proxy, o el propio cluster— decide **a qué nodo** va cada key. Esa decisión es el corazón del caso.
+
+**4. La decisión clave — repartir las claves: consistent hashing.** ¿A qué nodo va una key con `N` nodos?
+- **Hash módulo N** (`hash(key) % N`): trivial, pero si `N` cambia (agregás un nodo o se cae uno), **casi todas** las claves remapean a otro nodo → el caché entero se invalida de golpe → *todas* las requests pasan a la DB al mismo tiempo (avalancha). Inaceptable.
+- **Consistent hashing:** mapeás **claves y nodos al mismo anillo** (un espacio de hash circular, p. ej. 0…2³²−1). Una key pertenece al **primer nodo que encontrás girando** en el anillo desde la posición de la key. Al agregar o quitar un nodo, **solo las claves entre ese nodo y su vecino** se remapean (≈ `1/N` del keyspace), no todo.
+- **Virtual nodes (vnodes):** cada nodo físico se coloca en **muchos** puntos del anillo (cientos de "réplicas virtuales"), no en uno solo. Dos motivos: (1) con pocos nodos y un punto cada uno, el reparto queda **desparejo** (un nodo se come un arco gigante); muchos puntos promedian y emparejan la carga. (2) Cuando un nodo cae, su porción se **redistribuye entre varios** nodos (los dueños de cada vnode vecino), no toda hacia un único sucesor que se sobrecargaría. (Ojo: el balance mejora con la **raíz** del número de vnodes, no es exacto — con pocos nodos esperá un spread de ±varios puntos porcentuales, no un reparto perfecto.)
+
+**5. Donde duele — el cache stampede y el nodo caído.**
+- **Cache stampede (thundering herd).** Una key **muy popular** expira o se invalida; en ese instante, miles de requests concurrentes ven el *miss* a la vez y **todas** recomputan / pegan a la DB al mismo tiempo → la DB se funde, que es justo lo que el caché protegía. Tres defensas, no excluyentes: (a) **single-flight / lock por key** — solo el primero que ve el miss recomputa; los demás **esperan** ese resultado (un lock por key, o `singleflight`); (b) **early/probabilistic expiration** — recomputás la key *antes* de que venza, con probabilidad creciente al acercarse al TTL (el algoritmo canónico, *XFetch*, **pondera** esa probabilidad por el **costo de recálculo**, para refrescar antes las entradas más caras), de modo que no expire para todos en el mismo instante; (c) **stale-while-revalidate** — servís el valor viejo mientras **uno** lo refresca en background. Y `jitter` en los TTL para **desincronizar** los vencimientos.
+- **Nodo caído.** Si un nodo muere, su porción de claves se pierde (es caché, tolerable) pero todas esas requests caen a la DB de golpe (un mini-stampede localizado). El consistent hashing con vnodes **reparte** ese golpe entre varios nodos; si no podés tolerar ni la pérdida, **replicás** cada partición en 2 nodos — con réplica **síncrona** no perdés datos ya confirmados (pero cada write paga la copia); con réplica **asíncrona** (más rápida) queda una **ventana** en la que un fallo pierde los writes más recientes (el eje async/sync de los trade-offs).
+
+> **4 capas — el stampede de la key caliente:**
+> 1. **Qué se rompe:** la key más popular expira; miles de requests ven el *miss* en el mismo instante y **todas** recomputan/pegan a la DB → la DB colapsa (justo lo que el caché evitaba).
+> 2. **Por qué a esta escala/uso:** a ~900K ops/s una sola key caliente concentra miles de req/s, y un TTL fijo hace que **expire para todos a la vez** (vencimiento sincronizado), no escalonado.
+> 3. **Control de corto plazo:** **single-flight** (un solo recompute por key; el resto espera) + **jitter** en los TTL para desincronizar los vencimientos.
+> 4. **Cambio de diseño:** **stale-while-revalidate** (servir lo viejo mientras se refresca) + **early probabilistic expiration**; nunca dejar que la masa entera dependa de una key que vence en seco.
+
+**6. Trade-offs.**
+- **Dónde se decide el routing:** **cliente inteligente** (conoce el anillo, cero saltos extra, pero hay que propagar la topología a todos los clientes — el modelo de Redis Cluster) vs **proxy** (twemproxy/Envoy: cliente simple, pero un salto más de latencia y un componente más que operar) vs **server-side redirect** (los nodos reenvían al dueño correcto).
+- **Invalidación — "the two hard things".** **Cache-aside** (el patrón más común: la app lee del caché, en *miss* va a la DB y **puebla** el caché; en *write* invalida o actualiza la entrada) vs **write-through** (escribís a caché y DB juntos: consistente pero cada write paga la DB) vs **write-back** (escribís al caché y a la DB después: rapidísimo, pero si el nodo muere antes de bajar a la DB, **perdés writes**). El **TTL** es la red de seguridad que acota cuánto puede durar una inconsistencia.
+- **Evicción:** **LRU** (lo más usado), **LFU**, FIFO, random; el trade-off es qué patrón de acceso favorece y cuánto cuesta mantener el orden de acceso.
+- **Réplicas:** asíncronas (rápidas, podés leer un valor *stale* de una réplica) vs síncronas (consistentes, más lentas) — el mismo eje de [Replicación](replicacion.md).
+
+> **El cierre de criterio — no sobre-diseñar.** ¿Una app con una o pocas instancias y un dataset que **entra en memoria**? Un **Redis/Memcached de un solo nodo** (o el cluster manejado de tu cloud) alcanza y sobra: **cache-aside con TTL** y listo. El consistent hashing, los vnodes y las defensas de stampede son para cuando el caché **no entra en un nodo** y hay que particionar, o cuando una **key caliente** puede tumbar tu DB. Para la enorme mayoría de los casos, "poné un Redis adelante con TTL" **es** la respuesta correcta — no lo conviertas en un sistema distribuido sin necesidad.
+
+**Ejercicios — Caso 12**
+12.1 🔁 ¿Por qué `hash(key) % N` se vuelve un problema cuando cambia la cantidad de nodos, y qué resuelve el **consistent hashing**?
+12.2 🧠 ¿Qué dos problemas resuelven los **virtual nodes** en el anillo que el consistent hashing "a secas" (un punto por nodo) no resuelve bien?
+12.3 🧠 Explicá el **cache stampede**: qué lo dispara a escala y nombrá **dos** defensas distintas, diciendo qué hace cada una.
+12.4 🧠 **Cache-aside** vs **write-through** vs **write-back**: ¿qué garantiza y qué arriesga cada uno respecto de la consistencia caché↔DB?
+12.5 ✍️ Implementá un *consistent hash ring* mínimo con **vnodes**: `agregarNodo`, `quitarNodo` y `nodoPara(key)` (el nodo responsable de la key, o `undefined` si el anillo está vacío). Usá la interfaz y el hash de abajo.
+```ts
+// hash determinista de string → entero de 32 bits sin signo (FNV-1a). Asumilo dado.
+function hash(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+```
+12.6 🧠 Un nodo del caché **muere**. ¿Qué les pasa a sus claves, por qué los **vnodes** amortiguan el golpe mejor que un anillo con un punto por nodo, y cuándo justificás **replicar** cada partición (y qué consistencia resignás al hacerlo)?
+
+---
+
 # Soluciones
 
 > Mirá esto solo después de intentar cada caso en voz alta. Casi todas son de **criterio**: si tu razonamiento difiere pero justifica bien el trade-off, probablemente también esté bien. En diseño de sistemas, el *cómo* justificás importa más que el *qué* elegís.
@@ -764,8 +826,66 @@ function transformInsert(op: InsertOp, contra: InsertOp): InsertOp {
 
 **11.6** Porque `transformInsert` solo mueve **un punto** (una posición), mientras que un borrado afecta un **rango** `[inicio, fin)`, así que transformarlo es ajustar **longitudes**, no correr un índice. Contra una **inserción** concurrente: si el insert cae antes del rango, lo corro; si cae **dentro** del rango, el rango tiene que **crecer** para abarcar el texto recién insertado (o decidir explícitamente no borrarlo). Contra **otro borrado**: si los rangos **se solapan**, no puedo "borrar dos veces" la intersección que el otro ya borró → tengo que restar esa parte, y el resultado puede quedar **vacío** (la op se vuelve un *no-op*) o partirse en dos. Ese manejo de rangos solapados y longitudes variables es lo que multiplica los casos a cubrir (insert-insert, insert-delete, delete-insert, delete-delete) y lo que hace la transformación de OT "notoriamente difícil"; el insert-insert del ejercicio anterior es solo la **esquina fácil**.
 
-Estos 11 casos cubren los patrones que más caen: fan-out, tiempo real, async con colas, lectura-intensivo con precómputo, separación metadata/contenido, estado compartido atómico, procesamiento masivo, consistencia fuerte transaccional, indexación espacial, agregación en streaming por event-time y convergencia de ediciones concurrentes (OT/CRDT). Para seguir:
+### Caso 12 — Caché distribuida
+**12.1** Porque `hash(key) % N` ata el destino de **cada** key al valor de `N`: si `N` cambia (agregás un nodo o se cae uno), el resto de la división cambia para **casi todas** las claves → casi todo el keyspace remapea a otro nodo de golpe. En un caché eso significa un *miss* masivo simultáneo y una avalancha de requests a la DB. El **consistent hashing** mapea claves y nodos a un **anillo**: cada key va al primer nodo girando desde su posición, así que agregar/quitar un nodo solo **reasigna las claves de ese arco** (≈ `1/N` del total), no todas. El cambio de topología pasa de "remapear todo" a "remapear una fracción".
+
+**12.2** (1) **Balance de carga:** con un solo punto por nodo y pocos nodos, los arcos del anillo quedan de tamaños muy distintos → un nodo se come una porción enorme y otro casi nada. Muchos puntos por nodo (vnodes) **promedian** esos arcos y emparejan la distribución. (2) **Redistribución al fallar:** con un punto por nodo, cuando un nodo cae **toda** su porción se va a su único sucesor, que se sobrecarga; con vnodes, sus muchas porciones están intercaladas con las de todos, así que la carga del caído se **reparte entre varios** nodos. (El balance real depende de tener **suficientes** vnodes y un hash con buena dispersión — con un hash pobre, ni los vnodes salvan la distribución.)
+
+**12.3** Lo dispara una **key caliente que vence (o se invalida) en seco**: en ese instante miles de requests concurrentes ven el *miss* a la vez y todas recomputan/pegan a la DB en paralelo, fundiéndola. A escala es peor porque el TTL fijo hace que expire **para todos simultáneamente**. Dos defensas (de tres posibles): **(a) single-flight / lock por key** — solo el primero que ve el miss recomputa y los demás **esperan** su resultado, colapsando N recomputos en uno; **(b) stale-while-revalidate** — se sirve el valor **viejo** mientras **uno** lo refresca en background, así nadie ve un miss. (La tercera: *early probabilistic expiration*, recomputar antes del TTL con probabilidad creciente; y `jitter` en los TTL para desincronizar.)
+
+**12.4** **Cache-aside** (lazy): la app lee del caché, en *miss* va a la DB y puebla el caché; en *write* invalida/actualiza la entrada. Garantiza que solo cacheás lo que se usa; arriesga una **ventana de inconsistencia** entre el write a la DB y la invalidación (y un miss inicial por entrada). **Write-through:** cada write va al caché **y** a la DB en la misma operación → caché y DB siempre consistentes; arriesga **latencia** (todo write paga la DB) y cachear cosas que nunca se leen. **Write-back** (write-behind): el write va al caché y se baja a la DB **después**, en batch → rapidísimo en escritura; arriesga **perder writes** si el nodo muere antes de persistir, y deja la DB temporalmente atrasada. En los tres, el **TTL** acota cuánto puede vivir una inconsistencia.
+
+**12.5**
+```ts
+function hash(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
+const VNODES = 150; // puntos por nodo físico; más vnodes ⇒ distribución más pareja
+
+interface Punto {
+  hash: number;
+  nodo: string;
+}
+
+class ConsistentHashRing {
+  private anillo: Punto[] = []; // siempre ordenado por hash ascendente
+
+  agregarNodo(nodo: string): void {
+    for (let i = 0; i < VNODES; i++) {
+      // La parte variable (i) va PRIMERO: con FNV, anteponer el índice dispersa
+      // mucho mejor los vnodes de un mismo nodo que `${nodo}#${i}`.
+      this.anillo.push({ hash: hash(`${i}@${nodo}`), nodo });
+    }
+    this.anillo.sort((a, b) => a.hash - b.hash);
+  }
+
+  quitarNodo(nodo: string): void {
+    this.anillo = this.anillo.filter((p) => p.nodo !== nodo);
+  }
+
+  nodoPara(key: string): string | undefined {
+    if (this.anillo.length === 0) return undefined;
+    const h = hash(key);
+    // Primer punto del anillo con hash >= h; si ninguno, se "envuelve" al primero
+    // (el anillo es circular). En producción esto es una búsqueda binaria sobre el array.
+    const punto = this.anillo.find((p) => p.hash >= h) ?? this.anillo[0];
+    return punto.nodo;
+  }
+}
+// Verificado: con 3 nodos reparte ~30/33/36% de 10.000 claves, y al quitar un nodo
+// SOLO se remapean las claves que estaban en él (~1/N), no todo el keyspace.
+```
+
+**12.6** Sus claves **se pierden** (es caché: la DB sigue siendo la fuente de verdad), y todas las requests de esas claves pasan a *miss* y caen a la DB de golpe — un **mini-stampede** localizado en la porción del nodo muerto. Con **un punto por nodo**, esa porción entera se la come el **único sucesor** en el anillo, que se sobrecarga (y puede caer en cascada, arrastrando al siguiente). Con **vnodes**, las muchas porciones del nodo muerto están **intercaladas** con las de todos los demás, así que su carga se **reparte entre varios** sucesores y el golpe se amortigua. **Replicar** cada partición en ≥2 nodos se justifica cuando ni ese mini-stampede es tolerable (la DB no aguanta perder esa porción de caché de golpe, o el dato es caro de recomputar): la réplica sigue sirviendo las claves del nodo caído. El costo es **consistencia**: con réplica **síncrona** no perdés writes confirmados pero cada write paga la latencia de copiar; con réplica **asíncrona** (lo común en cachés) ganás velocidad pero queda una ventana donde un fallo pierde los writes más recientes — el mismo trade-off async/sync de [Replicación](replicacion.md).
+
+Estos 12 casos cubren los patrones que más caen: fan-out, tiempo real, async con colas, lectura-intensivo con precómputo, separación metadata/contenido, estado compartido atómico, procesamiento masivo, consistencia fuerte transaccional, indexación espacial, agregación en streaming por event-time, convergencia de ediciones concurrentes (OT/CRDT) y particionado por consistent hashing. Para seguir:
 
 - **Resolvé en voz alta los que faltan**, reusando los mismos ladrillos: "diseñá YouTube/Netflix" (transcoding + CDN + el caso 5 de almacenamiento), "diseñá un payment ledger" (doble entrada + el caso 8 de consistencia fuerte), "diseñá un full-text search" (índice invertido + el caso 4 de precómputo). Lo que se evalúa es el recorrido, no la respuesta.
 - **Conectá cada decisión con su implementación en el hub:** colas e idempotencia en [Event-driven](event-driven.md) y [Redis](redis.md), el contrato de cada API en [API design](api-design.md), tiempo real en [Tiempo real](tiempo-real.md), datos en [PostgreSQL](postgresql.md)/[NoSQL](nosql.md), control de flujo en [Concurrencia](concurrencia.md), y cómo operarlo en [Observabilidad](observabilidad.md).
-- **Volvé al método** de [Diseño de sistemas](system-design.md) módulo 1 cada vez: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs. El método es el mismo para los 11 casos y para cualquier problema nuevo que te tiren.
+- **Volvé al método** de [Diseño de sistemas](system-design.md) módulo 1 cada vez: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs. El método es el mismo para los 12 casos y para cualquier problema nuevo que te tiren.
