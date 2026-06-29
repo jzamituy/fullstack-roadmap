@@ -84,6 +84,7 @@
   - [🧩 Building blocks y diseño geoespacial](building-blocks.md)
   - [🛠️ Building blocks: laboratorio práctico](building-blocks-practica.md)
   - [⏱️ Workflows durables y orquestación de jobs](workflows.md)
+  - [🛡️ Seguridad de sistemas a escala](seguridad-sistemas.md)
 
 - **Concurrencia**
   - [🔀 Concurrencia en system design](concurrencia.md)
