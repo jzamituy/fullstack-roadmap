@@ -11,8 +11,8 @@
 **Tipos de ejercicio** (para que sepas cuándo solo pensar y cuándo abrir el editor): 🔁 recordar · 🧠 criterio/análisis · ✍️ implementación (escribís código). Ojo: este módulo es casi todo criterio, así que vas a ver muchos 🧠 — es a propósito.
 
 **Índice de módulos**
-1. El método: cómo encarar cualquier problema de diseño
-2. Las métricas que importan: latencia, throughput y los nueves
+1. El método: cómo encarar y conducir cualquier problema de diseño
+2. Las métricas y la matemática de servilleta: latencia, throughput, nueves y estimación
 3. Escalar: vertical, horizontal y el load balancer
 4. Datos a escala: réplicas, sharding y el teorema CAP
 5. Caching a fondo: dónde, cómo y el problema de la invalidación
@@ -43,16 +43,35 @@ Las soluciones de **todos** los ejercicios están al final, en la sección "Solu
 >
 > **Y en la entrevista, vos manejás el tablero:** declarás tus supuestos en voz alta, confirmás los requisitos antes de dibujar nada, y **narrás tu razonamiento** mientras pensás (el silencio está bien si lo acompañás con "estoy viendo si conviene A o B"). El entrevistador no evalúa si adivinás su solución — evalúa **cómo pensás**.
 
-**Una estimación de ejemplo** (Little's Law, útil para capacidad): si llegan `λ` = 1000 req/s y cada una tarda `W` = 0.2 s, el número promedio de requests en vuelo es `L = λ × W = 200`. Eso te dice cuántas conexiones/threads concurrentes necesitás sostener.
+**Conducir la conversación: el guion de los 45 minutos.** Los 6 pasos son *qué* decidir; esto es *cómo* manejar el tiempo. Un candidato senior no espera que el entrevistador encuentre los problemas: **los propone él**. Presupuesto típico de una ronda de ~45 min:
+
+| Fase | Tiempo | Qué hacés |
+|---|---|---|
+| **Requisitos** | ~5 min | Funcionales (3 features core, "el usuario puede…") + **no funcionales cuantificados** ("< 200 ms p99", "10M DAU", "lectura-intensivo 100:1"). Los no funcionales mandan. |
+| **Entidades centrales** | ~2 min | Los sustantivos del dominio (User, Post, Follow) **antes** del API: el API y el esquema *caen* de ahí. |
+| **API / contrato** | ~5 min | Un endpoint por feature core, sobre las entidades (`POST /tweets`, `GET /feed`). |
+| **Diseño de alto nivel** | ~10-15 min | Cajas y flechas, recorriendo cada endpoint. Sin complejidad prematura. |
+| **Deep dives** | ~10-15 min | Endurecés el diseño contra los no funcionales: los 2-3 cuellos de botella y los casos borde. |
+| **Wrap-up** | ~3-5 min | Qué quedó flojo, qué monitorearías, qué harías con más tiempo. |
+
+> **La diferencia Senior → Staff.** Dos candidatos con el mismo conocimiento se separan en cómo **conducen**:
+> - **Scopeás vos el problema.** "Diseñá Twitter" es deliberadamente vago: un Staff decide el alcance ("asumo 100M DAU, foco en timeline y publicación, dejo afuera DMs y trending — ¿de acuerdo?") en vez de esperar que se lo acoten. Sos *navegador, no ejecutor*.
+> - **Cortás complejidad sin piedad.** Ir a multi-región y 12 servicios en *toda* pregunta es mala señal en 2026. "¿Esto hace falta a esta escala?" — un nodo si alcanza. Simplicidad = criterio, no debilidad.
+> - **Decidís, no devolvés opciones.** "Voy con Postgres porque X" gana sobre "podríamos usar A, B o C" sin elegir. Ponés la decisión y su trade-off sobre la mesa.
+> - **Liderás los deep dives.** "Me preocupan tres cosas: la hot key del feed, la consistencia del contador y el multi-región. Empiezo por la de más riesgo" — sin que te lo pidan.
+> - **Manejás el reloj.** Si quedan 10 min, no te trabás en el esquema: vas al cuello de botella que más señal da.
 
 **Ejercicios 1**
 1.1 🔁 Nombrá los 6 pasos del método y decí cuál define la arquitectura.
 1.2 🧠 Te piden "diseñá Twitter". ¿Cuáles son las **primeras tres preguntas** que hacés antes de dibujar nada, y por qué?
 1.3 🧠 ¿Por qué los requisitos **no funcionales** pesan más en la arquitectura que los funcionales? Dá un ejemplo donde el mismo requisito funcional lleve a dos arquitecturas distintas según el no funcional.
+1.4 🧠 Te dan "diseñá Instagram" y 35 minutos. Hacé el presupuesto de tiempo de la ronda y decí **qué dos cosas dejás explícitamente fuera de scope** y por qué.
+1.5 🧠 El enunciado es vago a propósito ("diseñá un sistema de notificaciones"). ¿Qué hace **distinto** un candidato Staff respecto de uno Senior en los primeros 5 minutos?
+1.6 🧠 A los 25 minutos el entrevistador te dice "esa shard key no escala". ¿Cómo respondés sin tirar abajo todo el diseño ni ponerte a la defensiva?
 
 ---
 
-## Módulo 2 — Las métricas que importan: latencia, throughput y los nueves
+## Módulo 2 — Las métricas y la matemática de servilleta: latencia, throughput, nueves y estimación
 
 **Teoría.** No podés diseñar para "rápido" ni "confiable": necesitás números.
 
@@ -73,10 +92,39 @@ Las soluciones de **todos** los ejercicios están al final, en la sección "Solu
 
 > **Modelo mental:** cada "nueve" extra cuesta aproximadamente **10× más** en ingeniería y plata. Cinco nueves no es "mejor que tres", es una decisión de negocio carísima. La pregunta senior no es "¿cómo llego a cinco nueves?" sino "¿cuántos nueves justifica este sistema?".
 
+---
+
+**La matemática de servilleta (back-of-the-envelope).** Antes de dibujar, un número decide la arquitectura: ¿una máquina o mil? ¿sharding o una tabla? No buscás precisión, buscás el **orden de magnitud**.
+
+**Números canónicos (2026) para tener en la cabeza.** Cuidado: usar números de 2015 es el error más común — hoy un solo nodo aguanta lo que antes exigía un cluster.
+
+| Latencias | | Capacidad / throughput | |
+|---|---|---|---|
+| Lectura de RAM | ~100 ns | RAM por servidor | 512 GB – 24 TB |
+| Lectura random SSD | ~16 µs | SSD local | hasta ~60 TB |
+| RTT misma AZ | < 1 ms | Red intra-DC | 25 Gbps (100+ en nodos grandes) |
+| RTT cross-AZ (misma región) | 1–2 ms | S3 / object store | ~ilimitado |
+| RTT cross-región | 50–150 ms | QPS por instancia (orden) | ~1k–10k según el trabajo |
+
+Tamaños de referencia: timestamp 8 B · UUID 16 B · una URL ~100 B · un tweet ~300 B · una fila de metadata ~0.1–1 KB.
+
+**Potencias de 10 (el truco para hacerlo de cabeza).** Un día tiene 86 400 s ≈ **10⁵ s**. Entonces "X por día → por segundo" es dividir por ~100 000. Ej.: 1 M req/día ≈ **~12 req/s**; 1 B (10⁹) eventos/día ≈ **~10⁴/s**. Redondeá: el objetivo es el exponente, no el decimal.
+
+**La receta de 5 cálculos, en orden:**
+1. **QPS** promedio = volumen/día ÷ 10⁵; **QPS pico** = promedio × 2–10 (dimensionás para el pico, no el promedio).
+2. **Storage** = filas/día × bytes/fila × retención (años × 365).
+3. **Ancho de banda** = QPS × tamaño del payload.
+4. **Memoria de cache** = regla 80/20: cacheás el ~20% caliente del working set diario, no todo.
+5. **Nº de servidores** = QPS pico ÷ QPS por instancia. Y para la **concurrencia**, *Little's Law*: con `λ` = 1000 req/s y `W` = 0.2 s de latencia, hay `L = λ × W = 200` requests en vuelo → ése es el orden de conexiones/threads que tenés que sostener.
+
+> **El matiz Staff:** estimá **solo cuando el número cambia una decisión**, no como ritual. "Son ~40 escrituras/s → no necesito shardear todavía, alcanza con réplicas + cache" es estimación que *conduce* el diseño. Calcular siete cifras que no mueven ninguna decisión es perder tiempo del reloj. (El **Módulo 12** aplica esta receta completa de punta a punta.)
+
 **Ejercicios 2**
 2.1 🔁 ¿Por qué se reporta p99 en vez del promedio de latencia?
 2.2 🧠 Un servicio hace 5 llamadas internas en paralelo y espera a todas. Si cada dependencia tiene p99 de 100ms, ¿por qué la latencia p99 del servicio compuesto es **peor** que 100ms? (pista: tail latency)
 2.3 🧠 Tu jefe dice "quiero cinco nueves". ¿Qué dos preguntas le hacés antes de aceptar, y por qué?
+2.4 🧠 Un sistema recibe 500 M de tweets/día, ~300 B cada uno. Estimá (mostrando la cuenta, con potencias de 10) las **escrituras por segundo** y el **storage a 1 año**.
+2.5 🧠 Calculás que un sistema recibe ~50 escrituras/s y ~5000 lecturas/s. ¿Qué **decisión de arquitectura** cambia ese número — y qué cálculo NO hacía falta hacer?
 
 ---
 
@@ -384,12 +432,22 @@ class TokenBucket {
 
 **1.3** Porque el *qué hace* (acortar URLs, postear un tweet) suele ser simple y similar entre sistemas; lo que dispara decisiones arquitectónicas distintas es el *cómo de bien* (escala, latencia, consistencia, disponibilidad). Ejemplo: "guardar y mostrar posts" con 100 usuarios = una tabla Postgres; con 300M usuarios y feed en tiempo real = sharding + caché + fan-out + consistencia eventual. Mismo requisito funcional, dos arquitecturas según el no funcional.
 
+**1.4** Presupuesto para 35 min: requisitos ~4 min, entidades ~2, API ~4, alto nivel ~10, deep dives ~12, wrap-up ~3. Dos cosas fuera de scope (ejemplos válidos): **DMs/mensajería** (es casi otro sistema, con su propio almacenamiento y tiempo real) y **el algoritmo de ranking del feed** (cae en ML/relevancia, no en la arquitectura de almacenamiento/fan-out). Se acotan para profundizar en el core (publicar foto + feed + media + likes) en vez de barnizar todo. Lo clave no es *qué* dejás afuera sino **declararlo y confirmarlo** en voz alta, no resolverlo en silencio.
+
+**1.5** Un Senior pregunta los requisitos y espera que se los acoten; un **Staff scopea él mismo**: propone una escala concreta ("asumo 50M DAU"), elige las 2-3 features core y dice qué deja afuera, identifica el *crux* (la parte de verdad difícil: fan-out, dedup, entrega garantizada) y declara la decisión consistencia/latencia — todo en los primeros minutos y **confirmándolo**, en vez de devolverle al entrevistador una lista de opciones para que elija. Maneja la ambigüedad tomando decisiones, no evitándolas.
+
+**1.6** La objeción es una **señal, no un ataque** — muchas veces el entrevistador prueba si defendés (o corregís) con criterio. El reflejo: (1) no te pongas a la defensiva ni tires todo abajo; confirmá que entendiste ("decís que `country` concentra la carga en el país más grande, ¿no?"). (2) Evaluá si tiene razón. (3) Si la tiene: nombrá el trade-off, aplicá el **fix localizado** (`hash(user_id)` en vez de `country`) y seguí desde ahí, sin reescribir lo que ya funciona. (4) Si tu decisión era defendible: justificala con su trade-off, pero quedate abierto. Lo que evalúan es **adaptabilidad con criterio**: corregir el rumbo rápido sin perder el hilo ni la compostura — ni aferrarte ni colapsar.
+
 ### Módulo 2
 **2.1** Porque el promedio esconde los outliers que sí duelen: si 99% de las requests van bien y 1% tarda 5s, el promedio se ve sano pero hay usuarios sufriendo. El p99 expone ese peor 1%, que en sistemas con muchas dependencias termina afectando a casi todos en alguna request.
 
 **2.2** Porque al esperar a las 5 en paralelo, la latencia del compuesto es la del **más lento** de los 5, no la de uno. La probabilidad de que *al menos una* de las 5 caiga en su p99 (su cola lenta) es mucho mayor que para una sola: `1 - 0.99⁵ ≈ 4.9%`. Así que el p99 del compuesto se acerca más al p99.x individual — la *tail latency* se amplifica con el fan-out. Mitigación: hedged requests, timeouts agresivos, menos dependencias en el camino crítico.
 
 **2.3** (a) **"¿Qué le cuesta al negocio un minuto de downtime?"** — cinco nueves (~5 min/año) cuesta ~10× más que tres nueves (~8.76 h/año) en ingeniería; solo se justifica si el downtime cuesta una fortuna (pagos, trading). (b) **"¿Sobre qué SLI exactamente, y medido desde dónde?"** — cinco nueves de disponibilidad del server no sirven si la red del usuario o un tercero del que dependés tienen menos. Se pregunta para no firmar un objetivo carísimo o imposible sin entender el costo/beneficio.
+
+**2.4** Escrituras/s: 500 M/día ÷ 10⁵ s ≈ **~5 000 escrituras/s** (promedio; el pico sería ×2–10). Storage/año: 500 M × 300 B = 1.5×10¹¹ B ≈ **~150 GB/día**; × 365 ≈ **~55 TB/año** (solo el texto, sin índices ni media). La conclusión que *conduce* el diseño: 55 TB/año no entra cómodo en un solo nodo a largo plazo → vas a necesitar sharding o un store distribuido; pero 5 000 escrituras/s todavía es manejable. El número cambió la decisión. (Ojo: el acortador del Módulo 12 da ~40 escrituras/s con la misma receta — otro volumen y otro ratio. El número siempre **depende del problema**; por eso se estima, no se memoriza.)
+
+**2.5** Cambia la decisión de **escalado de datos**: ~50 escrituras/s es bajísimo → **no shardeás** (una primaria aguanta de sobra), y ~5000 lecturas/s con ratio 100:1 dice que es **lectura-intensivo** → invertís en **caché + read replicas**, no en particionar escrituras. Lo que NO hacía falta calcular con precisión: el ancho de banda exacto o el storage al decimal, porque a esta escala ninguno cambia esa decisión. Estimás lo que decide; lo demás es ruido del reloj.
 
 ### Módulo 3
 **3.1** Vertical = una máquina más grande (simple, con techo, single point of failure). Horizontal = más máquinas (sin techo, tolera fallas). El horizontal exige que el servicio sea **stateless**: nada de estado en memoria local, porque cualquier instancia debe poder atender cualquier request.
