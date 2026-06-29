@@ -63,6 +63,8 @@ La analogía: un empleado con **tres jefes distintos** que le dan órdenes contr
 
 ⚠️ Ojo con el péndulo: esto **no** significa "una función por clase". Una clase puede tener muchos métodos mientras todos sirvan **al mismo actor**. Partir de más es el over-engineering del módulo 7.
 
+> La definición original dice **"módulo"** a propósito: la S no es solo de clases. Un archivo, un paquete o un módulo de Node también deberían tener una sola razón para cambiar. Si tu `utils.ts` mezcla formateo de fechas, validación de emails y llamadas HTTP, viola la S a nivel módulo — tres actores distintos en un mismo archivo.
+
 La frase mental: **la S no es "hacé una sola cosa", es "tené una sola razón para cambiar". Preguntá quién, en el negocio, te haría tocar esta clase. Si son varios actores distintos, separá.**
 
 **Ejercicios 1**
@@ -239,6 +241,7 @@ La frase mental: **muchas interfaces chicas y específicas le ganan a una interf
 4.1 🔁 Enunciá el ISP. ¿Qué problema trae una interfaz "gorda"?
 4.2 🧠 ¿Cómo se relaciona una violación de ISP con una de Liskov? (pista: el `Robot` que tira `throw` en `comer()`).
 4.3 ✍️ Tenés una interfaz `Dispositivo { imprimir(); escanear(); enviarFax() }` y una clase `ImpresoraSimple` que solo imprime. Refactorizá con interfaces segregadas.
+4.4 ✍️ Una interfaz gorda `Repositorio { leer(id); escribir(x); borrar(id); migrar(); backup() }` es consumida por dos clientes: un `ServicioDeLectura` (que solo lee) y un `AdminDeDatos` (que migra y hace backup). Segregá la interfaz y mostrá que cada cliente queda acoplado **solo a lo que usa** (el de lectura no debería siquiera ver `migrar`/`backup`).
 
 ---
 
@@ -318,12 +321,28 @@ SOLID es, todo junto, un **antídoto contra esos tres síntomas**. Y los princip
 
 En el fondo, las siglas son cinco caras de dos ideas viejas y eternas: **alta cohesión** (cada cosa junta con lo que le corresponde — S, I) y **bajo acoplamiento** (las cosas dependen de abstracciones, no de detalles — D, O, L). Si entendés cohesión y acoplamiento, entendés *por qué* existe SOLID.
 
+> **SOLID nació para OO, pero los principios trascienden las clases.** En TypeScript/Node moderno, muchas veces vas a escribir módulos y funciones, no jerarquías de objetos — y SOLID sigue valiendo, solo cambia la forma: la **O** se logra con polimorfismo *o* con funciones de orden superior (pasás una función `formatear` en vez de subclasear); la **D** se respeta inyectando dependencias **por parámetro** (una función que recibe su `repo`), sin contenedor ni clases; la **S** aplica a módulos enteros (un archivo = una razón para cambiar). No ates SOLID a "tengo que usar clases": es sobre cohesión y acoplamiento, y eso existe en cualquier paradigma.
+
 La frase mental: **SOLID no son cinco reglas sueltas: son cinco formas de pelear contra el mismo enemigo (el acoplamiento rígido) y se habilitan entre sí. En el fondo es lo de siempre: alta cohesión, bajo acoplamiento.**
 
 **Ejercicios 6**
 6.1 🔁 Nombrá los tres síntomas de un diseño que "se pudre" (rigidez, fragilidad, inmovilidad) y explicá uno.
 6.2 🧠 ¿Cómo habilita la D (inversión de dependencias) a la O (open/closed)? Dá el encadenamiento.
 6.3 🧠 Se dice que SOLID se reduce a "alta cohesión, bajo acoplamiento". ¿Qué principios empujan cada una?
+6.4 ✍️ **Capstone integrador.** Tenés esta clase que viola varios principios a la vez:
+```ts
+class ServicioReporte {
+  generar(tipo: string, datos: number[]): void {
+    const total = datos.reduce((a, b) => a + b, 0)        // cálculo (negocio)
+    let salida: string
+    if (tipo === 'csv') salida = total + ''               // formato (presentación)
+    else if (tipo === 'html') salida = `<b>${total}</b>`
+    else salida = String(total)
+    require('fs').writeFileSync('/tmp/reporte', salida)    // persistencia (infra)
+  }
+}
+```
+Identificá qué principios viola y refactorizá aplicando **S + O + D** juntos: separá las tres responsabilidades (S), hacé el formato extensible por interfaz (O) e inyectá la persistencia como abstracción (D). Mostrá las firmas resultantes y cómo queda el orquestador.
 
 ---
 
@@ -348,6 +367,13 @@ Las reglas de criterio:
 Esto conecta directo con el criterio de [DDD](ddd.md) ("no todo proyecto necesita DDD") y con el de [microfrontends](microfrontends.md) ("empezá monolito modular, extraé cuando duela"). Es el mismo principio senior repetido: **la complejidad se agrega cuando el dolor es real y medible, no por anticipado.**
 
 La frase mental de cierre: **SOLID maneja el cambio — pero solo donde el cambio es real. Abstraer "por las dudas" te da una sopa de interfaces que duele más que el problema que evitabas. YAGNI, regla de tres, y duplicar antes que abstraer mal. La marca del senior no es aplicar SOLID en todos lados: es saber dónde NO.**
+
+> **🎯 Esto te lo preguntan en la entrevista.** SOLID es clásico de entrevista, pero rara vez te piden recitar las siglas — te piden el *criterio*. Preparate para estas:
+> - *"Dame un ejemplo de cada principio… y de uno que hayas violado y cómo lo arreglaste."* (lo concreto vence a la definición de manual).
+> - *"¿LSP solo aplica a herencia?"* — no: aplica a cualquier subtipo/implementación que tenga que ser sustituible (módulo 3).
+> - *"¿SOLID o YAGNI? ¿No se contradicen?"* — no: SOLID dice *cómo* manejar la variación; YAGNI dice *cuándo* vale la pena (módulo 7). Defendé el "abstraé cuando el cambio es real".
+> - *"Mostrame un `switch` que crezca y mejoralo"* — es OCP con polimorfismo (módulo 2).
+> Todas ya están latentes en los 🧠 de arriba; el truco es responder con el *porqué* (cohesión/acoplamiento, manejar el cambio), no con la sigla.
 
 **Ejercicios 7**
 7.1 🔁 ¿Qué es la "abstracción prematura" y por qué es un problema?
@@ -422,6 +448,8 @@ function verificarArea(r: Rectangulo): void {
 }
 verificarArea(new Rectangulo(0, 0)) // ✅ 20
 verificarArea(new Cuadrado(0, 0))   // ❌ 16 — el setAlto mutó el ancho por atrás
+// (Cuadrado reusa el constructor de DOS args del padre — ya ahí se ve la herencia forzada:
+//  un cuadrado no debería poder nacer con ancho≠alto. Otra señal de que la jerarquía está mal.)
 
 // 2) Refactor: no hay relación de herencia. Cada forma es independiente y, si querés
 //    tratarlas en conjunto, comparten una interfaz mínima (no setters que mientan).
@@ -460,6 +488,34 @@ class MultifuncionPro implements Imprimible, Escaneable, Faxeable {
 ```
 `ImpresoraSimple` ya no está forzada a implementar `escanear()`/`enviarFax()` con métodos vacíos o excepciones.
 
+**4.4**
+```ts
+// Interfaces segregadas por capacidad, no una "gorda"
+interface Lectura  { leer(id: string): unknown }
+interface Escritura { escribir(x: unknown): void; borrar(id: string): void }
+interface Mantenimiento { migrar(): void; backup(): void }
+
+// Cada cliente DEPENDE solo de lo que usa:
+class ServicioDeLectura {
+  constructor(private readonly repo: Lectura) {}   // ni ve migrar/backup/escribir
+  obtener(id: string): unknown { return this.repo.leer(id) }
+}
+class AdminDeDatos {
+  constructor(private readonly repo: Mantenimiento) {}  // ni ve leer/escribir
+  mantener(): void { this.repo.migrar(); this.repo.backup() }
+}
+
+// La implementación concreta puede juntar todas las capacidades:
+class RepositorioPostgres implements Lectura, Escritura, Mantenimiento {
+  leer(id: string): unknown { return null }
+  escribir(x: unknown): void {}
+  borrar(id: string): void {}
+  migrar(): void {}
+  backup(): void {}
+}
+```
+La clave: `ServicioDeLectura` recibe un `Lectura`, no el `Repositorio` entero — si mañana cambia `migrar()`, el servicio de lectura **ni se entera** (no está acoplado a lo que no usa). La clase concreta sí implementa todo, pero cada **cliente** ve solo su rebanada.
+
 **5.1** (1) Los módulos de **alto nivel** no deben depender de los de **bajo nivel**; ambos deben depender de **abstracciones**. (2) Las abstracciones no dependen de los detalles; los detalles dependen de las abstracciones. **Alto nivel** = la lógica de negocio (lo que da valor: registrar un usuario, crear un pedido). **Bajo nivel** = los detalles de plomería (la DB concreta, el cliente de email, el filesystem).
 
 **5.2** Hacer `new PostgresUsuarioDB()` adentro **clava** la lógica de negocio a Postgres. Dos problemas concretos: (1) **Testing** — para probar `RegistrarUsuario` necesitás una base real (lento, frágil), en vez de inyectarle un repositorio falso y testear en milisegundos. (2) **Cambio de proveedor** — migrar a Mongo (o a otro almacenamiento) te obliga a **reescribir el servicio**, porque la dependencia apunta al detalle. Invirtiéndola, cambiás el adaptador y el servicio ni se entera.
@@ -495,6 +551,40 @@ class SendgridNotificador implements NotificadorPort {
 **6.2** La D dice "dependé de una abstracción (interfaz), no de una implementación concreta". Una vez que tu código orquestador depende de la **interfaz** `MedioDePago` (y no de `Tarjeta` o `PayPal` concretos), agregar un medio nuevo es crear **una clase nueva** que implementa la interfaz — y el orquestador, que solo conoce la abstracción, **no se modifica**. Eso es exactamente la O (abierto a extensión, cerrado a modificación). Sin la D, no podés tener la O: estarías acoplado a las clases concretas.
 
 **6.3** **Alta cohesión** la empujan la **S** (cada clase con un solo motivo, todo lo suyo junto) y la **I** (interfaces cohesivas, solo métodos relacionados). **Bajo acoplamiento** lo empujan la **D** (dependés de abstracciones, no de detalles), la **O** (extendés sin tocar lo existente) y la **L** (las sustituciones no acoplan al comportamiento concreto). Las cinco siglas son cinco maneras de empujar esas dos ideas.
+
+**6.4** Viola **S** (cálculo + formato + persistencia, tres actores en una clase), **O** (el `if/else` de formatos te obliga a modificarla por cada formato nuevo) y **D** (depende directo de `fs`, un detalle de infra). Refactor aplicando los tres:
+```ts
+// S: el cálculo, solo
+class CalculadoraDeReporte {
+  total(datos: number[]): number { return datos.reduce((a, b) => a + b, 0) }
+}
+
+// O: formato extensible por interfaz (una clase nueva por formato, sin tocar lo demás)
+interface FormatoReporte { formatear(total: number): string }
+class FormatoCSV  implements FormatoReporte { formatear(t: number): string { return t + '' } }
+class FormatoHTML implements FormatoReporte { formatear(t: number): string { return `<b>${t}</b>` } }
+
+// D: la persistencia es una abstracción que el detalle implementa
+interface AlmacenReporte { guardar(contenido: string): void }
+class AlmacenFS implements AlmacenReporte {
+  guardar(contenido: string): void { /* fs.writeFileSync(...) */ }
+}
+
+// El orquestador depende solo de abstracciones: cerrado al cambio, testeable sin fs.
+class ServicioReporte {
+  constructor(
+    private readonly calc: CalculadoraDeReporte,
+    private readonly formato: FormatoReporte,
+    private readonly almacen: AlmacenReporte,
+  ) {}
+  generar(datos: number[]): void {
+    const salida = this.formato.formatear(this.calc.total(datos))
+    this.almacen.guardar(salida)
+  }
+}
+// Agregar 'xml' = una clase FormatoXML (O). Cambiar a S3 = un AlmacenS3 (D).
+// Testear el cálculo = sin formato ni fs (S). Los tres principios se refuerzan.
+```
 
 **7.1** Es meter abstracciones (interfaces, puertos, capas) **antes** de que exista una necesidad real de variación — para un cambio hipotético que quizás nunca llega. Es un problema porque agrega **indirección y complejidad** (más archivos, más saltos mentales) sin comprar flexibilidad real: el código queda más difícil de entender y de cambiar que la versión simple que pretendía mejorar.
 
