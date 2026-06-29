@@ -22,6 +22,8 @@ El salto importante es del 2 al 3: tu rol cambia de **escribir cada línea** a *
 
 Por qué es table-stakes en 2026: la velocidad de generación se volvió commodity. Lo que diferencia a un ingeniero ya no es cuánto código escribe, sino **cuán bien dirige la generación y cuán bien verifica el resultado**.
 
+> **Cómo se evalúa esto en entrevistas 2026:** cada vez más empresas reemplazan el *live coding* de memoria por una sesión donde **te dejan usar el agente** y miden cómo lo dirigís, cómo revisás lo que produce y cómo justificás tus decisiones. Este módulo no es solo para *mantener* el puesto — es para *conseguirlo*.
+
 ---
 
 ## Módulo 2 — El espectro de herramientas y dónde encaja cada una
@@ -67,6 +69,7 @@ Palancas concretas para darle buen contexto:
 - **Archivos de instrucciones de proyecto** (ej. un `CLAUDE.md` en la raíz): convenciones, comandos para correr tests, estilo, qué no tocar. El agente lo lee y respeta. Es la forma más barata de subir la calidad de todo lo que genera.
 - **Señalar los archivos relevantes** explícitamente cuando la tarea es acotada ("mirá `auth.service.ts` y seguí ese patrón").
 - **No mezclar tareas no relacionadas** en una misma sesión larga: el contexto se ensucia.
+- **Reseteá el contexto entre tareas.** Empezá una sesión limpia (`/clear` o una conversación nueva) al cambiar de tarea, y compactá/resumí cuando la sesión ya viene larga. Es la palanca operativa del *context rot*: un contexto viejo y cargado degrada el recall más de lo que ayuda. El reflejo: una tarea, una sesión.
 
 ```markdown
 <!-- Ejemplo de CLAUDE.md: convenciones que el agente respeta -->
@@ -125,7 +128,7 @@ Si generás más rápido, necesitás verificar más rápido — y de forma **aut
 
 - **TDD con IA**: escribir (o pedir) los tests **primero** le da al agente un objetivo verificable y un criterio de "terminado". El loop del agente se vuelve mucho más confiable cuando puede correr los tests y ver rojo→verde (puente con [tdd.md](tdd.md)).
 - **Corré los tests siempre**, en el loop del agente y en CI. "Lo que no corre automáticamente no existe" ([api-testing.md](api-testing.md)).
-- **Métrica de código generado**: *functional correctness* / **pass@k** — ¿el código pasa los tests? Es la métrica honesta para código (a diferencia de tareas subjetivas que necesitan LLM-judge, [evals.md](evals.md)).
+- **Métrica de código generado**: *functional correctness* / **pass@k** — ¿el código pasa los tests? (pass@k = probabilidad de que **al menos una** de *k* muestras generadas pase los tests; pass@1 es el caso de un solo intento.) Es la métrica honesta para código, a diferencia de tareas subjetivas que necesitan LLM-judge ([evals.md](evals.md)).
 - **El ángulo AI QA**: testear features construidas con asistencia de IA es tu terreno. Y un paso más: si tu producto *genera* código o artefactos con IA, necesitás **evals** de esa generación — un golden set de tareas con su criterio de correctitud, corriendo en CI como quality gate.
 
 ---
@@ -191,6 +194,23 @@ Explicá, con un ejemplo, la frase "la IA amplifica lo que hay" en el caso de (a
 ### Ejercicio 6 — Dirigir vs delegar
 Tu jefe dice "ahora con IA no hace falta revisar tanto, total el agente ya corre los tests". Respondé con un argumento técnico (no de autoridad) de por qué eso es peligroso, usando conceptos de este módulo y de [seguridad-ia.md](seguridad-ia.md).
 
+### Ejercicio 7 — Cazá los fallos en el diff
+El agente te entrega esta función y pasa el test feliz. **Antes de mergear, encontrá los fallos típicos de IA** (hay al menos tres) y explicá cómo arreglar cada uno:
+
+```ts
+import { encrypt } from "node-crypto-helpers";
+
+const API_KEY = "sk-live-3f9a2b8c1d";
+
+async function guardarToken(userId: string, token: string) {
+  const cifrado = encrypt(token, API_KEY);
+  const res = await db.query(
+    "UPDATE usuarios SET token = '" + cifrado + "' WHERE id = " + userId
+  );
+  return res.rows[0];
+}
+```
+
 ---
 
 ## Soluciones
@@ -212,3 +232,10 @@ Riesgo: **dependencia alucinada / slopsquatting** (supply chain, OWASP LLM03). E
 
 ### Solución 6
 Argumento técnico: que los tests pasen prueba *functional correctness sobre los casos que los tests cubren*, no que el código sea correcto, seguro o mantenible. El agente puede (1) pasar los tests felices ignorando casos adversos, (2) introducir vulnerabilidades que ningún test funcional detecta (SQL injection, secrets, deps alucinadas — [seguridad-ia.md](seguridad-ia.md)), (3) alucinar APIs que fallan en runtime fuera del path testeado, (4) meter deuda/sobre-ingeniería que no rompe tests pero degrada el sistema. Como **el que mergea es responsable**, saltarse el review traslada esos riesgos a producción sin filtro. El review no es burocracia: es la verificación que los tests no cubren. Reducir review por "el agente corre los tests" es confundir *pasar tests* con *ser correcto y seguro*.
+
+### Solución 7
+Los fallos que el test feliz no atrapa:
+1. **Dependencia/API alucinada** (Módulo 9, slopsquatting): `node-crypto-helpers` y su `encrypt` tienen pinta inventada. Verificá que el paquete existe en npm y está mantenido **antes** de instalarlo; para cifrar/hashear usá el módulo `crypto` nativo o una lib ya conocida del proyecto. Que importe y "ande" no prueba que sea real ni seguro.
+2. **Secret hardcodeado** (Módulo 9): `API_KEY = "sk-live-..."` en el código fuente termina en el repo y en el historial de git. Va a una variable de entorno / gestor de secretos, nunca en el código.
+3. **SQL concatenado → inyección** (puente con [postgresql.md](postgresql.md)): construir la query con `+` permite SQL injection vía `userId`/`cifrado`. Usá **consultas parametrizadas** (`$1`, `$2`).
+4. **Manejo de errores y caso borde ausentes**: no hay `try/catch` (¿qué pasa si la DB falla o el `UPDATE` no afecta filas?) y `res.rows[0]` asume que siempre hay resultado — si el `userId` no existe, devuelve `undefined` en silencio. Manejá el error y el "0 filas afectadas" explícitamente.
