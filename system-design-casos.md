@@ -1,8 +1,8 @@
-# Banco de casos de diseño de sistemas: 9 problemas resueltos de punta a punta
+# Banco de casos de diseño de sistemas: 10 problemas resueltos de punta a punta
 
-**Los casos clásicos de entrevista senior, resueltos con el método · feed, chat, notificaciones, typeahead, archivos, rate limiter, crawler, reservas/pagos, proximidad · el recorrido importa más que la respuesta · 2026**
+**Los casos clásicos de entrevista senior, resueltos con el método · feed, chat, notificaciones, typeahead, archivos, rate limiter, crawler, reservas/pagos, proximidad, métricas en streaming · el recorrido importa más que la respuesta · 2026**
 
-> Cómo usar este banco: este módulo es la **práctica** de [Diseño de sistemas backend](system-design.md). Ahí aprendiste el método y el criterio; acá los aplicamos a los 9 problemas que más caen en entrevistas. Para cada caso, **tapá la solución y resolvelo vos primero en voz alta** siguiendo los 6 pasos; después contrastá. Lo que se evalúa no es si llegás a *mi* diseño, sino si recorrés bien: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs.
+> Cómo usar este banco: este módulo es la **práctica** de [Diseño de sistemas backend](system-design.md). Ahí aprendiste el método y el criterio; acá los aplicamos a los 10 problemas que más caen en entrevistas. Para cada caso, **tapá la solución y resolvelo vos primero en voz alta** siguiendo los 6 pasos; después contrastá. Lo que se evalúa no es si llegás a *mi* diseño, sino si recorrés bien: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs.
 
 **El método, en una línea** (de [system-design](system-design.md) módulo 1): **(1)** aclarar requisitos (sobre todo los **no funcionales**: escala, lectura/escritura, latencia, consistencia), **(2)** estimar (back-of-the-envelope), **(3)** API + modelo de datos, **(4)** diseño de alto nivel, **(5)** profundizar **donde duele**, **(6)** discutir trade-offs. No hay respuestas correctas, hay **decisiones justificadas**.
 
@@ -20,6 +20,7 @@
 7. Web crawler / cola de trabajos a escala — *frontera acotada + dedup probabilístico*
 8. Sistema de reservas / pagos — *consistencia fuerte + idempotencia transaccional*
 9. Uber / ride-sharing: proximidad y matching en tiempo real — *indexación espacial (geohash/quadtree)*
+10. Ad-click aggregator / métricas en tiempo real — *agregación en streaming por ventanas de event-time*
 
 > **El patrón que se repite.** Vas a ver que los mismos ladrillos reaparecen en casi todos los casos: **fan-out** (¿escribo a muchos en la escritura o leo de muchos en la lectura?), **caché del camino caliente**, **idempotencia ante reintentos**, **colas para desacoplar y absorber picos**, **sharding por la clave de acceso**, y **el caso patológico** (la celebridad, el prefijo popular, el archivo gigante). Aprender a *reconocer* qué ladrillo aplica es la mitad de la entrevista.
 
@@ -421,6 +422,68 @@ interface Conductor { driverId: string; pos: Punto }
 
 ---
 
+## Caso 10 — Ad-click aggregator / métricas en tiempo real
+
+**1. Requisitos.**
+- Funcionales: cada vez que un usuario ve o clickea un anuncio se genera un evento; el sistema **agrega** esos eventos por `(anuncio, ventana de tiempo)` y los expone de dos formas: un **dashboard** near-real-time para el anunciante ("clicks de tu campaña en el último minuto/hora") y la **facturación** (cobrarle al anunciante por click, *pay-per-click*).
+- No funcionales: **escritura-intensivo extremo** (el fire-hose de eventos); el dashboard tolera **segundos** de latencia y una respuesta aproximada; la facturación, en cambio, tiene que ser **correcta y reproducible** (cobrás plata: ni de más ni de menos); tolerar eventos **tardíos y desordenados** (un click ocurrido hace minutos llega ahora); poder **recalcular** si se descubre un bug en la agregación.
+
+**2. Estimación.** Una red de ads grande: ~10×10⁹ clicks/día → ~115K clicks/s promedio, con picos de varios ×. Las **impresiones** (cada vez que se muestra un ad) son ~100× más → del orden de **millones/s**. El volumen manda todo. Guardar cada evento crudo (~200 bytes) son ~2 TB/día solo de clicks; pero los **agregados** (por anuncio × minuto) son chicos. El cuello: **ingerir el fire-hose** y **agregar sin perder ni duplicar**, no la lectura del dashboard (que sobre agregados es trivial).
+
+**3. API y datos.** Ingestión asíncrona de alto volumen; lectura sobre datos ya agregados.
+```
+POST /events   { adId, tipo: "click"|"impression", eventId, userId, ts }   → 202 Accepted
+GET  /stats?adId=...&desde=...&hasta=...&granularidad=minuto                → { ventanas: [{ inicio, clicks, impresiones }] }
+```
+- Ingestión → un **log (Kafka)** particionado **por `adId`** (todo el historial de un anuncio va en orden a una partición — ver [Streams](streams.md) módulo 4); un **procesador de stream** consume y agrega por ventana de event-time.
+- Agregados a un store de lectura **columnar / time-series** (`ad_id | window_start | clicks | impressions`), el mundo **OLAP** (ver [Streams](streams.md) módulo 14): muchas filas, pocas columnas, consultas que suman rangos de tiempo. El log crudo se retiene (Kafka con retención larga / volcado a un *lake*) para poder **reprocesar**.
+
+**4. La decisión clave — agregar en el stream por *event-time*, no contar crudo en la lectura.** Si el dashboard contara los eventos crudos en cada refresh (`COUNT(*) WHERE ad_id=... AND ts BETWEEN ...`), cada carga escanearía miles de millones de filas — inviable. La técnica es **pre-agregar en el stream**: ventanas **tumbling** de 1 minuto por `adId` (ver [Streams](streams.md) módulo 9), sumando clicks a medida que llegan. La pregunta "clicks de este anuncio entre las 10:00 y 10:01" **ya está calculada**; leerla es O(1).
+
+Y el detalle que separa al senior: agrupás por **event-time** (cuándo ocurrió el click, el timestamp embebido) y **no** por processing-time (cuándo lo procesaste). Si agruparas por processing-time, reprocesar el mismo log mañana (otro reloj) pondría los eventos en **otras ventanas** → resultado distinto para los mismos datos → la facturación no sería reproducible (ver [Streams](streams.md) módulo 7). Event-time es la condición para que recalcular dé siempre lo mismo.
+
+**5. Donde duele — el evento tardío y el exactly-once de la facturación.** Dos problemas que definen el diseño:
+
+- **¿Cuándo cierro la ventana?** Un click de las 10:00 puede llegar a las 10:05 (la red móvil bufferea, el cliente reconecta). Si cerrás la ventana "10:00–10:01" apenas pasa el minuto de *processing-time*, ese click queda afuera → subcontás → le cobrás de menos al anunciante. La respuesta es el **watermark** ("ya vi todo hasta T, con un margen") que cierra la ventana cuando pasa su fin, más **allowed lateness** (mantener la ventana viva un rato extra para re-emitir si llega un tardío) y un **side output** para los que llegan *demasiado* tarde → corrección en batch (ver [Streams](streams.md) módulos 8 y 10). El margen del watermark **no es gratis**: cuanto más conservador (margen grande), menos tardíos perdés pero **más tarde** ve el dashboard la ventana cerrada — es el trade-off completitud-vs-latencia, el mismo de la detección de fallas.
+- **No contar de más (exactly-once para facturación).** La entrega de Kafka es **at-least-once**: si el procesador se cae y reprocesa, puede sumar el mismo click **dos veces** → le cobrás de más. Tres defensas, cada una en su capa: (a) **dedup por `eventId`** (cada evento —click o impresión— trae una idempotency key única) *antes* de sumar — un reproceso encuentra la key ya vista y la ignora; (b) **checkpointing** del estado del agregador (offset + estado de las ventanas guardados en el mismo punto del stream → restaurar reprocesa sin duplicar lo ya contado, [Streams](streams.md) módulo 11); (c) **sink idempotente**: el store de agregados se escribe con *upsert* por `(adId, window_start)`, así re-emitir una ventana sobrescribe en vez de duplicar.
+
+> **4 capas — el evento tardío que descuadra la facturación:**
+> 1. **Qué se rompe:** un click de las 10:00 llega a las 10:05; la ventana "10:00–10:01" ya cerró y emitió su total → ese click no se contó → al anunciante se le facturó de menos (y el dashboard mostró menos de lo real, *para siempre*).
+> 2. **Por qué a esta escala/uso:** con miles de millones de eventos por redes móviles que bufferean y reconectan, los eventos tardíos no son la excepción sino **permanentes**; y como esto **factura plata**, cada evento mal ubicado es dinero mal cobrado, no un detalle cosmético.
+> 3. **Control de corto plazo:** watermark calibrado al **p99 del lag** observado (no cerrar apenas pasa el minuto); allowed lateness para re-emitir la ventana si entra un tardío dentro del margen.
+> 4. **Cambio de diseño:** agregación por **event-time** + watermark + allowed lateness + **side output** a un canal batch que corrige los muy tardíos; y para la **verdad final** de facturación, un reproceso (Lambda/Kappa) que recalcula exacto desde el log crudo. El stream da el número rápido; el batch lo reconcilia.
+
+> **El matiz de fraude.** Una parte de los "clicks" son bots o clicks repetidos para inflar/agotar presupuestos. El **dedup por `eventId`** cubre el reintento *técnico* (el mismo evento entregado dos veces), pero **no** es detección de fraude (mismo usuario clickeando 100 veces, patrones de bot): eso es un sistema aparte (scoring, reglas, ML) que filtra el stream antes de facturar. Declaralo fuera de scope salvo que lo pidan — pero nombralo, porque en ads es donde está la plata.
+
+**6. Trade-offs.**
+- **Lambda vs Kappa** (ver [Streams](streams.md) módulo 15): el dashboard quiere "rápido y aproximado ahora", la facturación quiere "exacto" (y tolera horas). **Lambda**: el *speed layer* (stream) da el número en vivo y un *batch layer* nocturno recalcula la verdad para facturar — dos bases de código que deben coincidir. **Kappa**: un solo pipeline por event-time; para recalcular, **reprocesás el log** desde el offset afectado con el job corregido. La tendencia 2026 es Kappa, pero Lambda sobrevive justo acá, donde la facturación exige una pasada batch reconciliada e independiente. Ojo: el reproceso de Kappa es "gratis" en código pero **paga en retención** — exige que el log crudo siga guardado hasta el offset que querés recalcular, y a 2 TB/día (solo clicks) retener semanas o meses es un costo de almacenamiento real; si no podés retener el log lo suficiente, no podés reprocesar.
+- **Pre-agregar vs guardar crudo:** pre-agregar por minuto da lecturas O(1), pero si **solo** guardaras los agregados no podrías re-preguntar a otra granularidad ni reprocesar tras un bug. Por eso se guardan **las dos cosas**: el log crudo (para Kappa/auditoría) **y** los agregados (para servir el dashboard).
+- **Contar uniques ≠ contar eventos.** "¿Cuántos usuarios **únicos** vieron este ad?" no es sumable: no podés sumar los únicos de dos ventanas (el mismo usuario cuenta en ambas). Para cardinalidad a escala se usa **HyperLogLog** (conteo aproximado con poca memoria y error acotado), no un `COUNT(DISTINCT)` exacto. Es un eje distinto al de sumar clicks.
+- **El límite del exactly-once:** vale **dentro** de Kafka (productor idempotente + transacciones); cuando el efecto cruza al store de facturación, esa escritura tiene que ser **idempotente** (upsert por ventana) o se duplica al reprocesar.
+
+> **El cierre de criterio — no sobre-diseñar.** ¿Contás page-views de tu blog o eventos de producto de una app con miles de usuarios? Un `INSERT` por evento y un `GROUP BY date_trunc('minute', ts), ad_id` sobre Postgres con un índice alcanza; o un contador en Redis (`INCR` sobre la clave `ad:{id}:{minuto}` con TTL). Para algo más serio, un Mixpanel/GA o un ClickHouse con `INSERT` directo. El pipeline Kafka + ventanas por event-time + watermarks + Lambda/Kappa es para **volumen de red publicitaria** (miles de millones/día) donde, además, **se factura** sobre el número y un error cuesta plata.
+
+**Ejercicios — Caso 10**
+10.1 🔁 ¿Por qué se **pre-agrega** en el stream en vez de contar los eventos crudos en cada lectura del dashboard?
+10.2 🧠 ¿Por qué agrupás por **event-time** y no processing-time, y qué le pasa a la facturación si usás processing-time?
+10.3 🧠 La entrega es at-least-once y esto **factura plata**. Nombrá los tres mecanismos que evitan contar un click de más (o de menos) y dónde actúa cada uno.
+10.4 🧠 El dashboard quiere el número **ya** y la facturación lo quiere **exacto**. ¿Cómo concilia eso Lambda, y cómo lo haría Kappa?
+10.5 ✍️ Escribí `agregarPorVentana(eventos)` que agregue clicks por `(adId, ventana tumbling de 1 minuto)` **por event-time**, deduplicando por `eventId` (la entrega es at-least-once). Usá los tipos de abajo.
+```ts
+interface ClickEvent {
+  adId: string;
+  eventId: string;     // id único del evento (idempotency key)
+  eventTimeMs: number; // event-time en epoch ms (cuándo ocurrió el click)
+}
+interface VentanaAgg {
+  adId: string;
+  windowStartMs: number; // inicio de la ventana de 1 min que contiene al evento
+  clicks: number;
+}
+```
+
+---
+
 # Soluciones
 
 > Mirá esto solo después de intentar cada caso en voz alta. Casi todas son de **criterio**: si tu razonamiento difiere pero justifica bien el trade-off, probablemente también esté bien. En diseño de sistemas, el *cómo* justificás importa más que el *qué* elegís.
@@ -549,8 +612,59 @@ function masCercanos(
 
 **9.5** La distancia en línea recta (haversine) es barata y no depende de nada externo, pero ignora la red de calles: el más cercano "a vuelo de pájaro" puede estar a 10 minutos por una autopista, en sentido contrario, o del otro lado de un río sin puente. Rankear por **ETA real** (tiempo de llegada considerando calles, sentido y tráfico) da mejores matches, pero introduce una **dependencia nueva**: un servicio de **routing/ETA** (mapas + tráfico en vivo) que hay que llamar por candidato → más latencia y costo por request. El patrón que usa la industria es el mismo **dos fases** del 9.4: broad-phase con geohash + distancia recta para sacar un puñado de candidatos baratos, y narrow-phase llamando al servicio de ETA **solo sobre esos pocos**, no sobre todos los conductores. El filtro grueso (geométrico) descarta; el filtro fino (ETA, caro) decide.
 
-Estos 9 casos cubren los patrones que más caen: fan-out, tiempo real, async con colas, lectura-intensivo con precómputo, separación metadata/contenido, estado compartido atómico, procesamiento masivo, consistencia fuerte transaccional e indexación espacial. Para seguir:
+### Caso 10 — Ad-click aggregator / métricas en tiempo real
+**10.1** Porque contar los eventos crudos en cada lectura (`COUNT(*)` sobre miles de millones de filas por cada refresh del dashboard) es inviable a este volumen. **Pre-agregar** en el stream —sumar clicks por `(adId, ventana de 1 min)` a medida que llegan— hace que la respuesta **ya exista**: leer "clicks entre las 10:00 y 10:01" es O(1) sobre una fila agregada, no un scan. Pagás el cómputo una vez, al ingerir, en vez de repetirlo en cada lectura.
 
-- **Resolvé en voz alta los que faltan**, reusando los mismos ladrillos: "diseñá YouTube/Netflix" (transcoding + CDN + el caso 5 de almacenamiento), "diseñá un ad-click aggregator / sistema de métricas" (streaming + ventanas + el caso 3 de colas), "diseñá Google Docs" (colaboración en vivo + el caso 2 de tiempo real). Lo que se evalúa es el recorrido, no la respuesta.
+**10.2** Porque **event-time** (cuándo ocurrió el click) es fijo: el mismo evento cae siempre en la misma ventana, así que reprocesar el log da el **mismo resultado** (reproducible). Con **processing-time** (cuándo lo procesaste), reprocesar otro día usa otro reloj → los eventos caen en **otras ventanas** → otro total para los mismos datos. Para la facturación eso es fatal: el número con el que cobrás dependería de *cuándo* corriste el job, no de los clicks reales, y un evento tardío de las 10:00 que llega a las 10:05 se cobraría en la ventana equivocada (o no se cobraría).
+
+**10.3** (1) **Dedup por `eventId`** (idempotency key del evento), **antes de sumar**: un reproceso encuentra la key ya vista y no la vuelve a contar — defiende contra el duplicado en el procesador. (2) **Checkpointing** del estado del agregador (estado de las ventanas + offset guardados en el mismo punto): al reiniciar tras una caída, reprocesa desde el offset sin duplicar lo ya reflejado ni perder lo posterior — defiende el estado interno. (3) **Sink idempotente**: el store de agregados se escribe con *upsert* por `(adId, window_start)`, de modo que re-emitir una ventana (por allowed lateness o reproceso) **sobrescribe** en vez de duplicar — defiende el efecto externo, que el checkpoint no cubre. Y para no contar de **menos**: watermark + allowed lateness para no descartar los tardíos.
+
+**10.4** **Lambda** corre dos caminos: el *speed layer* (stream) da el número en vivo, aproximado y rápido para el dashboard; un *batch layer* recalcula periódicamente la **verdad exacta** sobre todos los datos para facturar; el *serving layer* sirve el speed para lo reciente y el batch para lo consolidado. **Kappa** usa un solo pipeline de stream por event-time: el dashboard lee el resultado en vivo, y para la verdad de facturación (o para corregir un bug) **reprocesa el log** desde el offset afectado con el job corregido y hace el switch. Lambda paga con dos bases de código que deben coincidir; Kappa, con exigir un log reproducible y procesamiento por event-time.
+
+**10.5**
+```ts
+interface ClickEvent {
+  adId: string;
+  eventId: string;
+  eventTimeMs: number;
+}
+interface VentanaAgg {
+  adId: string;
+  windowStartMs: number;
+  clicks: number;
+}
+
+const VENTANA_MS = 60_000; // 1 minuto
+
+function agregarPorVentana(eventos: ClickEvent[]): VentanaAgg[] {
+  const vistos = new Set<string>();             // dedup por eventId (entrega at-least-once)
+  const conteo = new Map<string, VentanaAgg>();  // key = `${adId}:${windowStartMs}`
+
+  for (const ev of eventos) {
+    if (vistos.has(ev.eventId)) continue;        // ya contado → un reproceso no duplica
+    vistos.add(ev.eventId);
+
+    // Ventana tumbling por EVENT-TIME: el inicio del minuto que contiene al evento.
+    const windowStartMs = Math.floor(ev.eventTimeMs / VENTANA_MS) * VENTANA_MS;
+    const key = `${ev.adId}:${windowStartMs}`;
+
+    const actual = conteo.get(key);              // Map.get → VentanaAgg | undefined en --strict
+    if (actual === undefined) {
+      conteo.set(key, { adId: ev.adId, windowStartMs, clicks: 1 });
+    } else {
+      actual.clicks += 1;
+    }
+  }
+  return [...conteo.values()];
+}
+// La ventana sale del event-time del evento, no del reloj → reprocesar da el mismo resultado.
+// OJO en producción: este `vistos` crece sin límite. El dedup real es ACOTADO —
+// por ventana (se descarta junto con el estado de la ventana al cerrarla) o con TTL—,
+// porque no podés guardar todos los eventId del historial en memoria.
+```
+
+Estos 10 casos cubren los patrones que más caen: fan-out, tiempo real, async con colas, lectura-intensivo con precómputo, separación metadata/contenido, estado compartido atómico, procesamiento masivo, consistencia fuerte transaccional, indexación espacial y agregación en streaming por event-time. Para seguir:
+
+- **Resolvé en voz alta los que faltan**, reusando los mismos ladrillos: "diseñá YouTube/Netflix" (transcoding + CDN + el caso 5 de almacenamiento), "diseñá Google Docs" (colaboración en vivo con OT/CRDT + el caso 2 de tiempo real), "diseñá un payment ledger" (doble entrada + el caso 8 de consistencia fuerte). Lo que se evalúa es el recorrido, no la respuesta.
 - **Conectá cada decisión con su implementación en el hub:** colas e idempotencia en [Event-driven](event-driven.md) y [Redis](redis.md), el contrato de cada API en [API design](api-design.md), tiempo real en [Tiempo real](tiempo-real.md), datos en [PostgreSQL](postgresql.md)/[NoSQL](nosql.md), control de flujo en [Concurrencia](concurrencia.md), y cómo operarlo en [Observabilidad](observabilidad.md).
-- **Volvé al método** de [Diseño de sistemas](system-design.md) módulo 1 cada vez: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs. El método es el mismo para los 9 casos y para cualquier problema nuevo que te tiren.
+- **Volvé al método** de [Diseño de sistemas](system-design.md) módulo 1 cada vez: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs. El método es el mismo para los 10 casos y para cualquier problema nuevo que te tiren.
