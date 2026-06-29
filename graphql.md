@@ -151,18 +151,27 @@ query GetUser($id: ID!) {        # $id es una variable tipada
 
 Otras piezas del lenguaje: **alias** (renombrar un campo en la respuesta), **fragments** (reutilizar un set de campos), y **directivas** como `@include(if:)` / `@skip(if:)` para campos condicionales.
 
-Las **subscriptions** en 2026 usan el protocolo **`graphql-ws`** sobre WebSocket (el viejo `subscriptions-transport-ws` quedó deprecado y sin mantenimiento — si ves tutoriales con ese, están viejos). También existe transporte sobre **HTTP/SSE** (`graphql-sse`) para cuando no querés mantener un socket abierto, pero WebSocket sigue siendo lo estándar.
+Una subscription se declara en el schema como cualquier operación raíz:
+
+```graphql
+type Subscription {
+  taskAdded: Task!        # el server empuja un Task cada vez que se crea uno
+}
+```
+
+Las **subscriptions** en 2026 usan la librería **`graphql-ws`** sobre WebSocket (el viejo `subscriptions-transport-ws` quedó deprecado y sin mantenimiento — si ves tutoriales con ese, están viejos). Ojo con un detalle que confunde al configurar: la librería es `graphql-ws`, pero el **sub-protocolo** WebSocket que negocian cliente y server se llama **`graphql-transport-ws`** (vas a tener que nombrarlo en la config de ambos lados). También existe transporte sobre **HTTP/SSE** (`graphql-sse`) para cuando no querés mantener un socket abierto, pero WebSocket sigue siendo lo estándar.
 
 **Ejercicios 3**
 3.1 🔁 ¿Por qué las mutations se ejecutan en serie y las queries en paralelo?
 3.2 ✍️ Escribí una query `GetProject($id: ID!)` que traiga el `title`, el `status` y el `name` del `owner`.
 3.3 🧠 ¿Para qué sirve un *fragment* y qué problema de mantenimiento evita cuando tenés 5 componentes que muestran un `User`?
+3.4 🧠 ¿Cuándo usarías una `subscription` y cuándo te alcanza con polling/refetch desde el cliente? Dá un caso de cada uno.
 
 ---
 
 ## Módulo 4 — Resolvers: la unidad de ejecución
 
-**Teoría.** Un **resolver** es la función que produce el valor de un campo. GraphQL resuelve una query recorriendo el árbol: ejecuta el resolver de `user`, y con ese resultado ejecuta el resolver de `user.projects`, y así. Cada resolver recibe cuatro argumentos:
+**Teoría.** Un **resolver** es la función que produce el valor de un campo. GraphQL resuelve una query recorriendo el árbol: ejecuta el resolver de `user`, y con ese resultado ejecuta el resolver de `user.projects`, y así. Cada resolver recibe cuatro argumentos (firma **conceptual**, para fijar el modelo mental — el tipo real exportado por `graphql` es `GraphQLFieldResolver<TSource, TContext, TArgs>` y NestJS te abstrae todo esto con decoradores, módulo 6):
 
 ```ts
 type Resolver<TParent, TArgs, TContext, TResult> = (
@@ -227,6 +236,8 @@ El resolver de `owner` pasa a ser `context.userLoader.load(project.ownerId)` en 
 ## Módulo 6 — GraphQL en NestJS: code-first
 
 **Teoría.** NestJS integra GraphQL vía `@nestjs/graphql` + `@nestjs/apollo`, usando el `ApolloDriver`. Hoy corre sobre **Apollo Server 5**: `@nestjs/apollo` v13+ ya pide `@apollo/server` v5 (Apollo Server 4 quedó **EOL en enero de 2026**, y ya no se instala el viejo `apollo-server-express`). Hay dos enfoques:
+
+> ⚠️ **Gotcha al migrar a AS5:** el viejo plugin del Playground (`@apollo/server-plugin-landing-page-graphql-playground`) quedó deprecado y da warnings de peer-dep con Apollo Server 5. En AS5 usás la landing page nativa (`ApolloServerPluginLandingPageLocalDefault` en dev, o la apagás en prod). Si seguís un tutorial viejo que instala el plugin de Playground, ese es el ruido que vas a ver.
 
 - **Schema-first:** escribís el SDL a mano y Nest genera los tipos TS.
 - **Code-first** (el recomendado en proyectos TS): escribís **clases decoradas** y Nest **genera el SDL** automáticamente. Una sola fuente de verdad, todo tipado.
@@ -345,7 +356,7 @@ Conceptos:
 **Ejercicios 8**
 8.1 🔁 ¿Por qué una respuesta GraphQL con errores suele venir con HTTP 200?
 8.2 🧠 ¿Por qué el cliente debería ramificar por `extensions.code` y no por el `message`?
-8.3 🧠 Una query pide `user { name email }` y `email` (non-null) falla por permisos. ¿Qué le llega al cliente en `data`, y por qué? Razoná el burbujeo del null y qué pasa con `name` y con `user`.
+8.3 🧠 Una query pide `user { name email }` donde `user: User` es **nullable** (como en el módulo 2) y `email: String!` es non-null. `email` falla por permisos. ¿Qué le llega al cliente en `data`, y por qué? Razoná el burbujeo del null y qué pasa con `name` y con `user`. Como extensión: ¿qué cambiaría si `user` también fuera non-null?
 
 ---
 
@@ -379,6 +390,8 @@ type Query {
 
 Parece verboso, pero te da un formato consistente que los clientes (Apollo, Relay) saben paginar solos con caché incremental.
 
+> **El cursor es opaco a propósito.** Para el cliente es una cadena sin significado (típicamente el `id` o la sort key codificados en base64); lo recibe en `endCursor` y lo pasa tal cual en el próximo `after`, **nunca lo interpreta ni lo construye**. Esa opacidad es justo lo que te deja cambiar la implementación interna (de id a un campo compuesto, por ejemplo) sin romper a nadie — y evita el antipatrón de tratar el cursor como un offset disfrazado.
+
 **Ejercicios 9**
 9.1 🧠 ¿Por qué la paginación por offset se "rompe" si se insertan filas mientras un usuario pagina? Dá el escenario concreto.
 9.2 🔁 En el patrón Relay, ¿qué es un `edge`, qué es un `node` y qué es el `cursor`?
@@ -392,7 +405,7 @@ Parece verboso, pero te da un formato consistente que los clientes (Apollo, Rela
 
 **1) Limitar lo que ENTRA** (controlar la query *antes* de ejecutarla):
 
-- **Profundidad (depth limiting):** una query maliciosa anida `user { projects { owner { projects { owner { ... } } } } }` para colgar el server. Cortás a una profundidad máxima. El paquete clásico es `graphql-depth-limit`, pero ojo: está sin mantener desde 2022 y necesita `@types/graphql-depth-limit` aparte. Hoy se prefiere resolverlo con `graphql-query-complexity`, reglas de validación propias o **GraphQL Armor**.
+- **Profundidad (depth limiting):** una query maliciosa anida `user { projects { owner { projects { owner { ... } } } } }` para colgar el server. Cortás a una profundidad máxima. El paquete clásico es `graphql-depth-limit`, pero ojo: está sin mantener desde 2022 y necesita `@types/graphql-depth-limit` aparte. Hoy, para *solo* limitar profundidad, el sucesor mantenido es **`@graphile/depth-limit`**; y si querés algo más completo, `graphql-query-complexity`, reglas de validación propias o **GraphQL Armor** (que empaqueta depth + complexity + más defensas).
 - **Complejidad (query complexity):** asignás un costo a cada campo y rechazás queries que superan un presupuesto (`graphql-query-complexity`). Es más fino que la profundidad sola.
 - **Persisted queries / allow-list:** el cliente solo manda un **hash** de queries pre-aprobadas; el server rechaza cualquier query ad-hoc. Mata la superficie de ataque.
 - **Introspección apagada en prod** (o restringida): la introspección expone tu schema entero. Útil en dev, riesgosa abierta al público.
@@ -414,6 +427,8 @@ Parece verboso, pero te da un formato consistente que los clientes (Apollo, Rela
 ## Módulo 11 — El cliente: Apollo Client
 
 **Teoría.** Acá juega tu experiencia de React. **Apollo Client** es el cliente más usado; su superpoder es el **caché normalizado**: guarda cada objeto por su `__typename` + `id` en un store plano, así dos queries que traen el mismo `User` comparten una sola copia. Actualizar ese `User` refresca toda la UI que lo usa.
+
+> **No es la única opción** (mismo espíritu "cuándo NO" del módulo 12): **urql** es más liviano y modular; y si NO necesitás caché normalizado, `graphql-request` + **TanStack Query** te da fetching y caché por-query con mucho menos peso. Apollo gana cuando el caché normalizado (entidades compartidas que se actualizan solas en toda la UI) te paga su tamaño.
 
 > **Si normalizaste estado en Redux, ya lo conocés.** Es la misma idea que predica la doc de Redux/RTK: en vez de guardar el árbol anidado, guardás cada entidad **una sola vez** indexada por su id (`User:1`) y el resto referencia. Frase mental: **el caché de Apollo es una mini base de datos en memoria, indexada por `__typename:id`.** Por eso necesita el `id`: es la clave primaria de esa base.
 
@@ -518,6 +533,8 @@ query GetProject($id: ID!) {
 ```
 **3.3** Un fragment es un set de campos reutilizable (`fragment UserCard on User { id name email }`). Si 5 componentes muestran un `User` y mañana agregás `avatarUrl`, sin fragment tocás 5 queries; con fragment, tocás una y los 5 se actualizan. Evita la divergencia entre componentes que muestran lo mismo.
 
+**3.4** **Subscription** cuando necesitás *push* del server con baja latencia y eventos que no controlás: un chat, notificaciones en vivo, el estado de un pedido que cambia desde otro actor, un dashboard de cotizaciones. **Polling/refetch** cuando el dato cambia poco o tolerás algo de retraso, o cuando no querés el costo de mantener un WebSocket abierto por cliente: un listado que refrescás cada 30s, un "tirá para actualizar". Regla práctica: la subscription paga su complejidad (infra de sockets, reconexión, escalado) solo si el tiempo real es parte del producto; si no, el refetch es más simple y barato.
+
 ### Módulo 4
 **4.1** `parent` (el resultado del resolver padre), `args` (los argumentos del campo), `context` (estado compartido del request) e `info` (metadata de la query). `parent` es lo que permite la resolución encadenada: el resolver de `projects` recibe el `User` ya resuelto y con su `id` busca los proyectos.
 
@@ -529,25 +546,29 @@ query GetProject($id: ID!) {
 **5.1** Resolvés `projects` con 1 query que trae 100 proyectos. Después, GraphQL ejecuta el resolver de `owner` una vez por proyecto: 100 queries `SELECT ... WHERE id = ?`. Total 101 (1 + N) para algo que deberían ser 2. Cuantos más proyectos, peor.
 
 **5.2** Porque DataLoader devuelve los resultados **por posición**: el `load(idX)` que hiciste se resuelve con el elemento que está en la misma posición que `idX` en el array de entrada. Si la batch function devuelve en otro orden (ej. el que vino de la base), cada `load` recibe el dato equivocado. Por eso se mapea contra los ids originales con un `Map`.
+La versión **canónica** (la que usarías en producción): la batch function va a la base **una sola vez** con todos los `ownerId`, y después agrupa el resultado por `ownerId` para devolver, en orden, el array de cada uno.
+
 ```ts
-// 5.3
-function batchProjectsByOwner(
-  projects: Project[],
-): (ownerIds: readonly string[]) => Project[][] {
-  return (ownerIds) => {
-    const byOwner = new Map<string, Project[]>();
-    for (const p of projects) {
-      const arr = byOwner.get(p.ownerId) ?? [];
-      arr.push(p);
-      byOwner.set(p.ownerId, arr);
-    }
-    return ownerIds.map((id) => byOwner.get(id) ?? []);   // en orden, [] si no tiene
-  };
+// 5.3 — la que usás de verdad: 1 query para todos los owners del batch
+async function batchProjectsByOwner(
+  ownerIds: readonly string[],
+  repo: ProjectRepo,
+): Promise<Project[][]> {
+  const projects = await repo.findByOwnerIds([...ownerIds]);   // 1 sola query (WHERE owner_id IN (...))
+  const byOwner = new Map<string, Project[]>();
+  for (const p of projects) {
+    const arr = byOwner.get(p.ownerId) ?? [];
+    arr.push(p);
+    byOwner.set(p.ownerId, arr);
+  }
+  return ownerIds.map((id) => byOwner.get(id) ?? []);   // EN ORDEN; [] si el owner no tiene proyectos
 }
-// En un loader real: new DataLoader(async (ownerIds) => {
-//   const projects = await repo.findByOwnerIds([...ownerIds]); ...mismo agrupado
-// })
+
+// se enchufa al loader así:
+// new DataLoader<string, Project[]>((ownerIds) => batchProjectsByOwner(ownerIds, repo))
 ```
+
+Lo importante es el **agrupado en orden**: devolvés un array por cada `ownerId` recibido, en la misma posición (igual que con un loader de a uno, módulo 5.2), y `[]` —no `null`— para el owner sin proyectos. (Si los proyectos ya estuvieran cargados en memoria, el mismo agrupado aplica sin el `await`; pero el sentido de DataLoader es justamente reemplazar las N queries por **una**, así que la versión real va a la base.)
 **5.4** Porque el caching de DataLoader es por-request a propósito: cachea el `User 1` que cargaste. Si el loader fuera global, ese `User 1` quedaría cacheado entre requests y le servirías datos potencialmente viejos —o de otro tenant— a un usuario distinto. El loader se crea fresco en el context de cada request (módulo 7).
 
 ### Módulo 6
