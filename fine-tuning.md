@@ -78,7 +78,8 @@ from trl import SFTTrainer
 
 lora_config = LoraConfig(
     r=16,                       # rank: 16 suele alcanzar (ver abajo)
-    lora_alpha=16,
+    lora_alpha=16,              # escala α/r=1; otra convención común es alpha=2*r (escala 2).
+                                #   Con el learning rate correcto el efecto es menor (es la tesis del módulo)
     target_modules="all-linear",  # CLAVE: todas las capas lineales, no solo attention
     lora_dropout=0.05,
     task_type="CAUSAL_LM",
@@ -87,7 +88,8 @@ lora_config = LoraConfig(
 trainer = SFTTrainer(
     # API de TRL volátil entre versiones: la firma de SFTTrainer/SFTConfig cambió
     # (p. ej. tokenizer → processing_class). Verificá la doc de tu versión.
-    model="meta-llama/Llama-3.1-8B",
+    model="meta-llama/Llama-3.1-8B",  # acá pasás el ID y TRL carga el base; con QLoRA (módulo 5)
+                                       #   pasás el modelo YA instanciado en 4-bit (ver allá)
     train_dataset=dataset,       # tus ejemplos {prompt, respuesta deseada}
     peft_config=lora_config,
     # learning rate ~2e-4: más alto que en full fine-tuning
@@ -119,6 +121,18 @@ bnb_config = BitsAndBytesConfig(
     bnb_4bit_use_double_quant=True,
 )
 # El base se carga en 4-bit; los adapters LoRA se entrenan en bf16 encima.
+
+from transformers import AutoModelForCausalLM
+from peft import prepare_model_for_kbit_training
+
+# Acá está el puente con el módulo 4: con QLoRA cargás el base 4-bit VOS MISMO y
+# se lo pasás al trainer ya instanciado (no como string).
+model = AutoModelForCausalLM.from_pretrained(
+    "meta-llama/Llama-3.1-8B",
+    quantization_config=bnb_config,       # ← acá se enchufa
+)
+model = prepare_model_for_kbit_training(model)   # prepara el base cuantizado para entrenar adapters
+# trainer = SFTTrainer(model=model, train_dataset=dataset, peft_config=lora_config)  # mismo lora_config del módulo 4
 ```
 
 > **Cuidado con un cruce de conceptos** (puente con [deploy-ai.md](deploy-ai.md)): la cuantización aparece en **dos** lugares distintos y no son lo mismo:
@@ -142,6 +156,11 @@ Tras "LoRA Without Regret", el balance se inclinó **más** hacia PEFT. La decis
 
 Sobre el supuesto "comeback de full fine-tuning" con modelos chicos (1-3B): es **factibilidad, no superioridad**. Que ahora full FT sea *barato* en modelos chicos no significa que sea *mejor* — LoRA bien tuneado lo iguala igual.
 
+> **Higiene del fine-tune** (criterio, no hiperparámetros — esto es lo que separa un fine-tune que sirve de uno que parece servir):
+> - **Chat template.** Tu dataset `{prompt, respuesta}` hay que aplicarlo al **template de chat del modelo instruct** (los tokens de rol que el modelo espera). Entrenar con el formato equivocado es la fuente #1 de bugs silenciosos: el loss baja pero en inferencia el modelo no "habla" como esperás.
+> - **Merge para servir.** Terminado el entrenamiento, o servís el adapter LoRA por separado (lo que habilita el multi-adapter de arriba), o lo **fusionás** al base con `merge_and_unload()` para tener un solo modelo sin overhead de adapter en inferencia. Multi-adapter = adapter aparte; un solo cliente de alto volumen = merge.
+> - **Overfitting.** Separá **train/eval**, mirá el loss de validación y usá **early-stopping**: con datasets chicos (lo normal en fine-tuning de app) el modelo memoriza rápido y se sobreajusta. Sin un eval set no sabés si mejoró o si solo memorizó tus ejemplos (puente con [evals.md](evals.md)).
+
 ---
 
 ## Módulo 7 — Alignment: de RLHF a DPO
@@ -150,9 +169,9 @@ Hasta acá vimos **SFT** (supervised fine-tuning): le mostrás ejemplos de entra
 
 El método clásico es **RLHF** (Reinforcement Learning from Human Feedback): entrenás un *reward model* con comparaciones humanas y después optimizás el modelo con RL (**PPO**) contra ese reward. Funciona pero es pesado: reward model aparte, sampling online, un critic, mucha GPU. Hoy **PPO-RLHF clásico es sobre todo territorio de los labs frontera** (es como Anthropic hace Constitutional AI, ver [seguridad-ia.md](seguridad-ia.md)).
 
-**DPO** (Direct Preference Optimization) lo reemplazó para el caso práctico. Colapsa todo RLHF en **una pérdida contrastiva supervisada**: le das pares `(respuesta preferida, respuesta rechazada)` y el modelo aprende a preferir la buena directamente — sin reward model, sin sampling online, sin critic. La mitad del footprint de GPU que PPO.
+**DPO** (Direct Preference Optimization) lo reemplazó para el caso práctico. Colapsa todo RLHF en **una pérdida contrastiva supervisada**: le das pares `(respuesta preferida, respuesta rechazada)` y el modelo aprende a preferir la buena directamente — sin reward model, sin sampling online, sin critic. Eso baja la complejidad operativa en aproximadamente un orden de magnitud respecto de PPO (el ahorro exacto de GPU varía según el setup; el punto es que elimina el reward model online y el critic).
 
-> **One-liner para recordar:** **DPO alinea el *gusto*** (qué le gusta a los humanos: tono, utilidad, seguridad).
+> **One-liner para recordar:** **DPO alinea el *gusto*** (qué le gusta a los humanos: tono, utilidad, seguridad). *(La otra mitad —entrenar la **competencia**, no el gusto— viene en el módulo 8: RLVR/GRPO.)*
 
 Variantes como KTO, ORPO, SimPO existen pero son **nicho** — tanto que TRL las dejó en "experimental" mientras DPO está en el core estable. No las necesitás para empezar.
 
@@ -183,8 +202,8 @@ Esta es, probablemente, **la única forma de fine-tuning que un app dev podría 
 
 Cuándo conviene: tenés una tarea **angosta y de alto volumen** (clasificación, routing, extracción, generar SQL) donde el modelo grande funciona pero es caro/lento. Destilás a un modelo chico especializado. Evidencia real: modelos open-source chicos fine-tuneados superando a modelos cerrados grandes **en esa tarea específica** (Predibase *LoRA Land*, Together) — con la salvedad de que esas empresas venden fine-tuning.
 
-Estado de los productos (dato volátil, verificar):
-- **OpenAI** está **cerrando su fine-tuning self-serve** (deprecación escalonada hacia 2027). No apuestes la pipeline de distillation al producto first-party de OpenAI.
+Estado de los productos (dato volátil — **estado a jun 2026**, reverificá antes de apostar nada):
+- **OpenAI** está **cerrando su fine-tuning self-serve** (deprecación escalonada, corte ~6-ene-2027). No apuestes la pipeline de distillation al producto first-party de OpenAI.
 - **Anthropic / Claude**: **no hay API pública de fine-tuning**. Está disponible vía **Amazon Bedrock** (fine-tuning de Haiku, distillation desde Sonnet) y para enterprise. Anthropic apuesta, para el caso general, a **system prompt + few-shot + prompt caching** en vez de fine-tuning — lo cual refuerza todo el Módulo 1.
 - Camino más durable: **Bedrock / Azure / modelos open-weights** que controlás vos.
 
@@ -231,7 +250,7 @@ Conexiones: [prompt-engineering.md](prompt-engineering.md) (lo que probás antes
 > El foco es **criterio de decisión**, no memorizar hiperparámetros.
 
 ### Ejercicio 1 — ¿Fine-tuning, RAG o prompting?
-Para cada caso, decidí la herramienta correcta y justificá en términos de "hechos vs forma":
+Para cada caso, decidí la herramienta correcta y justificá en términos de "hechos vs forma" (y notá si alguno se resuelve antes con **structured output**, que no encaja limpio en ese eje):
 a) Querés que el modelo responda siempre en JSON con un schema fijo.
 b) Querés que el chatbot conozca las 4.000 páginas de documentación interna de tu empresa, que cambia cada semana.
 c) Querés que el modelo escriba con el tono de marca de tu empresa (informal, con emojis, frases cortas).
