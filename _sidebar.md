@@ -71,6 +71,7 @@
   - [🗂️ Banco de casos de diseño](system-design-casos.md)
   - [✅ Checklist de entrevista (4 capas)](system-design-checklist.md)
   - [📐 Diseño de APIs y contratos](api-design.md)
+  - [🛰️ Networking y protocolos a escala](networking.md)
   - [🤝 Consenso y coordinación distribuida](consenso.md)
   - [🛠️ Consenso: laboratorio práctico](consenso-practica.md)
   - [🔁 Replicación, multi-región y conflictos](replicacion.md)
