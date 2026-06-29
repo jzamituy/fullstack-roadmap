@@ -1,8 +1,8 @@
-# Banco de casos de diseño de sistemas: 8 problemas resueltos de punta a punta
+# Banco de casos de diseño de sistemas: 9 problemas resueltos de punta a punta
 
-**Los casos clásicos de entrevista senior, resueltos con el método · feed, chat, notificaciones, typeahead, archivos, rate limiter, crawler, reservas/pagos · el recorrido importa más que la respuesta · 2026**
+**Los casos clásicos de entrevista senior, resueltos con el método · feed, chat, notificaciones, typeahead, archivos, rate limiter, crawler, reservas/pagos, proximidad · el recorrido importa más que la respuesta · 2026**
 
-> Cómo usar este banco: este módulo es la **práctica** de [Diseño de sistemas backend](system-design.md). Ahí aprendiste el método y el criterio; acá los aplicamos a los 8 problemas que más caen en entrevistas. Para cada caso, **tapá la solución y resolvelo vos primero en voz alta** siguiendo los 6 pasos; después contrastá. Lo que se evalúa no es si llegás a *mi* diseño, sino si recorrés bien: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs.
+> Cómo usar este banco: este módulo es la **práctica** de [Diseño de sistemas backend](system-design.md). Ahí aprendiste el método y el criterio; acá los aplicamos a los 9 problemas que más caen en entrevistas. Para cada caso, **tapá la solución y resolvelo vos primero en voz alta** siguiendo los 6 pasos; después contrastá. Lo que se evalúa no es si llegás a *mi* diseño, sino si recorrés bien: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs.
 
 **El método, en una línea** (de [system-design](system-design.md) módulo 1): **(1)** aclarar requisitos (sobre todo los **no funcionales**: escala, lectura/escritura, latencia, consistencia), **(2)** estimar (back-of-the-envelope), **(3)** API + modelo de datos, **(4)** diseño de alto nivel, **(5)** profundizar **donde duele**, **(6)** discutir trade-offs. No hay respuestas correctas, hay **decisiones justificadas**.
 
@@ -19,6 +19,7 @@
 6. Rate limiter distribuido — *estado compartido atómico*
 7. Web crawler / cola de trabajos a escala — *frontera acotada + dedup probabilístico*
 8. Sistema de reservas / pagos — *consistencia fuerte + idempotencia transaccional*
+9. Uber / ride-sharing: proximidad y matching en tiempo real — *indexación espacial (geohash/quadtree)*
 
 > **El patrón que se repite.** Vas a ver que los mismos ladrillos reaparecen en casi todos los casos: **fan-out** (¿escribo a muchos en la escritura o leo de muchos en la lectura?), **caché del camino caliente**, **idempotencia ante reintentos**, **colas para desacoplar y absorber picos**, **sharding por la clave de acceso**, y **el caso patológico** (la celebridad, el prefijo popular, el archivo gigante). Aprender a *reconocer* qué ladrillo aplica es la mitad de la entrevista.
 
@@ -371,6 +372,55 @@ interface SeatRepo {
 
 ---
 
+## Caso 9 — Uber / ride-sharing: proximidad y matching en tiempo real
+
+**1. Requisitos.**
+- Funcionales: un pasajero pide un viaje desde su ubicación; el sistema encuentra **conductores cercanos disponibles** y hace el **matching** (asigna uno); durante el viaje, pasajero y conductor ven la ubicación del otro en tiempo real.
+- No funcionales: los conductores **reportan su ubicación cada pocos segundos** → escritura-intensivo de ubicaciones; la búsqueda "conductores cerca de mí" tiene que ser de **baja latencia** sobre datos que cambian sin parar; un conductor **no** puede asignarse a dos pasajeros a la vez (consistencia en la asignación); casi todos los viajes son **locales** (el sistema escala por ciudad/región, no global por viaje).
+
+**2. Estimación.** 5M conductores activos, cada uno manda su posición cada ~4 s → 5×10⁶ ÷ 4 ≈ **~1.25M escrituras de ubicación/s**. Los pedidos de viaje son órdenes de magnitud menos (cientos de miles/hora en pico → ~cientos/s). La conclusión que *conduce* el diseño: el cuello **no** es el matching (poco volumen) sino (a) absorber el **fire-hose de ubicaciones** y (b) responder "¿quién está cerca?" rápido sobre puntos que se mueven todo el tiempo.
+
+**3. API y datos.**
+```
+POST /drivers/location   { driverId, lat, lng }          → 200        # altísima frecuencia
+POST /rides              { riderId, origen: {lat, lng} }  → { rideId, driver }
+WS   ← { tipo: "ubicacion", lat, lng, ts }                            # tracking en vivo del viaje
+```
+- Ubicaciones en un store **en memoria** (Redis) indexado por **celda geoespacial**, no en una tabla con columnas `lat`/`lng`: un `WHERE lat BETWEEN ... AND lng BETWEEN ...` no usa un índice eficiente para 2-D y termina escaneando una franja enorme.
+- `rides`: `rideId | riderId | driverId | estado` — en una base **transaccional**, porque la asignación necesita consistencia (como el inventario del caso 8).
+
+**4. La decisión clave — indexar el espacio (geohash / quadtree).** El problema es "dame los conductores en ~2 km a la redonda" sobre millones de puntos móviles. No hay un índice 1-D que sirva para buscar en 2-D. La técnica: **mapear 2-D a 1-D con un geohash** — dividís el mundo en una grilla de celdas y a cada una le das un id de string donde el **prefijo** es la celda más grande que la contiene. Puntos cercanos comparten prefijo → "cerca de mí" se vuelve una búsqueda **por prefijo/rango en una dimensión**, que sí es indexable.
+- **Geohash:** simple, 1-D, encaja directo en Redis; celdas de tamaño fijo según el nivel de precisión.
+- **Quadtree:** un árbol que subdivide **solo las zonas densas** (el centro lleno se parte más fino que las afueras vacías) → se adapta a la densidad, pero es una estructura en memoria que hay que mantener.
+
+Redis trae comandos geoespaciales nativos (`GEOADD` para insertar, `GEOSEARCH` para "dentro de N km") construidos sobre geohash — en producción arrancás con eso antes de implementar un quadtree a mano.
+
+**5. Donde duele — el fire-hose de ubicaciones y el borde de celda.** 1.25M escrituras/s de posiciones es brutal, y la mayoría son **efímeras** (solo importa la última de cada conductor). Persistir cada ping en disco es desperdicio y funde el índice. Además, un conductor a 50 m tuyo pero **del otro lado del borde** de una celda cae en otro geohash: si solo mirás tu celda, lo perdés. Por eso la búsqueda mira **tu celda + las 8 vecinas** (grilla 3×3) y después refina por distancia real. Y el **matching** tiene su propia carrera: dos pasajeros que piden a la vez no pueden quedarse con el mismo conductor → reusás el **claim atómico del caso 8** (un `UPDATE drivers SET estado='asignado' WHERE driverId=$1 AND estado='disponible'`; 1 fila = es tuyo, 0 = ya lo tomaron, seguís con el próximo candidato).
+
+> **4 capas — el fire-hose de actualizaciones de ubicación:**
+> 1. **Qué se rompe:** millones de updates/s saturan la base si cada uno es un write durable; la búsqueda "cerca de mí" se hace lenta porque el índice se reescribe sin parar.
+> 2. **Por qué a esta escala/uso:** los conductores reportan cada pocos segundos; el volumen de writes de ubicación supera por órdenes de magnitud al de viajes, y persistir cada ping es inútil (solo vale la posición actual).
+> 3. **Control de corto plazo:** ubicaciones **en memoria** con TTL (no en disco); **sobrescribir** la última posición en vez de hacer append; servir la búsqueda desde el índice en memoria.
+> 4. **Cambio de diseño:** índice geoespacial **particionado por región/ciudad** (un viaje casi nunca cruza ciudades, así que cada región es independiente y escala sola), ubicación como **estado efímero** (la última gana), y un **stream aparte** si además necesitás el histórico de la ruta para facturación/analytics.
+
+**6. Trade-offs.** Geohash (fijo, simple, nativo en Redis) vs quadtree (se adapta a la densidad, pero más complejo de mantener). Precisión de celda: celda grande = menos celdas pero más candidatos a filtrar por distancia; celda chica = candidatos más precisos pero más celdas vecinas que consultar (elegís la precisión para que el radio de la celda ≥ tu radio de búsqueda). Matching por **distancia en línea recta** (simple) vs por **ETA real** considerando tráfico/calles (mejor experiencia, pero necesita un servicio de routing). El tracking en vivo del viaje reusa el **WebSocket del caso 2** (conexión persistente, el server empuja la posición). Surge pricing, batching de matches y re-matching si el conductor cancela: features aparte — declaralos fuera de scope salvo que los pidan.
+
+> **El cierre de criterio — no sobre-diseñar.** ¿Una app de delivery para una ciudad chica con cientos de repartidores? `GEOADD`/`GEOSEARCH` de Redis (o **PostGIS** con un índice GiST) sobre una sola instancia alcanza y sobra — sin quadtree, sin partición por región, sin fire-hose en memoria. Toda esa maquinaria es para la escala de Uber global, donde el volumen de ubicaciones y la densidad de las ciudades grandes lo justifican.
+
+**Ejercicios — Caso 9**
+9.1 🔁 ¿Por qué una query `WHERE lat BETWEEN ... AND lng BETWEEN ...` no escala para "conductores cerca de mí", y qué resuelve mapear el espacio con un geohash?
+9.2 🧠 Al buscar conductores cercanos, ¿por qué no alcanza con mirar tu propia celda de geohash, y qué hacés al respecto?
+9.3 🧠 El matching podría asignar el mismo conductor a dos pasajeros que piden casi a la vez. ¿Qué patrón de un caso anterior reusás para evitarlo, y cómo se ve?
+9.4 ✍️ Tenés los conductores candidatos de tu celda + las vecinas (cada uno con su posición). Escribí `masCercanos(origen, candidatos, k, distanciaKm)` que devuelva los `k` más cercanos por distancia real. Usá los tipos de abajo.
+```ts
+interface Punto { lat: number; lng: number }
+interface Conductor { driverId: string; pos: Punto }
+// distanciaKm(a, b): distancia entre dos puntos (haversine); asumila ya implementada.
+```
+9.5 🧠 El matching por distancia en línea recta puede elegir un conductor que está cruzando un río, en sentido contrario o a 2 minutos en auto pese a estar a 200 m. ¿Qué cambia si rankeás por **ETA real** en vez de distancia recta, y qué dependencia nueva introduce?
+
+---
+
 # Soluciones
 
 > Mirá esto solo después de intentar cada caso en voz alta. Casi todas son de **criterio**: si tu razonamiento difiere pero justifica bien el trade-off, probablemente también esté bien. En diseño de sistemas, el *cómo* justificás importa más que el *qué* elegís.
@@ -469,12 +519,38 @@ async function reservarAsiento(
 
 **8.5** Cuando el **pico de admisión** es tan grande que aun con reservas atómicas correctas la base se satura: cientos de miles de personas golpeando el inventario en el mismo segundo no causan oversell (el UPDATE condicional lo evita), pero **sí saturan la base de datos** con contención sobre las mismas filas y agotan conexiones — el sistema se cae aunque sea "correcto". La sala de espera resuelve un problema que el lock no toca: **el lock garantiza corrección bajo contención, pero no reduce la contención**. La sala admite usuarios al inventario en **tandas controladas** (throttling de admisión), convirtiendo un pico imposible en un caudal manejable. Es control de flujo / backpressure (ver [Concurrencia](concurrencia.md)) en la puerta de entrada, no en la base.
 
----
+### Caso 9 — Uber / ride-sharing
+**9.1** Porque un índice B-tree es 1-D: un índice compuesto `(lat, lng)` filtra por `lat` y después **escanea todas** las longitudes de esa franja (o al revés) — buscás una *banda*, no una caja, y con millones de puntos que se mueven eso es lento. Un **geohash** mapea 2-D → 1-D: puntos cercanos comparten un **prefijo** de string, así "cerca de mí" se convierte en una búsqueda por prefijo/rango sobre **una** dimensión, que sí es indexable (un sorted set de Redis, `GEOSEARCH`, o un índice común). Convertís un problema 2-D en uno 1-D que la infraestructura ya sabe resolver.
 
-## Siguientes pasos
+**9.2** Porque las celdas tienen **bordes duros**: un conductor a 50 m tuyo pero del otro lado de la línea de la celda cae en un geohash distinto, así que mirar solo tu celda lo deja afuera (y te da la falsa sensación de que no hay nadie cerca). La solución: buscar en **tu celda + las 8 vecinas** (grilla 3×3) y después **refinar por distancia real** sobre ese conjunto. Elegís la precisión de la celda de modo que su radio sea ≥ tu radio de búsqueda, así las 8 vecinas alcanzan para cubrir el círculo.
 
-Estos 8 casos cubren los patrones que más caen: fan-out, tiempo real, async con colas, lectura-intensivo con precómputo, separación metadata/contenido, estado compartido atómico, procesamiento masivo y consistencia fuerte transaccional. Para seguir:
+**9.3** Reusás el **claim atómico del caso 8** (el UPDATE condicional / lock para "tomar un recurso único"): asignar un conductor es exactamente "tomar un asiento". Lo marcás atómicamente — `UPDATE drivers SET estado='asignado' WHERE driverId=$1 AND estado='disponible'` — y mirás las filas afectadas: 1 = lo conseguiste, 0 = otro pasajero te ganó y pasás al siguiente candidato. Mismo patrón de "no doble asignación" que el "no oversell" del inventario: la atomicidad del instante evita que dos requests simultáneas se queden con el mismo recurso.
 
-- **Resolvé en voz alta los que faltan**, reusando los mismos ladrillos: "diseñá YouTube/Netflix" (transcoding + CDN + el caso 5 de almacenamiento), "diseñá Uber" (geoespacial + matching + el caso 2 de tiempo real + el caso 8 de reservas para el viaje). Lo que se evalúa es el recorrido, no la respuesta.
+**9.4**
+```ts
+interface Punto { lat: number; lng: number }
+interface Conductor { driverId: string; pos: Punto }
+
+function masCercanos(
+  origen: Punto,
+  candidatos: Conductor[],
+  k: number,
+  distanciaKm: (a: Punto, b: Punto) => number,
+): Conductor[] {
+  return [...candidatos]
+    .sort((a, b) => distanciaKm(origen, a.pos) - distanciaKm(origen, b.pos))
+    .slice(0, k);
+}
+// La celda de geohash hace el trabajo barato (broad-phase): te da los CANDIDATOS por prefijo.
+// El refinamiento por distancia real (narrow-phase) corre solo sobre ese conjunto chico,
+// nunca sobre los millones de conductores. Es el mismo "filtro grueso → filtro fino" de las
+// colisiones en geometría: primero descartás por celda, después medís exacto.
+```
+
+**9.5** La distancia en línea recta (haversine) es barata y no depende de nada externo, pero ignora la red de calles: el más cercano "a vuelo de pájaro" puede estar a 10 minutos por una autopista, en sentido contrario, o del otro lado de un río sin puente. Rankear por **ETA real** (tiempo de llegada considerando calles, sentido y tráfico) da mejores matches, pero introduce una **dependencia nueva**: un servicio de **routing/ETA** (mapas + tráfico en vivo) que hay que llamar por candidato → más latencia y costo por request. El patrón que usa la industria es el mismo **dos fases** del 9.4: broad-phase con geohash + distancia recta para sacar un puñado de candidatos baratos, y narrow-phase llamando al servicio de ETA **solo sobre esos pocos**, no sobre todos los conductores. El filtro grueso (geométrico) descarta; el filtro fino (ETA, caro) decide.
+
+Estos 9 casos cubren los patrones que más caen: fan-out, tiempo real, async con colas, lectura-intensivo con precómputo, separación metadata/contenido, estado compartido atómico, procesamiento masivo, consistencia fuerte transaccional e indexación espacial. Para seguir:
+
+- **Resolvé en voz alta los que faltan**, reusando los mismos ladrillos: "diseñá YouTube/Netflix" (transcoding + CDN + el caso 5 de almacenamiento), "diseñá un ad-click aggregator / sistema de métricas" (streaming + ventanas + el caso 3 de colas), "diseñá Google Docs" (colaboración en vivo + el caso 2 de tiempo real). Lo que se evalúa es el recorrido, no la respuesta.
 - **Conectá cada decisión con su implementación en el hub:** colas e idempotencia en [Event-driven](event-driven.md) y [Redis](redis.md), el contrato de cada API en [API design](api-design.md), tiempo real en [Tiempo real](tiempo-real.md), datos en [PostgreSQL](postgresql.md)/[NoSQL](nosql.md), control de flujo en [Concurrencia](concurrencia.md), y cómo operarlo en [Observabilidad](observabilidad.md).
-- **Volvé al método** de [Diseño de sistemas](system-design.md) módulo 1 cada vez: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs. El método es el mismo para los 8 casos y para cualquier problema nuevo que te tiren.
+- **Volvé al método** de [Diseño de sistemas](system-design.md) módulo 1 cada vez: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs. El método es el mismo para los 9 casos y para cualquier problema nuevo que te tiren.
