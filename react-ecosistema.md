@@ -137,6 +137,8 @@ Los contendientes:
 - **Ya tenés Radix andando → no hay urgencia de migrar**; sigue siendo sólido.
 - **Multi-framework → Ark UI. Accesibilidad/i18n como requisito duro → React Aria.**
 
+> 🔗 **Puente con shadcn (Módulo 4).** Como shadcn copia el código a tu repo, *vos* elegís sobre qué primitiva headless corre por debajo: históricamente fue **Radix** y a mediados de 2026 se mueve hacia **Base UI**. Si arrancás un design system con shadcn hoy, esta es la decisión que estás tomando sin verla — por eso M4 (componentes) y M5 (primitivas) son **capas que se apoyan**, no alternativas que compiten.
+
 > 🔎 **Veredicto sobre el post.** "**Base UI, de los creadores de Radix y MUI, en desarrollo activo**" es una recomendación **acertada**. Matiz de precisión: el **liderazgo de producto es de MUI**, pero el equipo incorpora contribuidores que vienen de **Radix** y **Floating UI** — el propio repo oficial se describe como "from the creators of Radix, Floating UI, and Material UI", así que la frase del post es **defendible**, no falsa. Lo importante — *quién shipea hoy* — está bien identificado.
 
 **Ejercicios 5**
@@ -165,6 +167,8 @@ Los contendientes de estado de formulario:
 - **Apostás al ecosistema TanStack y querés type-safety uniforme → TanStack Form**, sabiendo que es más joven.
 
 > 🔎 **Corrección a la sabiduría viral.** Llamar a esta categoría "**form validation**" y listar solo RHF vs. TanStack Form mezcla las dos capas: **RHF no valida por sí mismo**, orquesta el estado y delega la validación en un esquema. El consejo "**React Hook Form por más maduro**" es **correcto**, pero incompleto sin nombrar a **Zod/Valibot** al lado — que es lo que de verdad hace la validación y, de paso, te da los tipos.
+
+> 🔗 **Dónde toca el backend Node.** El esquema de Zod no tiene por qué vivir solo en el cliente: el mismo `loginSchema` puede validar el `body` en tu endpoint de Node (Express/Nest) y darte el **tipo compartido entre front y back**, con una sola fuente de verdad para validación y tipos de la UI a la API. Es uno de los puntos donde este criterio de frontend se enchufa con el stack full-stack que perseguís — junto con los *server functions* de Next/TanStack Start del Módulo 7, que corren tu código en el servidor.
 
 **Ejercicios 6**
 6.1 🔁 ¿Qué responsabilidad cubre React Hook Form y cuál cubre Zod?
@@ -221,7 +225,7 @@ Los contendientes de estado de formulario:
 **Teoría.** El *linter* atrapa errores y fuerza convenciones. Hasta hace poco era ESLint y nada más; ahora hay alternativas en Rust, mucho más rápidas:
 
 - **ESLint** — el estándar histórico. Ecosistema de plugins gigantesco y, sobre todo, **reglas *type-aware*** (vía `typescript-eslint`) que entienden los tipos de tu código — algo que ningún linter rápido todavía iguala del todo.
-- **oxlint** (proyecto OXC) — linter en Rust, **50–100× más rápido** que ESLint, con 500+ reglas y cero config para arrancar. ⚠️ Su 1.0 **todavía no hace type-aware linting completo** (cubre ~43 de 59 reglas de typescript-eslint; el modo type-aware vía `tsgolint` está en **alpha**).
+- **oxlint** (proyecto OXC) — linter en Rust, **50–100× más rápido** que ESLint, con 500+ reglas y cero config para arrancar. ⚠️ A mediados de 2026 su *type-aware linting* (vía `tsgolint`) **salió de alpha y ya cubre ~59 de 61 reglas de typescript-eslint**, pero **todavía no llega al 100%** y arrastra **límites de memoria en repos grandes** — por eso aún no reemplaza del todo a ESLint en proyectos TypeScript que dependen de reglas con tipos.
 - **Biome** — linter **+ formateador** en uno (también en Rust); alternativa a la dupla ESLint + Prettier.
 
 **Recomendación con criterio:**
@@ -402,9 +406,10 @@ type LoginForm = z.infer<typeof loginSchema>;
 ### Módulo 9
 ```
 9.1 oxlint es 50–100× más rápido (está en Rust) y trae 500+ reglas con cero config. ESLint
-    todavía gana en reglas type-aware (typescript-eslint), que entienden los tipos del
-    código, y en la amplitud de su ecosistema de plugins — cosas que oxlint 1.0 aún no
-    iguala (su modo type-aware vía tsgolint está en alpha).
+    todavía gana en la amplitud de su ecosistema de plugins y en reglas type-aware
+    (typescript-eslint) battle-tested. A mediados de 2026 el type-aware de oxlint (vía
+    tsgolint) ya salió de alpha y cubre ~59 de 61 reglas, pero todavía no llega al 100% y
+    tiene límites de memoria en repos grandes, así que aún no lo reemplaza del todo.
 9.2 Riesgo: al sacar ESLint perdés las reglas type-aware (y plugins) que oxlint todavía no
     cubre — reglas que pueden estar atrapando bugs reales. Patrón propuesto: híbrido —
     oxlint como pasada rápida sobre las reglas de alta frecuencia, ESLint solo para las
