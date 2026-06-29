@@ -1,8 +1,8 @@
-# Banco de casos de diseño de sistemas: 10 problemas resueltos de punta a punta
+# Banco de casos de diseño de sistemas: 11 problemas resueltos de punta a punta
 
-**Los casos clásicos de entrevista senior, resueltos con el método · feed, chat, notificaciones, typeahead, archivos, rate limiter, crawler, reservas/pagos, proximidad, métricas en streaming · el recorrido importa más que la respuesta · 2026**
+**Los casos clásicos de entrevista senior, resueltos con el método · feed, chat, notificaciones, typeahead, archivos, rate limiter, crawler, reservas/pagos, proximidad, métricas en streaming, edición colaborativa · el recorrido importa más que la respuesta · 2026**
 
-> Cómo usar este banco: este módulo es la **práctica** de [Diseño de sistemas backend](system-design.md). Ahí aprendiste el método y el criterio; acá los aplicamos a los 10 problemas que más caen en entrevistas. Para cada caso, **tapá la solución y resolvelo vos primero en voz alta** siguiendo los 6 pasos; después contrastá. Lo que se evalúa no es si llegás a *mi* diseño, sino si recorrés bien: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs.
+> Cómo usar este banco: este módulo es la **práctica** de [Diseño de sistemas backend](system-design.md). Ahí aprendiste el método y el criterio; acá los aplicamos a los 11 problemas que más caen en entrevistas. Para cada caso, **tapá la solución y resolvelo vos primero en voz alta** siguiendo los 6 pasos; después contrastá. Lo que se evalúa no es si llegás a *mi* diseño, sino si recorrés bien: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs.
 
 **El método, en una línea** (de [system-design](system-design.md) módulo 1): **(1)** aclarar requisitos (sobre todo los **no funcionales**: escala, lectura/escritura, latencia, consistencia), **(2)** estimar (back-of-the-envelope), **(3)** API + modelo de datos, **(4)** diseño de alto nivel, **(5)** profundizar **donde duele**, **(6)** discutir trade-offs. No hay respuestas correctas, hay **decisiones justificadas**.
 
@@ -21,6 +21,7 @@
 8. Sistema de reservas / pagos — *consistencia fuerte + idempotencia transaccional*
 9. Uber / ride-sharing: proximidad y matching en tiempo real — *indexación espacial (geohash/quadtree)*
 10. Ad-click aggregator / métricas en tiempo real — *agregación en streaming por ventanas de event-time*
+11. Google Docs / edición colaborativa en tiempo real — *convergencia de ediciones concurrentes (OT / CRDT)*
 
 > **El patrón que se repite.** Vas a ver que los mismos ladrillos reaparecen en casi todos los casos: **fan-out** (¿escribo a muchos en la escritura o leo de muchos en la lectura?), **caché del camino caliente**, **idempotencia ante reintentos**, **colas para desacoplar y absorber picos**, **sharding por la clave de acceso**, y **el caso patológico** (la celebridad, el prefijo popular, el archivo gigante). Aprender a *reconocer* qué ladrillo aplica es la mitad de la entrevista.
 
@@ -484,6 +485,69 @@ interface VentanaAgg {
 
 ---
 
+## Caso 11 — Google Docs / edición colaborativa en tiempo real
+
+**1. Requisitos.**
+- Funcionales: varios usuarios editan **el mismo documento a la vez**; cada uno ve los cambios de los demás casi al instante; el documento **converge** (todos terminan viendo exactamente el mismo texto, sin importar el orden en que llegaron las ediciones); cursores y selecciones de los demás (presencia); historial y undo.
+- No funcionales: latencia de tipeo **imperceptible** (escribir no puede esperar un round-trip al server); **convergencia garantizada** (*strong eventual consistency*: dos réplicas que recibieron el mismo conjunto de ediciones llegan al mismo estado); funciona **offline** y sincroniza al reconectar; persistencia durable del documento.
+
+**2. Estimación.** Acá el reto **no es el volumen** (un doc tiene pocos editores concurrentes: 2–10 típicos, decenas en el extremo) sino la **corrección bajo concurrencia**. Las operaciones son minúsculas (insertar un carácter, borrar un rango) pero **muy frecuentes** (cada tecla es una op) y **concurrentes sobre la misma región** del texto. El cuello es resolver esas ediciones simultáneas sin perder ni divergir, y mantener una conexión viva por editor — no el throughput.
+
+**3. API y datos.** Transporte: **WebSocket** (el del **caso 2**, chat — conexión persistente bidireccional, el server empuja los cambios de los demás; ver [Tiempo real](tiempo-real.md)).
+```
+WS  → { tipo: "op", docId, op, baseVersion }   # el cliente manda su edición sobre la versión que tenía
+WS  ← { tipo: "op", op, version }              # el server retransmite la op (ya transformada) a los demás
+WS  ← { tipo: "ack", version }                 # confirma y devuelve la versión resultante
+WS  ← { tipo: "presence", userId, cursor }     # cursores/selecciones de los otros editores
+```
+- El documento se modela como una **secuencia de operaciones** (un log append-only), no como "el último texto que se guardó". El estado actual = texto base + todas las ops aplicadas en orden. Es **event sourcing** (ver [Event-driven](event-driven.md)): el log de ops es la fuente de verdad.
+- Persistencia: **snapshot** periódico del texto + el log de ops desde ese snapshot (para no replay-ear desde cero). Compactás cada N ops.
+
+**4. La decisión clave — cómo convergen las ediciones concurrentes: OT vs CRDT.** El problema central: Ana y Bruno parten de la **misma versión** y editan a la vez. Ana inserta `"X"` en posición 0; Bruno inserta `"Y"` en posición 0. Si cada cliente aplica primero la propia y después la del otro **tal cual**, divergen para siempre: Ana ve `"XY"`, Bruno ve `"YX"`. Hay dos familias de solución, y nombrar las dos (con su trade-off) es lo que se evalúa:
+
+- **OT (Operational Transformation):** las ops se **transforman** contra las concurrentes antes de aplicarse. Cuando llega la inserción de Bruno en pos 0 y el server ya aplicó la de Ana en pos 0, la de Bruno se transforma a "insertar en pos 1" → se preserva la **intención** de ambos y todos convergen. En la práctica se implementa con un **servidor central** que impone un **orden total** de las ops y hace la transformación (el modelo *Jupiter*, el de Google Docs); el OT *peer-to-peer* puro existe en la literatura pero es notoriamente difícil de hacer correcto. El estado es texto plano compacto; el precio es que la lógica de transformación es **notoriamente difícil** de hacer correcta (hay que cubrir todos los pares de tipos de op y garantizar sus propiedades de convergencia — TP1, y sobre todo TP2; ver "donde duele").
+- **CRDT (Conflict-free Replicated Data Type):** a cada carácter se le da un **id único e inmutable**, con un **orden total** entre ids. Dos inserciones concurrentes nunca colisionan porque el lugar de cada carácter lo decide su id, no su posición numérica. La convergencia está **garantizada por construcción**, sin necesitar un server central que transforme — los clientes pueden mergear incluso **peer-to-peer**. El precio: **metadata por carácter** (cada uno arrastra su id → el documento "pesa" más) y manejar **tombstones** (los borrados no se eliminan, se marcan, para que un merge tardío no los "reviva"). Es lo que usan **Yjs** y **Automerge** (y los editores *local-first* modernos).
+
+> **La regla de decisión.** **OT** cuando ya tenés un **servidor central autoritativo** y querés un estado compacto (Google Docs). **CRDT** cuando querés convergencia **sin coordinación central**, *offline-first* o P2P (apps *local-first* modernas). Las dos logran *strong eventual consistency*; cambian el *dónde* (server central vs cualquier réplica) y el *costo* (lógica compleja vs metadata por carácter).
+
+> **Una tercera vía (para no idealizar).** No todo editor colaborativo es OT o CRDT puro. **Figma**, por ejemplo, usa un modelo **server-autoritativo con last-write-wins por propiedad**: *inspirado* en ideas de CRDT pero sin ser uno, y sin OT ("no usamos OT", según su propio equipo). Le alcanza porque su documento es un **árbol de objetos con propiedades** (x, color, etc.), donde "el último que escribió esa propiedad gana" es aceptable — no es texto plano que requiera preservar la intención carácter por carácter como Google Docs. La lección de criterio: la técnica la dicta la **estructura del dato** y el modelo de consistencia que tolerás, no la moda.
+
+**5. Donde duele — convergencia bajo ops concurrentes y la reconexión offline.** El happy path (una edición a la vez) es trivial; lo difícil son dos cosas:
+- **Ediciones concurrentes en la misma región.** Es el núcleo del problema. El invariante a defender es **strong eventual consistency**: todas las réplicas que vieron el mismo conjunto de ops convergen al mismo estado, *sin importar el orden de llegada*. OT lo logra transformando; CRDT, con los ids. La sutileza fina de OT: cuando dos inserciones caen en la **misma posición**, hace falta un **desempate determinista** (por ejemplo, por id de sitio/usuario) aplicado **igual en los dos clientes** — si cada uno desempata distinto, divergen igual. Eso es lo que **satisface la propiedad TP1**: transformar `a` contra `b` y `b` contra `a` tiene que converger al mismo estado, formalmente `a ∘ T(b,a) ≡ b ∘ T(a,b)` (aplicar `a` y luego `b`-transformada da lo mismo que aplicar `b` y luego `a`-transformada). Con **3 o más** ops concurrentes aparece la propiedad **TP2** (las transformaciones tienen que componer sin importar el orden) — esa es la **verdaderamente difícil**, y es justo la que el modelo centralizado de Google Docs **esquiva** al imponer un orden total desde el server en vez de resolver el caso P2P general.
+- **Reconexión offline.** Un cliente editó 10 minutos sin red; al reconectar, su versión base quedó vieja (el server avanzó). OT: el server **transforma** las ops del cliente contra todo lo que pasó desde su `baseVersion`, y el cliente **a su vez transforma sus ops pendientes** contra las que recibió del server — la transformación va en **ambos sentidos**, no solo del server hacia el cliente. CRDT: cada lado le manda al otro **las ops que le faltan** y ambos mergean; los ids garantizan que el orden de aplicación no importa.
+
+> **4 capas — la divergencia por ediciones concurrentes:**
+> 1. **Qué se rompe:** dos usuarios insertan en la misma posición a la vez; sin transformación ni ids, cada cliente aplica las ops en distinto orden → los documentos **divergen permanentemente** (uno ve `"XY"`, el otro `"YX"`) y nunca vuelven a coincidir.
+> 2. **Por qué a esta escala/uso:** en edición colaborativa las ops concurrentes sobre la **misma región** son la norma (dos personas en el mismo párrafo), y la red entrega los mensajes a cada cliente en **distinto orden**.
+> 3. **Control de corto plazo:** un **servidor central** que imponga un **orden total** de las ops (todos las aplican en el mismo orden) — la base del enfoque OT.
+> 4. **Cambio de diseño:** **OT** (transformar cada op contra las concurrentes, con desempate determinista para preservar intención) o **CRDT** (id único por carácter con orden total → convergencia sin coordinación). En ambos, *strong eventual consistency* es el invariante; sin uno de los dos, no hay convergencia.
+
+**6. Trade-offs.**
+- **OT vs CRDT** (el gran trade-off): OT = estado compacto (texto plano) pero exige server central y la transformación es difícil de implementar bien (Google tardó años en estabilizarla); CRDT = convergencia garantizada y P2P/offline-first, pero overhead de metadata por carácter y tombstones. Tendencia 2026: los editores *local-first* van a **CRDT** (Yjs/Automerge); Google Docs sigue con OT por legado y compacidad.
+- **Latencia vs consistencia — UI optimista:** la edición local se aplica **de inmediato** (no esperás el round-trip, o tipear se sentiría laggy) y se **reconcilia** cuando llega la confirmación/transformación del server. Es *optimistic UI*: asumís que tu op va a entrar y corregís si la transformación movió algo.
+- **Granularidad de las ops:** por carácter (más fino, más ops/mensajes) vs agrupar el tecleo en *batches* (menos tráfico, menos resolución).
+- **Undo colaborativo:** deshacer es no-trivial — ¿deshacés *tu* último cambio o el último de *cualquiera*? Lo correcto es **undo selectivo por usuario** (deshacer la propia op, transformada contra lo que pasó después), no un undo global.
+- **Presencia/cursores:** el cursor de otro también debe **transformarse** cuando el texto cambia **antes** de su posición; si no, su cursor "salta".
+
+> **El cierre de criterio — no sobre-diseñar.** ¿Un campo de comentarios, o un doc que edita **una persona a la vez**? No necesitás OT ni CRDT: un **lock** ("Bruno está editando…") o *last-write-wins* sobre el documento entero alcanza. Para colaboración "suave" donde rara vez chocan en el mismo bloque (estilo Notion), podés arrancar con **bloqueo por bloque/párrafo**. OT/CRDT es la respuesta cuando varios editan **el mismo texto, carácter por carácter y en simultáneo**, como Google Docs — no para cualquier "feature colaborativo" (y ojo: edición fluida no implica OT/CRDT puro, como muestra la tercera vía de Figma).
+
+**Ejercicios — Caso 11**
+11.1 🔁 ¿Por qué se modela el documento como una **secuencia de operaciones** (un log) en vez de guardar "el texto final"? ¿Qué habilita?
+11.2 🧠 Ana inserta `"X"` en pos 0 y Bruno `"Y"` en pos 0 a la vez. ¿Por qué divergen si cada cliente aplica las ops tal cual, y cómo lo resuelve OT (transformación) frente a CRDT (ids)?
+11.3 🧠 OT vs CRDT: ¿qué gana y qué paga cada uno, y en qué situación elegís cada uno?
+11.4 🧠 ¿Por qué la edición local se aplica **de inmediato** (UI optimista) en vez de esperar la confirmación del server, y qué hay que reconciliar después?
+11.5 ✍️ Implementá `transformInsert(op, contra)` (el corazón de OT para dos inserciones): ajustá la posición de `op` asumiendo que `contra` (una inserción concurrente) **ya se aplicó**. Regla: si `contra` quedó **antes** de `op`, corré `op` a la derecha por el largo de `contra`; si caen en la **misma** posición, desempatá por `siteId` (determinista, igual en ambos clientes). Usá los tipos de abajo.
+```ts
+interface InsertOp {
+  pos: number;
+  texto: string;
+  siteId: number; // id del editor; desempata inserciones en la misma posición
+}
+```
+11.6 🧠 El ✍️ de arriba resuelve **insert-vs-insert**, el caso más limpio. ¿Por qué transformar un **borrado** (contra una inserción concurrente, o contra otro borrado) es más difícil, y qué pasa cuando dos borrados afectan **rangos que se solapan**?
+
+---
+
 # Soluciones
 
 > Mirá esto solo después de intentar cada caso en voz alta. Casi todas son de **criterio**: si tu razonamiento difiere pero justifica bien el trade-off, probablemente también esté bien. En diseño de sistemas, el *cómo* justificás importa más que el *qué* elegís.
@@ -663,8 +727,45 @@ function agregarPorVentana(eventos: ClickEvent[]): VentanaAgg[] {
 // porque no podés guardar todos los eventId del historial en memoria.
 ```
 
-Estos 10 casos cubren los patrones que más caen: fan-out, tiempo real, async con colas, lectura-intensivo con precómputo, separación metadata/contenido, estado compartido atómico, procesamiento masivo, consistencia fuerte transaccional, indexación espacial y agregación en streaming por event-time. Para seguir:
+### Caso 11 — Google Docs / edición colaborativa
+**11.1** Porque guardar solo "el texto final" pierde la información necesaria para **mezclar ediciones concurrentes**: si dos clientes parten de la misma versión y cada uno guarda su texto entero, uno pisa al otro (*last-write-wins* → se pierden cambios). Modelar el doc como una **secuencia de ops** (insertar/borrar) lo convierte en *event sourcing* y habilita tres cosas: (1) **transformar/mergear** ops concurrentes (OT/CRDT operan sobre ops, no sobre el texto plano); (2) **sincronizar por delta** al reconectar (mandás solo las ops que faltan, no el documento entero); (3) **historial y undo** (cada op es un paso reversible). El texto actual se reconstruye aplicando el log; los snapshots evitan replay-earlo desde cero.
 
-- **Resolvé en voz alta los que faltan**, reusando los mismos ladrillos: "diseñá YouTube/Netflix" (transcoding + CDN + el caso 5 de almacenamiento), "diseñá Google Docs" (colaboración en vivo con OT/CRDT + el caso 2 de tiempo real), "diseñá un payment ledger" (doble entrada + el caso 8 de consistencia fuerte). Lo que se evalúa es el recorrido, no la respuesta.
+**11.2** Divergen porque **insertar no es conmutativo respecto de la posición**: ambos parten de `""`, Ana aplica `ins(0,"X")` y queda `"X"`, después le llega `ins(0,"Y")` y queda `"YX"`; Bruno hace lo simétrico y queda `"XY"`. Mismas dos ops, distinto orden de llegada → estados distintos que **nunca convergen**. **OT** lo resuelve **transformando** la op entrante contra las concurrentes ya aplicadas: cuando a Ana le llega `ins(0,"Y")` y ella ya aplicó `ins(0,"X")`, la transforma según quién gana el empate de posición; ambos clientes, transformando con el **mismo desempate**, llegan al mismo texto. **CRDT** lo resuelve dándole a cada carácter un **id único con orden total**: `"X"` y `"Y"` tienen ids fijos, así que su orden relativo es el mismo en toda réplica sin importar cuándo llegó cada uno → convergen por construcción, sin transformar.
+
+**11.3** **OT** gana **compacidad** (el estado es texto plano, sin metadata extra) y encaja natural con un server central autoritativo; **paga** con la dificultad de implementar la transformación correctamente (cubrir todos los pares de ops y garantizar TP1 y sobre todo **TP2**) y con que en la práctica **necesita** ese punto central que ordene. **CRDT** gana **convergencia garantizada por construcción** (sin coordinación central, sirve P2P y *offline-first*); **paga** con **metadata por carácter** (cada uno arrastra su id → más memoria/almacenamiento) y con los **tombstones** de los borrados. Elegís **OT** si ya tenés server central y querés estado compacto (Google Docs); **CRDT** si querés merge sin coordinación, local-first o P2P (**Yjs, Automerge**). Ambos dan *strong eventual consistency*. (Y existe la tercera vía: server-autoritativo con *last-write-wins* por propiedad, como Figma, cuando el dato no es texto y no hace falta preservar intención carácter por carácter.)
+
+**11.4** Porque si cada tecla esperara el round-trip al server antes de mostrarse, escribir se sentiría **laggy** (cientos de ms de lag por carácter es inusable). Con **UI optimista** aplicás tu edición **localmente al instante** y la mandás en paralelo; asumís que va a entrar. Lo que hay que **reconciliar** después: cuando vuelve la confirmación, el server pudo haber **transformado** tu op contra ediciones concurrentes de otros (o intercalado las de ellos antes que la tuya), así que tu estado local se **reajusta** al estado canónico — y, clave, **tu cursor y los de los demás se transforman** para no saltar cuando entró texto antes de su posición. El usuario tipea fluido; la convergencia se resuelve por debajo.
+
+**11.5**
+```ts
+interface InsertOp {
+  pos: number;
+  texto: string;
+  siteId: number;
+}
+
+function transformInsert(op: InsertOp, contra: InsertOp): InsertOp {
+  // `contra` (inserción concurrente) ya se aplicó; ajustamos `op` para preservar su intención.
+  // Si `contra` quedó estrictamente antes, o en la MISMA pos pero gana el desempate por siteId,
+  // entonces `op` se corre a la derecha por el largo de `contra`.
+  const contraVaPrimero =
+    contra.pos < op.pos || (contra.pos === op.pos && contra.siteId < op.siteId);
+
+  if (contraVaPrimero) {
+    return { ...op, pos: op.pos + contra.texto.length };
+  }
+  return op; // `contra` va después: la posición de `op` no cambia.
+}
+// El desempate por siteId es lo que SATISFACE la propiedad TP1 de OT: AMBOS clientes
+// resuelven el empate de la misma forma, así que transforman igual y terminan con el
+// mismo texto. Un `<=` ingenuo sin desempate divergiría cuando dos inserciones caen
+// exactamente en la misma posición.
+```
+
+**11.6** Porque `transformInsert` solo mueve **un punto** (una posición), mientras que un borrado afecta un **rango** `[inicio, fin)`, así que transformarlo es ajustar **longitudes**, no correr un índice. Contra una **inserción** concurrente: si el insert cae antes del rango, lo corro; si cae **dentro** del rango, el rango tiene que **crecer** para abarcar el texto recién insertado (o decidir explícitamente no borrarlo). Contra **otro borrado**: si los rangos **se solapan**, no puedo "borrar dos veces" la intersección que el otro ya borró → tengo que restar esa parte, y el resultado puede quedar **vacío** (la op se vuelve un *no-op*) o partirse en dos. Ese manejo de rangos solapados y longitudes variables es lo que multiplica los casos a cubrir (insert-insert, insert-delete, delete-insert, delete-delete) y lo que hace la transformación de OT "notoriamente difícil"; el insert-insert del ejercicio anterior es solo la **esquina fácil**.
+
+Estos 11 casos cubren los patrones que más caen: fan-out, tiempo real, async con colas, lectura-intensivo con precómputo, separación metadata/contenido, estado compartido atómico, procesamiento masivo, consistencia fuerte transaccional, indexación espacial, agregación en streaming por event-time y convergencia de ediciones concurrentes (OT/CRDT). Para seguir:
+
+- **Resolvé en voz alta los que faltan**, reusando los mismos ladrillos: "diseñá YouTube/Netflix" (transcoding + CDN + el caso 5 de almacenamiento), "diseñá un payment ledger" (doble entrada + el caso 8 de consistencia fuerte), "diseñá un full-text search" (índice invertido + el caso 4 de precómputo). Lo que se evalúa es el recorrido, no la respuesta.
 - **Conectá cada decisión con su implementación en el hub:** colas e idempotencia en [Event-driven](event-driven.md) y [Redis](redis.md), el contrato de cada API en [API design](api-design.md), tiempo real en [Tiempo real](tiempo-real.md), datos en [PostgreSQL](postgresql.md)/[NoSQL](nosql.md), control de flujo en [Concurrencia](concurrencia.md), y cómo operarlo en [Observabilidad](observabilidad.md).
-- **Volvé al método** de [Diseño de sistemas](system-design.md) módulo 1 cada vez: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs. El método es el mismo para los 10 casos y para cualquier problema nuevo que te tiren.
+- **Volvé al método** de [Diseño de sistemas](system-design.md) módulo 1 cada vez: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs. El método es el mismo para los 11 casos y para cualquier problema nuevo que te tiren.
