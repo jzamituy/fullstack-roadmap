@@ -111,6 +111,8 @@ Esto lleva a la división de capacidades:
 | APIs del browser | ❌ No | ✅ Sí |
 | Su JS viaja al cliente | ❌ No | ✅ Sí |
 
+> Ojo con el encuadre de la fila "APIs del browser": no es que **React lo prohíba**, es que en el server **no existe `window`** (ni `localStorage`, ni `document`). Un Server Component no corre en el browser, así que esas APIs simplemente no están — la "prohibición" es una consecuencia del entorno, no una regla.
+
 La frase mental: **`"use client"` no marca un componente, marca una *frontera en el grafo de módulos*. Todo lo que ese archivo importe cruza con él al cliente.** (Esta idea es la base de la trampa #1 del módulo 9 — leela con atención.)
 
 > En una línea, la consecuencia que vas a sufrir: si un archivo con `"use client"` hace `import { algo } from './pesado'`, ese `./pesado` **también** termina en el bundle del cliente, lo necesites ahí o no. **Importar arrastra.** (El anti-pattern completo, con el patrón para evitarlo, está en el módulo 9.)
@@ -119,6 +121,7 @@ La frase mental: **`"use client"` no marca un componente, marca una *frontera en
 3.1 🔁 ¿Cuál es el componente "por defecto" en un framework RSC, y cómo marcás uno como interactivo?
 3.2 🔁 Nombrá tres cosas que un Server Component NO puede hacer y dos que sí.
 3.3 🧠 La directiva `"use client"` marca "un boundary en el grafo de módulos, no en el árbol de render". Explicá con tus palabras qué implica eso para los archivos que ese módulo importa.
+3.4 ✍️ Tenés una `Page` que lee la DB (server) y muestra un `<Counter>` interactivo (`useState`) enterrado adentro. ¿Dónde ponés el `"use client"` para que **solo** el contador sea cliente y la página siga siendo server? Escribí el árbol y justificá.
 
 ---
 
@@ -174,6 +177,7 @@ La frase mental: **el contenido server entra al cliente por la "puerta de `child
 **NO cruza:**
 - **Funciones comunes** — incluidos los **event handlers**. (Si necesitás pasar comportamiento, va por Server Functions o se define dentro del Client Component.)
 - Clases e instancias de clase.
+- Objetos con prototipo `null` (`Object.create(null)`).
 - Symbols no registrados globalmente.
 
 > ⚠️ Esta lista refleja el comportamiento del runtime de serialización (Flight). React documenta los tipos serializables junto a las directivas (`'use client'` / `'use server'`); si dependés de un caso borde, confirmalo en `react.dev`.
@@ -202,6 +206,7 @@ La frase mental: **el boundary es la red. Si no se puede serializar y mandar por
 5.1 🔁 Nombrá tres tipos que cruzan el boundary server→client y dos que no.
 5.2 🧠 ¿Por qué un event handler (una función) no puede pasarse como prop de un Server Component a un Client Component? Relacionalo con "el boundary es la red".
 5.3 🧠 ¿Qué ventaja da pasar una Promise sin `await` desde el server, en vez de esperarla antes de renderizar?
+5.4 ✍️ Este Server Component intenta pasarle un `onDelete` (función) a un Client Component como prop: `<Item onDelete={() => db.delete(id)} />`. No cruza el boundary. Reescribilo con el patrón correcto (una Server Function como prop, o el handler definido dentro del Client Component) y explicá por qué.
 
 ---
 
@@ -212,7 +217,7 @@ La frase mental: **el boundary es la red. Si no se puede serializar y mandar por
 El orden típico de una request en un framework RSC (ej. Next.js App Router) ⚠️ *—este pipeline lo orquesta el framework, no es spec de React—*:
 
 1. **Server — render RSC**: ejecuta los Server Components (con sus `await`) y produce el **payload Flight**. Los Client Components quedan como referencias de módulo + props.
-2. **Server — SSR** *(opcional)*: usa ese payload para generar **HTML**, que se **streamea** al browser → primer paint rápido (no interactivo todavía). Este paso se puede **omitir**: RSC sin SSR (solo el payload Flight) es válido — es el modelo **client-first** (el de TanStack Start / React Router en data-mode). React lo dice explícito: *"Optionally, that bundle can then be server-side rendered."*
+2. **Server — SSR** *(opcional)*: usa ese payload para generar **HTML**, que se **streamea** al browser → primer paint rápido (no interactivo todavía). Este paso se puede **omitir**: RSC sin SSR (solo el payload Flight) es válido — es el modelo **client-first** (el de TanStack Start / React Router en data-mode). React lo dice explícito: *"Optionally, that bundle can then be server-side rendered to create the initial HTML for the page."*
 3. **Cliente — recepción**: llega el HTML (pintado inmediato) y, en paralelo, el payload Flight que React usa para construir/actualizar su árbol.
 4. **Cliente — hidratación**: React hidrata **solo los Client Components** para volverlos interactivos.
 
@@ -222,10 +227,33 @@ La frase mental: **RSC produce una "receta serializada" del árbol (Flight); SSR
 
 > ⚠️ El formato interno de Flight es un detalle de implementación de bajo nivel (no sigue semver). No programes contra su estructura.
 
+### De Flight a tu código: las convenciones que vas a escribir ⚠️
+
+Todo lo anterior es el **motor**. La **interfaz** que tocás el día 1 son convenciones del framework (acá, **Next.js App Router**; otros tienen sus equivalentes —verificá el tuyo—). Las cuatro que más vas a usar:
+
+- **`loading.tsx`** — el framework lo envuelve automáticamente en un `<Suspense>` alrededor de la ruta: mientras los Server Components async cargan, se muestra este fallback (un **skeleton**). Es la cara "de aplicación" del streaming del módulo 6: en vez de escribir el `<Suspense>` a mano, dejás un archivo y el framework arma el boundary.
+- **`error.tsx`** — un **Error Boundary** de la ruta (es Client Component: lleva `"use client"`). Recibe `error` y una función `reset()` para reintentar el render del segmento. Captura los errores de los Server Components de ese segmento.
+- **`not-found.tsx`** — la UI para `notFound()` (404 de un recurso que no existe).
+- **`generateMetadata`** — función `async` que corre en el server y devuelve el `<title>`/`<meta>` para **SEO** a partir de los datos de la página (ej. el título de un post). Reemplaza el baile de `react-helmet` del mundo SPA.
+
+```tsx
+// app/posts/[id]/page.tsx — Server Component
+export async function generateMetadata({ params }: { params: { id: string } }) {
+  const post = await db.posts.get(params.id)   // corre en el server
+  return { title: post.title, description: post.excerpt }
+}
+// app/posts/[id]/loading.tsx → <PostSkeleton />   (fallback automático mientras carga)
+// app/posts/[id]/error.tsx   → 'use client' + {error, reset}  (boundary de error del segmento)
+```
+
+La idea: **el framework convierte `<Suspense>` y Error Boundary (que viste en [react-fundamentos](react-fundamentos.md)) en archivos con nombre fijo.** Entendés el motor; estos archivos son la palanca.
+
 **Ejercicios 6**
 6.1 🔁 ¿Qué contiene el payload Flight y por qué se dice que "no es HTML"?
 6.2 🔁 En el pipeline de una request, ¿qué se hidrata en el cliente: todo el árbol o solo una parte?
 6.3 🧠 En una navegación cliente (no la carga inicial), ¿qué pide el cliente y por qué eso es más barato que recargar la página?
+6.4 🔁 ¿Para qué sirven `loading.tsx`, `error.tsx` y `generateMetadata` en Next App Router, y con qué primitivas de React se corresponden los dos primeros?
+6.5 🧠 ¿Por qué `loading.tsx` es "el `<Suspense>` que no escribís a mano"? ¿Qué le da el framework por encima de poner un `<Suspense>` vos mismo?
 
 ---
 
@@ -266,6 +294,14 @@ function UpdateName() {
 
 O sea: cualquiera puede llamar a esa función con cualquier payload, porque es un endpoint expuesto. **Validá y autorizá SIEMPRE adentro de la función.** Es el mismo criterio que un endpoint de API tradicional.
 
+### El otro lado: auth y datos sensibles en la lectura
+
+La escritura (Server Functions) ya la cubrimos; el lado **lectura** (Server Components) tiene su propio criterio. Como un Server Component corre en el server **en request time**, puede leer la **sesión/cookies/headers** directamente (en Next, vía `cookies()`/`headers()`; no hay `localStorage` ni `document` porque no es el browser, módulo 3) y **autorizar en la capa de datos** antes de devolver nada. Pero ojo con el boundary:
+
+> ⚠️ **No serialices secretos al cliente.** Todo lo que un Server Component le pase como **prop a un Client Component cruza la red en el payload Flight** (módulo 5) y queda visible en el browser. Si tu objeto `user` trae el `passwordHash`, un token o datos de otro tenant, **los estás filtrando** aunque "no los muestres". Pasá al cliente solo los campos que el cliente necesita —volvé a "el boundary es la red": lo que cruza, se ve—.
+
+**Hacé la autorización en el server (en el Server Component o en la capa de datos), nunca confíes en ocultar en el cliente.**
+
 ### Terminología (te va a confundir leyendo blogs) ⚠️
 
 Hasta septiembre de 2024 React llamaba "Server Actions" a todas las Server Functions. Hoy: una Server Function es una **Server Action** solo si se pasa a una prop `action` (o se llama desde una action). **Toda Server Action es una Server Function, pero no al revés.**
@@ -277,6 +313,7 @@ La frase mental: **un Server Component lee; una Server Function escribe — y co
 7.2 🧠 ¿Por qué es un error de seguridad pensar que `"use server"` hace que el código sea "solo del servidor y por lo tanto seguro"? ¿Qué tenés que hacer siempre?
 7.3 🧠 ¿Toda Server Function es una Server Action? Explicá la relación.
 7.4 ✍️ Escribí un `<form>` que use una Server Function como `action` para guardar un nombre, con la validación de los argumentos hecha DENTRO de la función (acordate: los args son input no confiable).
+7.5 🧠 Un Server Component lee el `user` completo de la DB (incluye `passwordHash` y un `apiToken`) y se lo pasa entero como prop a un `<Profile>` Client Component que solo muestra el nombre. ¿Qué problema de seguridad hay y cómo lo arreglás?
 
 ---
 
@@ -289,7 +326,7 @@ El panorama de implementaciones ⚠️ (a mediados de 2026, **muy volátil**):
 | Stack | Modelo | Madurez para producción |
 |---|---|---|
 | **Next.js App Router** | Server-first | ✅ Battle-tested (prod-ready desde 2023) |
-| **TanStack Start** | Client-first (RSC como stream de datos) | 🟡 Framework en RC; **soporte RSC todavía en desarrollo** (no confundir ambos estados) |
+| **TanStack Start** | Client-first (RSC como stream de datos) | 🟡 Framework en RC; **soporte RSC marcado "experimental"** en su doc (se mantiene así en early v1; no confundir ambos estados) |
 | **Parcel** | Sin framework (bundler directo, `@parcel/rsc`) | 🟡 Beta |
 | **React Router 7** | Opt-in sobre Framework/Data Mode | 🔴 Preview/inestable (el propio equipo NO lo recomienda en prod) |
 | **Waku** | RSC-first minimalista | 🔴 1.0 alpha |
@@ -417,6 +454,25 @@ La frase mental de cierre: **RSC es una herramienta para borrar JavaScript del c
 
 **3.3** Significa que el boundary lo dispara el **import**, no dónde se renderiza el componente. El archivo con `"use client"` **y todas sus dependencias importadas** se evalúan en el cliente y su JS viaja al browser — aunque algunas de esas dependencias no necesiten ser cliente. Por eso importa qué importás dentro de un archivo cliente.
 
+**3.4** El `"use client"` va en el **archivo del `Counter`**, no en la `Page`. La `Page` sigue siendo Server Component (async, lee la DB) y simplemente **renderiza** `<Counter />`: un Server Component puede renderizar un Client Component. Solo el JS del `Counter` (y lo que él importe) cruza al cliente; la página y su acceso a datos quedan en el server.
+```tsx
+// counter.tsx
+'use client'
+import { useState } from 'react'
+export function Counter() {
+  const [n, setN] = useState(0)
+  return <button onClick={() => setN(n + 1)}>{n}</button>
+}
+
+// page.tsx — Server Component (sin 'use client')
+import { Counter } from './counter'
+export default async function Page() {
+  const data = await db.getStuff()     // sigue en el server
+  return <article>{/* ...contenido server... */}<Counter /></article>
+}
+```
+El error sería poner `"use client"` arriba de `page.tsx`: arrastraría la página entera (y el acceso a la DB) al cliente.
+
 **4.1** **No** puede importarlo. Pero **sí** puede renderizarlo si lo recibe como `children` (o como prop JSX) desde un Server Component padre.
 
 **4.2** Porque pasarlo como `children` significa que el Server Component se renderiza **en el server** y cruza el boundary **ya convertido en elemento** (output serializado). Importarlo dentro de un Client Component metería su **módulo** en el grafo de cliente, forzando su evaluación en el browser y rompiendo su naturaleza server-only.
@@ -449,11 +505,34 @@ export default function Layout() {
 
 **5.3** Que **no bloqueás el render del server** esperando esa data. Mandás la promesa pendiente, el server sigue, y el cliente la resuelve con `use` (suspendiéndose solo en esa parte, idealmente bajo `<Suspense>`). Mejora el streaming y el time-to-paint.
 
+**5.4** El `onDelete` es una **función común**, no cruza el boundary (módulo 5). Dos arreglos válidos: (a) pasar una **Server Function** (la mutación corre en el server, con validación adentro); (b) **definir el handler dentro del Client Component** (ej. recibe el `id` por prop —que sí es serializable— y arma el handler localmente).
+```tsx
+// (a) Server Function como prop — Item es Client, borrar() corre en el server
+// actions.ts
+'use server'
+export async function borrar(id: string) {
+  // validar/autorizar acá: el id es input no confiable
+  await db.delete(id)
+}
+// server component:  <Item id={item.id} onDelete={borrar} />
+
+// (b) handler dentro del Client Component — solo cruza el id (string, serializable)
+'use client'
+function Item({ id, onDelete }: { id: string; onDelete: (id: string) => void }) {
+  return <button onClick={() => onDelete(id)}>Borrar</button>
+}
+```
+La razón: "el boundary es la red" — una función con su closure no se serializa; un `id` string sí.
+
 **6.1** Contiene el output renderizado de los Server Components, **referencias de módulo** donde hay Client Components, y las **props serializadas**. "No es HTML" porque es una **descripción serializada del árbol React** (Flight) que el cliente reconstruye, no markup listo para pintar.
 
 **6.2** Solo se hidratan **los Client Components**. Los Server Components ya vienen renderizados y no se hidratan (su JS ni siquiera está en el cliente).
 
 **6.3** Pide un **nuevo payload Flight** (no un HTML completo) y lo mergea en el árbol existente, **reusando layouts sin re-renderizarlos**. Es más barato porque transfiere menos, no recarga el documento entero y evita rehidratar lo que no cambió.
+
+**6.4** `loading.tsx` = la UI de carga del segmento (skeleton), que el framework envuelve en un **`<Suspense>`** automático mientras los Server Components async cargan. `error.tsx` = un **Error Boundary** del segmento (es Client Component; recibe `error` y `reset()`). `generateMetadata` = función async que corre en el server y devuelve `<title>`/`<meta>` para **SEO** desde los datos de la página. Los dos primeros se corresponden con `<Suspense>` y Error Boundary de React.
+
+**6.5** Porque `loading.tsx` **es** un `<Suspense>` que el framework arma por vos alrededor de la ruta: dejás un archivo con nombre fijo y obtenés el boundary de carga sin escribirlo. Lo que suma por encima de ponerlo a mano: lo cablea automáticamente con el **streaming** y la **navegación** del router (el fallback aparece al navegar al segmento y mientras se streamea su contenido), de forma consistente en toda la app, sin que tengas que ubicar cada `<Suspense>`.
 
 **7.1** Una **Server Function** es una función async que corre en el server pero se **invoca desde el cliente** (vía un request que arma el framework); sirve para **mutaciones/escritura**. Un **Server Component** sirve para **lectura/render** de contenido en el server. Lectura vs escritura.
 
@@ -487,6 +566,8 @@ function NameForm() {
 ```
 El punto del ejercicio: la validación va **dentro** de la Server Function, no en el cliente, porque el endpoint es invocable con cualquier payload (módulo 7, gotcha de seguridad). Bonus: al pasar la función al `action` del form, funciona aun antes de que hidrate el JS (progressive enhancement).
 
+**7.5** Problema: las props que un Server Component le pasa a un Client Component **cruzan la red en el payload Flight** y quedan **visibles en el browser** (DevTools, el HTML/payload). Pasar el `user` entero **filtra `passwordHash` y `apiToken`** aunque `<Profile>` solo muestre el nombre — "el boundary es la red: lo que cruza, se ve". Arreglo: pasar **solo los campos necesarios** (`<Profile name={user.name} />`), o construir un DTO seguro en el server (`{ name, avatarUrl }`) y pasar ese. La regla: serializá al cliente el mínimo, y nunca confíes en "no lo muestro" para datos sensibles.
+
 **8.1** Porque RSC necesita que **un bundler + framework** parseen las directivas `"use client"`/`"use server"`, transformen el código (registrar Client Components y Server Functions) y calculen el **grafo de módulos** server/cliente. React define el contrato, pero la implementación la provee el framework/bundler. Sin eso, las directivas no hacen nada.
 
 **8.2** **Next.js App Router** (prod-ready desde 2023, ~3 años de uso real).
@@ -518,4 +599,4 @@ El `<Suspense>` lo ponés alrededor de una parte **lenta e independiente** que n
 
 ---
 
-> **Para seguir.** La fuente de verdad de este módulo son los docs oficiales de React (`react.dev/reference/rsc/*`) y los del framework que uses (Next.js, TanStack Start). Antes de implementar, re-verificá lo marcado con ⚠️ — versión de React, estado de las implementaciones (TanStack, Parcel, React Router, Waku) y el comportamiento de caché de tu framework. El puente natural: [TanStack Start](tanstack-start.md) (el modelo client-first y el RPC tipado) y el track de backend para el lado servidor.
+> **Para seguir.** La fuente de verdad de este módulo son los docs oficiales de React (`react.dev/reference/rsc/*`) y los del framework que uses (Next.js, TanStack Start). Antes de implementar, re-verificá lo marcado con ⚠️ — versión de React, estado de las implementaciones (TanStack, Parcel, React Router, Waku) y el comportamiento de caché de tu framework. ⚠️ Un punto todavía inmaduro: el **testing de RSC** (componentes async y Server Functions) sigue en evolución —RTL/Vitest no manejan del todo los Server Components async, así que hoy lo más sólido es cubrirlos con **E2E (Playwright)** y testear la capa de datos por separado; verificá el estado de las herramientas al momento de implementar—. El puente natural: [TanStack Start](tanstack-start.md) (el modelo client-first y el RPC tipado) y el track de backend para el lado servidor.
