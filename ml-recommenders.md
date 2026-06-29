@@ -21,7 +21,7 @@ Cinco argumentos concretos de por qué un LLM es la herramienta equivocada ahí:
 
 1. **Precisión.** En predicción numérica/categórica sobre datos estructurados, un árbol con gradient boosting le gana a un LLM. Los LLMs "tienen dificultad para entender estructuras de tablas y extraer información con precisión". (Excepción legítima: si una columna es **texto libre** —notas, descripciones—, ahí el LLM sí ayuda a featurizar.)
 2. **Costo y latencia.** Un árbol predice en microsegundos a milisegundos, con costo por predicción **predecible**. La inferencia LLM es cara, lenta e impredecible (round-trip de red, tokens). Para fraude/scoring en tiempo real es descalificante.
-3. **Determinismo.** Un árbol entrenado es una función fija: misma entrada → misma salida, **siempre**. El LLM es estocástico y sufre version-drift. Para decisiones auditadas (crédito, fraude), la reproducibilidad es requisito duro.
+3. **Determinismo.** Un árbol entrenado es una función fija: misma entrada → misma salida, **siempre**. El LLM es estocástico (incluso con `temperature=0` no hay garantía dura de reproducibilidad bit-a-bit, por batching/hardware) y sufre version-drift (el proveedor cambia el modelo bajo tus pies). Para decisiones auditadas (crédito, fraude), la reproducibilidad es requisito duro.
 4. **Interpretabilidad / regulación.** Los árboles exponen *feature importance*, SHAP y *reason codes* por predicción — necesarios para crédito (avisos de adverse-action), seguros, salud. (Conecta con [seguridad-ia.md](seguridad-ia.md): el EU AI Act exige explicabilidad en alto riesgo.)
 5. **El patrón híbrido honesto** (no vendas el "nunca"): la arquitectura defendible es **el ML decide/puntúa, el LLM narra**. El árbol clasifica los datos estructurados; el LLM genera la explicación, el resumen o el mensaje personalizado a partir de ese output. **ML para la decisión, LLM para el lenguaje.**
 
@@ -63,6 +63,8 @@ La regla: **todo el preprocesamiento se ajusta dentro del fold de train**, nunca
 
 Reportá varias juntas; ninguna sola cuenta la historia completa.
 
+> **Calibración** (clave si usás la *probabilidad*, no solo el ranking): que el modelo diga "0.8" debe significar "pasa 8 de cada 10 veces". Cuidado: técnicas de desbalance como `scale_pos_weight` (módulo 5) **rompen la calibración** — inflan las probas hacia la clase rara. Si necesitás probas confiables (umbral de fraude, pricing de riesgo), recalibrá con **Platt scaling** o **isotonic regression** sobre un set aparte. AUC/ranking no se entera de la mala calibración; un score mal calibrado sí arruina decisiones basadas en el valor de la proba.
+
 ---
 
 ## Módulo 4 — Feature engineering
@@ -90,16 +92,17 @@ from sklearn.metrics import average_precision_score  # PR-AUC
 model = xgb.XGBClassifier(
     n_estimators=400, max_depth=6, learning_rate=0.05,
     subsample=0.8, colsample_bytree=0.8,
-    scale_pos_weight=99,   # compensa desbalance 1:99 (fraude)
+    scale_pos_weight=99,   # compensa desbalance 1:99 (fraude) — pero descalibra las probas (ver abajo)
     eval_metric="aucpr",   # PR-AUC, no accuracy
+    early_stopping_rounds=50,  # XGBoost 2.x: va en el constructor; para cuando val deja de mejorar
 )
-model.fit(X_train, y_train, eval_set=[(X_val, y_val)])
+model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
 print(average_precision_score(y_val, model.predict_proba(X_val)[:, 1]))
 ```
 
 **¿Por qué los árboles le ganan al deep learning en tabular?** El paper canónico es Grinsztajn, Oyallon & Varoquaux (NeurIPS 2022, *"Why do tree-based models still outperform deep learning on typical tabular data?"*). Tres razones de sesgo inductivo: (1) las redes tienden a funciones demasiado suaves, los árboles aprenden funciones irregulares con facilidad; (2) los features no informativos perjudican a las redes pero no a los árboles; (3) los árboles preservan la orientación de cada feature (en tabular, cada columna significa algo distinto). Sigue siendo la cita de referencia en 2026.
 
-**La frontera viva (sé honesto):** los **tabular foundation models** —**TabPFN-2.5** (un transformer pre-entrenado en millones de datasets sintéticos que predice por in-context learning, sin entrenar)— lideran benchmarks como **TabArena** y le ganan a XGBoost default **en datasets chicos** (≲10k filas, ≲500 features). Pero tienen topes de tamaño (degradan/OOM en datasets grandes), el soporte de regresión va por detrás y la calibración es despareja. El consenso de practicantes: **el GBDT sigue en el trono para producción**, sobre todo a escala. Presentá TabPFN como "baseline fuerte a probar en datos chicos", no como reemplazo. El titular "le ganó a XGBoost sin tunear" es cierto **solo** en el régimen de datos chicos.
+**La frontera viva (sé honesto):** los **tabular foundation models** —**TabPFN-2.5** (un transformer pre-entrenado en millones de datasets sintéticos que predice por in-context learning, sin entrenar)— lideran benchmarks como **TabArena** y le ganan a XGBoost default **en datasets chicos** (100% de win-rate sin tunear en el régimen ≲10k filas / ≲500 features). La 2.5 amplió el soporte hasta ~50k filas / 2k features (con win-rate aún alto), y trae destilación a MLP/árbol para servir con baja latencia. Igual: a escala grande el soporte de regresión va por detrás y conviene medir antes de confiar. El consenso de practicantes: **el GBDT sigue en el trono para producción**, sobre todo a escala. Presentá TabPFN como "baseline fuerte a probar en datos chicos", no como reemplazo. El titular "le ganó a XGBoost sin tunear" es cierto **solo** en el régimen de datos chicos.
 
 ---
 
@@ -119,8 +122,8 @@ from scipy.sparse import csr_matrix
 
 # matriz usuario×ítem con "confianza" (ej. # de interacciones), no ratings
 model = implicit.als.AlternatingLeastSquares(factors=64, regularization=0.05)
-model.fit(user_item_matrix)              # csr_matrix
-recs = model.recommend(user_id, user_item_matrix[user_id], N=10)
+model.fit(user_item_matrix)              # csr_matrix user×item (¡la orientación cambió en implicit 0.5.0: antes era item×user!)
+recs = model.recommend(user_id, user_item_matrix[user_id], N=10)  # user_item_matrix[user_id] debe quedar como CSR de 1 fila (2D), no 1D
 ```
 
 **Content-based**: recomendar por atributos del ítem (categoría, marca, texto, precio, imagen) → representar ítems como vectores → similitud. La realización **moderna** es **basada en embeddings** (de texto/imagen) — exactamente el puente con el vector search que ya sabés ([vector-dbs.md](vector-dbs.md)). Las features de contenido son la palanca principal para el **cold-start de ítems** (ítems nuevos sin historial de interacciones).
@@ -149,6 +152,8 @@ El concepto más importante de "cómo funcionan los recomendadores grandes" (You
 > El embudo **barato-y-amplio → caro-y-preciso** es el modelo mental durable. Muchos sistemas reales agregan una etapa de *pre-ranking* en el medio (tres etapas).
 
 **Learning-to-rank (etapa de ranking).** El baseline dominante y durable es **LambdaMART** — un GBDT optimizado para ranking, implementado como `rank:ndcg` en XGBoost y en LightGBM. Sobre features tabulares, sigue siendo robusto, interpretable y difícil de batir. Los modelos de ranking *deep* (DLRM, transformers) se usan a la máxima escala, pero el debate deep-vs-GBDT sigue abierto en 2026: **no le digas a nadie que el ranking deep "ganó"; LambdaMART/GBDT es el default pragmático** para la mayoría del e-commerce.
+
+> **Dos sesgos que un recomendador serio tiene que manejar:** (1) **Position bias** — los clicks están sesgados por la posición en que mostraste el ítem (lo de arriba se clickea más, sea o no más relevante); entrenar el ranker con esos clicks crudos lo refuerza. Se corrige con position-debiasing (modelar la probabilidad de examen por posición). Es el gemelo, dentro del ranking, del sesgo de logging del módulo 9. (2) **Popularity bias / diversity** — el embudo tiende a amplificar lo ya popular y a empobrecer la diversidad/novedad; medí y, si hace falta, re-rankeá por diversidad (no todo es relevancia pura).
 
 ---
 
@@ -241,7 +246,7 @@ Porque el fraude es una **clase rara** (quizá <1%): un modelo que dice "nunca h
 **Target leakage**: `dias_desde_cancelacion` solo existe **después** de que el cliente canceló — es prácticamente la respuesta disfrazada de feature. En entrenamiento "predice" perfecto porque está mirando el futuro. En producción, en el momento de predecir (cliente activo), ese feature **no existe o es nulo**, así que el modelo no tiene la señal de la que dependía y colapsa. Hay que eliminar todo feature que no esté disponible en el instante real de la predicción.
 
 ### Solución 4
-a) **Feedback implícito**: clicks/compras como señales positivas con confianza ponderada (más interacciones = más confianza); **no** tratar "no vio" como negativo. b) **Dos etapas**: *retrieval* con ALS-implícito o two-tower (reduce 2M → ~500 candidatos, vía ANN); *ranking* con LambdaMART/GBDT usando cross-features usuario×ítem sobre esos ~500. c) **Cold-start**: features de contenido (categoría, marca, embedding de la descripción/imagen) hasta que acumule interacciones — un enfoque híbrido. d) **Vector search**: en el retrieval — los embeddings de ítems se indexan con ANN (HNSW/IVF en tu vector DB) y buscás los vecinos del embedding del usuario.
+a) **Feedback implícito**: clicks/compras como señales positivas con confianza ponderada (más interacciones = más confianza); **no** tratar "no vio" como negativo. b) **Dos etapas**: *retrieval* con ALS-implícito o two-tower (reduce 2M → ~500 candidatos, vía ANN); *ranking* con LambdaMART/GBDT usando cross-features usuario×ítem sobre esos ~500. (A 2M ítems, muchos sistemas reales intercalan un **pre-ranking** entre retrieval y ranking — las tres etapas del módulo 8.) c) **Cold-start**: features de contenido (categoría, marca, embedding de la descripción/imagen) hasta que acumule interacciones — un enfoque híbrido. d) **Vector search**: en el retrieval — los embeddings de ítems se indexan con ANN (HNSW/IVF en tu vector DB) y buscás los vecinos del embedding del usuario.
 
 ### Solución 5
 1) **Sesgo de la política de logging**: el eval offline solo puntúa sobre los ítems que el sistema viejo mostró; el modelo nuevo quizá es mejor justo en ítems que nunca estuvieron en los logs, y eso el offline no lo puede ver (ni premiar ni castigar). 2) **La métrica offline (NDCG sobre clicks/relevancia histórica) no es el objetivo de negocio (compras)**: mejorar el orden de ítems "relevantes" según el log no necesariamente mueve la conversión — pueden ser ítems que el usuario igual no compra. Por eso el A/B online es el árbitro final.
