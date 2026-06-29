@@ -1,8 +1,8 @@
-# Banco de casos de diseño de sistemas: 16 problemas resueltos de punta a punta
+# Banco de casos de diseño de sistemas: 17 problemas resueltos de punta a punta
 
-**Los casos clásicos de entrevista senior, resueltos con el método · feed, chat, notificaciones, typeahead, archivos, rate limiter, crawler, reservas/pagos, proximidad, métricas en streaming, edición colaborativa, caché distribuida, streaming de video, ledger de pagos, matching de órdenes, asistente RAG/LLM · el recorrido importa más que la respuesta · 2026**
+**Los casos clásicos de entrevista senior, resueltos con el método · feed, chat, notificaciones, typeahead, archivos, rate limiter, crawler, reservas/pagos, proximidad, métricas en streaming, edición colaborativa, caché distribuida, streaming de video, ledger de pagos, matching de órdenes, asistente RAG/LLM, scheduler distribuido · el recorrido importa más que la respuesta · 2026**
 
-> Cómo usar este banco: este módulo es la **práctica** de [Diseño de sistemas backend](system-design.md). Ahí aprendiste el método y el criterio; acá los aplicamos a los 16 problemas que más caen en entrevistas. Para cada caso, **tapá la solución y resolvelo vos primero en voz alta** siguiendo los 6 pasos; después contrastá. Lo que se evalúa no es si llegás a *mi* diseño, sino si recorrés bien: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs. Son **16 casos**.
+> Cómo usar este banco: este módulo es la **práctica** de [Diseño de sistemas backend](system-design.md). Ahí aprendiste el método y el criterio; acá los aplicamos a los 17 problemas que más caen en entrevistas. Para cada caso, **tapá la solución y resolvelo vos primero en voz alta** siguiendo los 6 pasos; después contrastá. Lo que se evalúa no es si llegás a *mi* diseño, sino si recorrés bien: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs. Son **17 casos**.
 
 **El método, en una línea** (de [system-design](system-design.md) módulo 1): **(1)** aclarar requisitos (sobre todo los **no funcionales**: escala, lectura/escritura, latencia, consistencia), **(2)** estimar (back-of-the-envelope), **(3)** API + modelo de datos, **(4)** diseño de alto nivel, **(5)** profundizar **donde duele**, **(6)** discutir trade-offs. No hay respuestas correctas, hay **decisiones justificadas**.
 
@@ -27,6 +27,7 @@
 14. Payment ledger / billetera — *contabilidad de doble entrada + log inmutable*
 15. Order matching engine (exchange) — *order book en memoria + matching secuencial determinista (event sourcing)*
 16. Sistema RAG / asistente LLM — *recuperación + generación fundamentada con citas (el LLM como dependencia cara/lenta/no determinista)*
+17. Distributed job scheduler — *disparo programado a escala: índice por tiempo + claim atómico con lease*
 
 > **El patrón que se repite.** Vas a ver que los mismos ladrillos reaparecen en casi todos los casos: **fan-out** (¿escribo a muchos en la escritura o leo de muchos en la lectura?), **caché del camino caliente**, **idempotencia ante reintentos**, **colas para desacoplar y absorber picos**, **sharding por la clave de acceso**, y **el caso patológico** (la celebridad, el prefijo popular, el archivo gigante). Aprender a *reconocer* qué ladrillo aplica es la mitad de la entrevista.
 
@@ -868,6 +869,69 @@ interface Contexto {
 }
 ```
 
+## Caso 17 — Distributed job scheduler (programar millones de jobs en el tiempo)
+
+> Cierra el banco con el patrón que más se confunde con "una cola". Una **cola** (caso 3/7) responde *"¿qué ejecuto ahora?"*; un **scheduler** responde *"¿qué debe ejecutarse y exactamente cuándo?"*. Acá el reto **no** es ejecutar el job —eso es el worker pool del caso 7— sino **decidir qué disparar y en qué instante, a escala, sin dispararlo de más**. La teoría de durable execution, sagas y "el cron que no debe dispararse N veces" vive en [Workflows durables](workflows.md); este caso es el **diseño del servicio de scheduling** que está debajo.
+
+**1. Requisitos.**
+- Funcionales: programar un job **one-shot diferido** ("en 30 min", "el 2026-07-01 a las 09:00") o **recurrente** (cron: "todos los días a las 3am"); **cancelar/reprogramar**; al vencer, **entregar** el job a un ejecutor; **reintentar** si la ejecución falla.
+- No funcionales: **escala** (decenas–cientos de millones de jobs programados vivos); **puntualidad acotada** (disparar cerca de la hora prometida — un job "a las 9:00" no puede salir 9:05; el SLA de puntualidad es un número, no "lo antes posible"); **at-least-once + sin duplicados *visibles*** (cada job se dispara al menos una vez; los duplicados los absorbe la idempotencia del ejecutor, no el scheduler); **durabilidad** (un job programado sobrevive a un crash — no se pierde un cobro mensual porque el nodo se reinició); **alta disponibilidad** (el scheduler no puede ser un SPOF). El reto central: **encontrar los jobs vencidos a escala y dispararlos una sola vez**.
+
+**2. Estimación.** No es un problema de storage. 100M jobs × ~300 bytes (payload + schedule + metadata) ≈ **30 GB** → entra en una DB cómodamente. La tasa **promedio** es engañosa: 100M jobs repartidos en un mes ≈ **~38 disparos/s**, trivial. El reto son los **picos**: si apenas el **1%** son cron de medianoche (`0 0 * * *`), **1 millón de jobs con el mismo vencimiento exacto** → un **frente de 10⁶ disparos a drenar de golpe** (no una tasa sostenida de 38/s), cinco órdenes de magnitud sobre el promedio. La estimación acá no dimensiona discos: justifica que **se dimensiona para el pico, no para el promedio**, y que la pregunta cara es *"¿cuáles de los 100M vencen ahora?"* — que tiene que costar un *range scan*, no un *full scan*.
+
+**3. API y datos — el índice por tiempo.**
+```
+POST   /jobs            { runAt | cron, payload, idempotencyKey }  → { jobId }
+PATCH  /jobs/{jobId}    { runAt? | cron? }
+DELETE /jobs/{jobId}
+```
+- **Modelo de datos:** tabla `jobs` (`jobId | next_run_at | cron | payload | status | locked_until | owner`) con un **índice sobre `next_run_at`**. Esa columna indexada es lo que vuelve barata la pregunta del paso 2: *"dame los vencidos"* es `WHERE next_run_at <= now()` → un **range scan** sobre el índice, no un escaneo de 100M filas (encontrarlos es barato; **reclamarlos** sigue acotado a N por tick — ver la tormenta de medianoche).
+- **Recurrentes = one-shot que se re-agenda.** Un cron no es una entidad especial: guardás la **expresión**, y al disparar **calculás el próximo `next_run_at`** y lo reprogramás (mismo registro, nuevo vencimiento). Así el motor de disparo solo entiende de "`next_run_at` vencido"; la recurrencia es un detalle del re-agendado.
+
+**4. La decisión clave — cómo encontrar los vencidos y reclamarlos exactamente una vez.**
+- **Polling de un índice ordenado por tiempo** (el enfoque por defecto): cada *tick* (p. ej. cada 1 s), `SELECT ... WHERE next_run_at <= now() ORDER BY next_run_at FOR UPDATE SKIP LOCKED LIMIT N`. Simple, **durable** (la DB es la fuente de verdad) y escala a millones. El **intervalo de polling fija la granularidad** de puntualidad: poll cada 1 s → disparás con ~1 s de jitter.
+- **Timer wheel en memoria** (para puntualidad sub-segundo): una rueda de *timing wheel* que avanza tick a tick da disparo de milisegundos y programa/cancela/expira en **O(1) amortizado** (lo usan Kafka Purgatory y Netty), frente al O(log n) del índice de la DB; pero su estado vive en RAM → necesita durabilidad y recovery aparte. El **híbrido** habitual: la **DB es la verdad durable**, y un timer wheel en memoria carga solo la **ventana próxima** (los jobs de los próximos N minutos) para dispararlos con precisión.
+- **Disparo sin duplicar (el corazón).** Con varios nodos scheduler corriendo para HA, hay que evitar que dos disparen el mismo job. Dos vías:
+  - **Claim atómico:** `SELECT ... FOR UPDATE SKIP LOCKED` (Postgres) **+ un `UPDATE locked_until = now()+lease, owner = yo` en la misma transacción**. Ojo: `SKIP LOCKED` por sí solo toma el lock de fila **solo mientras dura la transacción** —al commitear se suelta—; lo que hace que el lease **sobreviva al commit** (y que un crash justo después no deje el job ni perdido ni eternamente bloqueado) es **escribir** `locked_until`/`owner` en la fila. Es el **claim del caso 8** (reservas) y la **cola del caso 7**: cada nodo agarra un lote distinto sin pisarse.
+  - **Sharding + leader election:** particionás los jobs por `jobId` (cada nodo dueño de un rango → un solo nodo mira cada job, sin pelear por locks), y al caer un nodo se **reasignan sus shards** vía *leader election* ([consenso](consenso.md), [workflows](workflows.md) M5). Escala mejor pero agrega rebalanceo.
+- **Separación scheduler ↔ ejecutor.** El scheduler **decide cuándo** y **encola**; la **cola + worker pool ejecuta y reintenta** (caso 3/7). No mezclar: el scheduler no ejecuta el trabajo en el hot path del disparo, solo lo despacha.
+
+**5. Donde duele — la tormenta de medianoche, duplicados, clock skew, leases huérfanos y catch-up.**
+- **La tormenta de medianoche (thundering herd de cron).** Millones de jobs `0 0 * * *` vencen en el mismo segundo → el pico satura el dispatch y los workers. Mitigación: **jitter** (esparcir el disparo en una ventana de ±minutos si el job lo tolera — casi siempre lo tolera); **dispatch a tasa acotada** (el scheduler encola a un ritmo techado y la **cola absorbe el pico** — la frontera acotada del caso 7 + el desacople por colas del caso 3); y **dimensionar los workers para el pico**, no para el promedio. Es **backpressure**: no dispares más rápido de lo que el sistema aguas abajo puede tragar.
+- **At-least-once → duplicados (el modo de falla central).** El scheduler reclama un job, lo encola, y **crashea antes de marcarlo como disparado** → al recuperar, lo vuelve a disparar. **Exactly-once de punta a punta es imposible** (el mismo límite del caso 3 y de [workflows](workflows.md)): la garantía real es **at-least-once + idempotencia en el ejecutor** (el `idempotencyKey` del caso 8 deduplica el segundo disparo). Marcar el disparo en la misma transacción que el claim cierra el hueco *claim↔marca*, pero **el encolado vive fuera de la DB** (la cola es otro sistema) → la ventana sigue abierta; el patrón canónico para acercarla a cero es un **transactional outbox** (escribir el "a encolar" en la misma transacción + un relay que publica), y **aun así el ejecutor debe ser idempotente**. El scheduler promete *"se dispara"*, no *"se dispara una sola vez"*.
+- **Clock skew.** Cada nodo scheduler tiene su propio reloj; si cada uno decide "vencido" contra su **reloj de pared**, uno dispara temprano y otro tarde, y dos nodos pueden creer que un job todavía no vence (o ya venció) en desacuerdo. Mitigación: una **única fuente de tiempo** para el due-check (el `now()` de la **DB**, o relojes NTP-sincronizados con tolerancia explícita). Es el mismo cuidado que el *clock skew* de los IDs Snowflake ([datos-escala](datos-escala.md) M13).
+- **Leases huérfanos.** Un nodo reclama un job (lock) y muere **sin dispararlo ni soltarlo** → el job queda "claimed" para siempre y nunca se ejecuta. Mitigación: el claim es un **lease con expiración** (`locked_until = now + leaseMs`); si el lease vence sin confirmación de disparo, **otro nodo lo re-reclama**. Es el *visibility timeout* de SQS llevado al scheduler.
+- **Catch-up de recurrentes (missed runs).** El scheduler estuvo caído 2 horas; al volver, ¿dispara los cron que se perdió o salta al próximo? Es una **decisión de producto explícita**: **catch-up** (dispara los atrasados — peligroso: si son muchos, es una tormenta auto-infligida al arrancar) vs **skip-and-realign** (saltea al próximo vencimiento válido). Quartz lo llama *misfire policy*; lo importante en la entrevista es **nombrar el dilema y elegir**, no que haya una única respuesta.
+
+> **4 capas — el scheduler que dispara un job dos veces:**
+> 1. **Qué se rompe:** el scheduler reclama un job, lo encola y **crashea antes de confirmar el disparo**; al recuperar, lo dispara de nuevo → el ejecutor corre el job **dos veces** (un cobro duplicado, dos emails).
+> 2. **Por qué a esta escala/uso:** con HA hay **varios nodos** mirando el mismo conjunto de jobs y los crashes son rutina a escala; **exactly-once de disparo es imposible** entre "reclamar" y "marcar disparado" hay una ventana sin atomicidad cross-sistema.
+> 3. **Control de corto plazo:** **claim atómico** (`FOR UPDATE SKIP LOCKED`) para que dos nodos no reclamen el mismo job a la vez; **lease con expiración** para no perder un job cuyo dueño murió, sin dispararlo eternamente.
+> 4. **Cambio de diseño:** asumir **at-least-once** y empujar la unicidad al **ejecutor idempotente** (`idempotencyKey`, caso 8); marcar el disparo en la **misma transacción** que el claim (o un **transactional outbox** para el encolado, que vive fuera de la DB); **sharding + leader election** para que un solo nodo sea dueño de cada job.
+
+**6. Trade-offs.**
+- **Polling (DB) vs timer wheel (memoria).** Polling: simple, durable, escala — pero la granularidad es el intervalo de poll (sub-segundo barato no se consigue). Timer wheel: preciso al ms, pero estado en RAM → durabilidad y recovery aparte. El híbrido (DB durable + ventana próxima en memoria) compra precisión sin perder durabilidad, a costa de complejidad.
+- **Centralizado (un leader dispara) vs particionado (cada nodo su shard).** Leader único: simple, cero doble-disparo, pero el techo de throughput es **un nodo** y es un SPOF (mitigado por re-elección). Particionado por `jobId`: escala horizontal, pero hay que **rebalancear shards** al cambiar la membresía del cluster ([consenso](consenso.md)).
+- **Puntualidad vs costo.** Poll cada 100 ms = más puntual, más carga sobre la DB; cada 10 s = barato pero ±10 s de jitter. Se elige por el **SLA de puntualidad**, no por gusto — y se mide con el **scheduling lag** (el p99 de `disparo_real − next_run_at`), la métrica que valida que el diseño cumple la puntualidad prometida en los requisitos.
+- **At-least-once es el techo (no lo pelees).** Igual que el caso 3 y [workflows](workflows.md): no prometas exactly-once de disparo; prometé **at-least-once + idempotencia**. Pelear por exactly-once de disparo es perseguir una garantía que el sistema no puede dar.
+
+> **El cierre de criterio — no sobre-diseñar.** ¿Unos pocos jobs recurrentes, una sola máquina, y tolerás que un disparo se pierda si esa máquina está caída? El **`cron` de Linux**, un `setTimeout`, o el **`repeat` de BullMQ** ([Redis](redis.md)) alcanzan y sobran. ¿Necesitás cron en un **cluster** sin que dispare N veces? Un **lock distribuido por tick** o **leader election** ([workflows](workflows.md) M5) lo resuelve sin construir un servicio. El escalón intermedio más común en producción —y lo que implementa el ejercicio 17.5— es una **tabla `jobs` + un worker que pollea con `FOR UPDATE SKIP LOCKED`**: resuelve la enorme mayoría de los casos sin un servicio dedicado. El scheduler distribuido completo (índice por tiempo, claim con lease, **sharding + leader election + timer wheel**) es para cuando programás **millones** de jobs con **SLA de puntualidad** y **HA real** — un EventBridge Scheduler / Cloud Scheduler / Quartz a escala. Para casi todo lo demás, **"usá el cron que ya tenés" es la respuesta correcta** — no construyas un scheduler distribuido sin necesidad. La teoría de durable execution, sagas y el cron-que-no-dispara-N-veces vive en [Workflows durables](workflows.md); las colas y el worker pool en [Redis](redis.md) y los casos 3/7; la idempotencia del ejecutor en el caso 8.
+
+**Ejercicios — Caso 17**
+17.1 🔁 ¿Por qué la columna `next_run_at` **con índice** es lo que vuelve barata la pregunta "¿qué jobs vencen ahora?", y cómo se modela un job **recurrente** (cron) sin que el motor de disparo tenga que entender de cron?
+17.2 🧠 La **tormenta de medianoche**: millones de cron `0 0 * * *` vencen en el mismo segundo. ¿Qué se rompe y con qué tres palancas lo mitigás?
+17.3 🧠 Recorré las **4 capas** del modo de falla central: el scheduler reclama un job, lo encola y crashea antes de marcarlo como disparado.
+17.4 🧠 **Polling** de un índice por tiempo vs **timer wheel** en memoria: ¿qué trade-off tiene cada uno y qué **híbrido** usarías para puntualidad sub-segundo sin perder durabilidad?
+17.5 ✍️ Implementá `reclamarVencidos(jobs, ahora, leaseMs, limite)`: `jobs` viene **ordenado por `nextRunAt` ascendente** (el orden del índice). Reclamá hasta `limite` jobs que estén **vencidos** (`nextRunAt <= ahora`) **y libres** (sin lease, o con el lease **expirado**), marcándolos in-place con un **lease nuevo** (`lockedUntil = ahora + leaseMs`), y devolvé los reclamados. Esto modela el `FOR UPDATE SKIP LOCKED` + lease del dispatcher. Usá los tipos de abajo.
+```ts
+interface Job {
+  id: string;
+  nextRunAt: number;          // epoch ms del próximo disparo
+  lockedUntil: number | null; // lease: hasta cuándo está reclamado; null = libre
+}
+```
+17.6 🧠 Tu scheduler estuvo caído 2 horas y al volver hay cientos de cron recurrentes que "se perdieron" su disparo. ¿Qué políticas tenés (catch-up vs skip-and-realign) y cuándo elegís cada una?
+
 ---
 
 # Soluciones
@@ -1339,8 +1403,62 @@ function armarContexto(
 // el historial; acá modelamos solo los chunks. (3) Las `fuentes` son lo que se cita al usuario.
 ```
 
-Estos 16 casos cubren los patrones que más caen: fan-out, tiempo real, async con colas, lectura-intensivo con precómputo, separación metadata/contenido, estado compartido atómico, procesamiento masivo, consistencia fuerte transaccional, indexación espacial, agregación en streaming por event-time, convergencia de ediciones concurrentes (OT/CRDT), particionado por consistent hashing, distribución de contenido por CDN, contabilidad de doble entrada, matching secuencial determinista y recuperación aumentada (RAG). Para seguir:
+### Caso 17 — Distributed job scheduler
+**17.1** Porque la pregunta que el scheduler hace en cada *tick* es siempre la misma —*"¿qué jobs tienen `next_run_at <= ahora`?"*— y un **índice sobre `next_run_at`** la convierte en un **range scan** (recorrer solo el tramo del índice cuyo vencimiento ya pasó) en vez de un **full scan** de los 100M registros. Sin el índice, encontrar los vencidos cuesta O(n) en cada tick y el scheduler colapsa a escala; con el índice, cuesta O(log n + k) donde k son los vencidos. Un job **recurrente** no es una entidad especial: se guarda la **expresión cron** y se modela como un **one-shot que se re-agenda a sí mismo** — al dispararlo, calculás el **próximo** `next_run_at` a partir del cron y actualizás el mismo registro. Así el motor de disparo **solo entiende de "`next_run_at` vencido"**; la recurrencia queda encapsulada en el paso de re-agendado, no en la consulta caliente.
 
-- **Resolvé en voz alta los que faltan**, reusando los mismos ladrillos: "diseñá un full-text search" (índice invertido + el caso 4 de precómputo — ya hay un módulo dedicado en [Búsqueda a escala](busqueda.md)), "diseñá un distributed job scheduler" (las colas del caso 3/7 + leader election, con la teoría en [Workflows durables](workflows.md)). Lo que se evalúa es el recorrido, no la respuesta.
+**17.2** Se rompe porque millones de jobs comparten **exactamente** el mismo vencimiento (`0 0 * * *` = medianoche) → en un segundo el scheduler tiene que despachar 10⁶ jobs y los workers tienen que ejecutarlos, un pico de cinco órdenes de magnitud sobre el promedio que **satura el dispatch, la cola y los workers** a la vez. Tres palancas: **(1) jitter** — esparcir el disparo en una ventana de ±minutos (la mayoría de los jobs "de medianoche" toleran salir 00:03 en vez de 00:00; solo no jitterás los que tienen un instante duro real); **(2) dispatch a tasa acotada + cola** — el scheduler **encola a un ritmo techado** y la **cola absorbe el pico** (la frontera acotada del caso 7 + el desacople del caso 3), de modo que el pico se convierte en una **ráfaga que se drena en minutos** en vez de un golpe instantáneo; **(3) dimensionar los workers para el pico**, no para el promedio de 38/s (o autoescalar la flota de workers ante la profundidad de la cola). En una línea: es **backpressure** — nunca dispares más rápido de lo que aguas abajo puede tragar.
+
+**17.3** **(1) Qué se rompe:** el scheduler selecciona un job vencido, lo **reclama** y lo **encola**, pero **crashea antes de marcarlo como disparado** en la DB; al recuperar, lo ve "pendiente" otra vez y lo **dispara de nuevo** → el ejecutor corre el job **dos veces** (un cobro mensual duplicado, dos notificaciones). **(2) Por qué a esta escala/uso:** con HA hay **varios nodos** scheduler mirando el mismo conjunto de jobs, y los crashes son rutina a escala; entre "encolé" y "marqué disparado" hay una **ventana sin atomicidad cross-sistema** (la cola y la tabla de jobs son recursos distintos), así que **exactly-once de disparo es imposible**. **(3) Control de corto plazo:** **claim atómico** (`FOR UPDATE SKIP LOCKED`) para que dos nodos no reclamen el mismo job simultáneamente; **lease con expiración** (`locked_until`) para que un job cuyo dueño murió no quede ni perdido ni disparándose para siempre — otro nodo lo re-reclama cuando el lease vence. **(4) Cambio de diseño:** asumir **at-least-once** y empujar la unicidad al **ejecutor idempotente** (`idempotencyKey` del caso 8, que deduplica el segundo disparo); marcar el disparo en la **misma transacción** que el claim cuando el ejecutor vive en la misma DB; **sharding por `jobId` + leader election** para que **un solo nodo** sea dueño de cada job y la pelea por el lock desaparezca.
+
+**17.4** **Polling de un índice por tiempo** (cada tick, `SELECT ... WHERE next_run_at <= now() FOR UPDATE SKIP LOCKED`): es **simple y durable** —la DB es la fuente de verdad, un crash no pierde nada— y **escala a millones**; el costo es que la **granularidad de puntualidad = el intervalo de poll** (poll cada 1 s → ±1 s de jitter; bajar a 100 ms para más precisión carga más la DB). **Timer wheel en memoria** (una *timing wheel* que avanza tick a tick y dispara los timers de cada slot): da puntualidad de **milisegundos**, pero su estado vive en **RAM** → un crash lo borra, así que necesita **durabilidad y recovery aparte**. El **híbrido** que usaría: la **DB indexada es la verdad durable** y un **timer wheel en memoria carga solo la ventana próxima** (los jobs de los próximos N minutos, recargada periódicamente desde la DB). Así obtenés disparo sub-segundo de la rueda **sin perder durabilidad**: si el nodo muere, la ventana se reconstruye desde la DB; lo único en riesgo son los segundos en vuelo, que el lease + el re-claim recuperan.
+
+**17.5**
+```ts
+interface Job {
+  id: string;
+  nextRunAt: number;          // epoch ms del próximo disparo
+  lockedUntil: number | null; // lease: hasta cuándo está reclamado; null = libre
+}
+
+// `jobs` viene ordenado por nextRunAt ascendente (el orden del índice): los primeros del
+// array son los MÁS vencidos. Reclama hasta `limite` jobs vencidos y libres, marcándolos
+// in-place con un lease nuevo. Modela el `FOR UPDATE SKIP LOCKED` + lease del dispatcher.
+function reclamarVencidos(
+  jobs: Job[],
+  ahora: number,
+  leaseMs: number,
+  limite: number,
+): Job[] {
+  const reclamados: Job[] = [];
+  for (const job of jobs) {
+    if (reclamados.length >= limite) break;   // dispatch a tasa acotada: paro al llegar al lote
+    const vencido = job.nextRunAt <= ahora;
+    const libre = job.lockedUntil === null || job.lockedUntil <= ahora; // null = libre; lease expirado = re-reclamable
+    if (vencido && libre) {
+      job.lockedUntil = ahora + leaseMs;       // claim: tomo el lease (el SKIP LOCKED en memoria)
+      reclamados.push(job);
+    }
+  }
+  return reclamados;
+}
+// Notas: (1) el `lease` (lockedUntil) es lo que da la garantía del 17.3: un job reclamado por un
+// nodo que después muere SIN dispararlo vuelve a estar "libre" cuando `lockedUntil <= ahora`, y
+// otro nodo lo re-reclama — ni se pierde ni se dispara dos veces a la vez. (2) Reclamar NO es
+// disparar: el caller encola los reclamados y, recién tras confirmar el disparo, los marca/los
+// re-agenda (si son cron, recalcula `nextRunAt`); si crashea antes, el lease expira y se reintenta
+// → at-least-once + idempotencia en el ejecutor (caso 8). (3) `limite` acota el lote por tick
+// (backpressure del 17.2): como `jobs` está ordenado, tomar los primeros `limite` libres = atender
+// primero a los más vencidos. (4) Muta los jobs in-place igual que un claim real marca la fila en
+// la DB. (5) el `for` recorre `jobs` hasta llenar el lote; en SQL el índice sobre `next_run_at` +
+// `LIMIT N` evita tocar los no vencidos — el ejercicio en memoria no modela esa poda del índice.
+// (6) esta selección+marcado es acá un `for` single-thread, pero en la DB es UNA transacción atómica
+// por nodo (`FOR UPDATE SKIP LOCKED`): el array modela la LÓGICA, no la CONCURRENCIA que justifica el SKIP LOCKED.
+```
+
+**17.6** Las dos políticas son **catch-up** (al volver, disparás todos los vencimientos que se perdieron mientras estabas caído) y **skip-and-realign** (ignorás los atrasados y saltás directo al **próximo** vencimiento válido). **Catch-up** sirve cuando cada ejecución importa y no es reemplazable —un job de **facturación** o de **cierre contable** que se saltó hay que correrlo igual— pero es **peligroso**: si se acumularon cientos de disparos, al arrancar generás una **tormenta auto-infligida** (el mismo thundering herd del 17.2, ahora provocado por el propio recovery) → conviene combinarlo con jitter/rate-limit, o con un *cap* ("corré a lo sumo el último, no los 120 atrasados"). **Skip-and-realign** sirve cuando el job es **idempotente sobre el estado actual** y solo importa el "ahora" —un job que **recalcula un agregado** o **refresca un caché** no gana nada corriendo 120 veces seguidas, le alcanza con la próxima— y evita la tormenta por construcción. Hay una **tercera vía intermedia**: **coalescer** los disparos perdidos en **una sola corrida** al volver (ni los 120 ni cero: uno), lo que ofrecen varios schedulers modernos — ideal cuando querés que el job **corra** tras el outage pero **no N veces**. Quartz formaliza esto como *misfire policy*; lo entrevistable es **nombrar el dilema y justificar la elección según si cada corrida perdida tiene valor propio o no**, no que exista una respuesta única.
+
+Estos 17 casos cubren los patrones que más caen: fan-out, tiempo real, async con colas, lectura-intensivo con precómputo, separación metadata/contenido, estado compartido atómico, procesamiento masivo, consistencia fuerte transaccional, indexación espacial, agregación en streaming por event-time, convergencia de ediciones concurrentes (OT/CRDT), particionado por consistent hashing, distribución de contenido por CDN, contabilidad de doble entrada, matching secuencial determinista, recuperación aumentada (RAG) y disparo programado a escala. Para seguir:
+
+- **Resolvé en voz alta los que faltan**, reusando los mismos ladrillos: "diseñá un full-text search" (índice invertido + el caso 4 de precómputo — ya hay un módulo dedicado en [Búsqueda a escala](busqueda.md)). Lo que se evalúa es el recorrido, no la respuesta.
 - **Conectá cada decisión con su implementación en el hub:** colas e idempotencia en [Event-driven](event-driven.md) y [Redis](redis.md), el contrato de cada API en [API design](api-design.md), tiempo real en [Tiempo real](tiempo-real.md), datos en [PostgreSQL](postgresql.md)/[NoSQL](nosql.md), control de flujo en [Concurrencia](concurrencia.md), y cómo operarlo en [Observabilidad](observabilidad.md).
 - **Volvé al método** de [Diseño de sistemas](system-design.md) módulo 1 cada vez: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs. El método es el mismo para los 16 casos y para cualquier problema nuevo que te tiren.
