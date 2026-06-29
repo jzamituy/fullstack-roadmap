@@ -76,6 +76,8 @@ func BenchmarkConcatenar(b *testing.B) {
 ```
 
 > 📝 Con `for b.Loop()` el setup previo al loop **no se mide** por diseño, así que **no necesitás `b.ResetTimer()`** acá. Ese `b.ResetTimer()` quedaba para el patrón clásico `for i := 0; i < b.N; i++`, cuando el setup costoso iba dentro de la función y había que descartar su tiempo.
+>
+> 📝 **Cuál usar hoy:** escribí `for b.Loop()` por defecto en Go 1.24+; conocé igual el `for i := 0; i < b.N; i++` clásico, porque lo vas a leer en casi todo el código y los benchmarks ya existentes.
 
 Lo corrés y leés:
 
@@ -88,7 +90,7 @@ BenchmarkConcatenar-8    5000000    250 ns/op    48 B/op    2 allocs/op
 ```
 
 Cómo leerlo:
-- **`-8`** = `GOMAXPROCS` (cores). **`5000000`** = iteraciones que corrió — **lo decide el framework**, no vos (con `b.Loop()` ni siquiera lo gobernás); no lo interpretes como "vueltas que elegí". Las lecturas útiles son las tres que siguen. **`250 ns/op`** = tiempo por operación.
+- **`-8`** = `GOMAXPROCS` (cores). **`5000000`** = iteraciones que corrió — **lo decide el framework**, no vos (con `b.Loop()` ni siquiera lo gobernás); no lo interpretes como "vueltas que elegí". Con `b.Loop()` el framework corre el cuerpo una sola vez y decide internamente cuántas iteraciones medir: el número de la salida sigue siendo iteraciones medidas, pero ya no surge del tanteo iterativo de `b.N` del patrón clásico. Las lecturas útiles son las tres que siguen. **`250 ns/op`** = tiempo por operación.
 - **`48 B/op`** = bytes asignados por operación. **`2 allocs/op`** = **cantidad de asignaciones** al heap por operación — la métrica más accionable: bajar `allocs/op` suele ser la optimización de mayor impacto, porque cada asignación es presión sobre el GC.
 
 > 💡 Para comparar "antes vs después" sin engañarte con el ruido, guardá las salidas y usá **`benchstat`** (`golang.org/x/perf/cmd/benchstat`): te dice si la diferencia es **estadísticamente significativa** o ruido de medición.
@@ -182,6 +184,8 @@ go tool pprof -sample_index=alloc_space mem.out   # qué asignó más en total
 go tool pprof -sample_index=inuse_space mem.out   # qué sigue vivo
 ```
 
+> 📝 En un servicio vivo, el mismo dato aparece bajo **dos endpoints**: `/debug/pprof/heap` (con la vista `inuse_space` por defecto) y `/debug/pprof/allocs` (con `alloc_space` por defecto). Es la **misma muestra**; lo que cambia es el `sample_index` que viene seleccionado.
+
 Causas típicas de muchas asignaciones (y su arreglo, Módulo 9):
 - **Slices/maps que crecen sin preasignar** → `make([]T, 0, n)` con capacidad conocida.
 - **Concatenar strings en loop** (`s += x`) → `strings.Builder`.
@@ -237,6 +241,8 @@ GOGC=200 GOMEMLIMIT=900MiB ./miapp    # menos GC, pero sin pasar de ~900 MiB
 
 El patrón recomendado en Kubernetes (2026): **`GOMEMLIMIT` ≈ 90% del límite de memoria del contenedor**, y `GOGC` en default salvo que un profile diga lo contrario. Así el GC se autorregula contra el techo real del pod en vez de que el kernel te mate el proceso.
 
+> 💡 **Patrón avanzado:** `GOGC=off` (o muy alto) **junto con** `GOMEMLIMIT` deja al GC tranquilo —corre lo mínimo— hasta acercarse al techo de memoria, maximizando el uso de la RAM disponible sin OOM. El runtime respeta `GOMEMLIMIT` incluso con `GOGC=off`. Útil cuando querés exprimir un pod con límite fijo; medilo, no es default.
+
 > ⚠️ **`GOMEMLIMIT` es un límite *suave*:** el GC hará lo posible por respetarlo, pero si tu programa genuinamente necesita más memoria viva, la pedirá igual (mejor eso que petar). No es un reemplazo de arreglar una fuga real.
 
 **Ejercicios 7**
@@ -256,7 +262,7 @@ Causas típicas (todas vistas en [Go para backend](go-backend.md)):
 - Un *worker* que hace `for range ch` sobre un channel que **nunca se cierra**.
 
 Cómo las detectás:
-- **Goroutine profile:** `go tool pprof http://localhost:6060/debug/pprof/goroutine` — te muestra cuántas hay y **en qué línea están bloqueadas**. Si el número crece sin parar con el tráfico, tenés un leak.
+- **Goroutine profile:** `go tool pprof http://localhost:6060/debug/pprof/goroutine` — te muestra cuántas hay y **en qué línea están bloqueadas**. Si el número crece sin parar con el tráfico, tenés un leak. En producción, el **conteo de goroutines vivas** (`go_goroutines` en Prometheus) es una **métrica de alerta** de primer orden: una tendencia que sube y no baja cuando cae la carga es la firma del leak — conecta directo con [Observabilidad](observabilidad.md).
 - **En tests:** `go.uber.org/goleak` falla el test si quedaron goroutines vivas al terminar — un *guardrail* excelente para CI.
 
 ```go
@@ -278,6 +284,8 @@ runtime.SetMutexProfileFraction(1) // muestrea contención de mutex
 ```
 
 Cuándo sospechar contención: throughput que **no escala** al agregar cores/goroutines, o un CPU profile que se ve "ocioso" pese a la carga — señal de que un **lock global** (un cache con `sync.Mutex`, un contador compartido) está serializando todo. La cura suele ser *sharding* del lock, `sync.RWMutex` si hay muchos lectores, o estructuras lock-free (ver [Concurrencia](concurrencia.md)).
+
+> 📝 Sutileza al leer estos perfiles: el **mutex profile** carga la contención en el `Unlock` del que **tenía** el lock (el fin de su sección crítica), no en el `Lock` que esperó; el **block profile** sí señala el **punto de bloqueo** (p. ej. `Mutex.Lock`). Si esperabas ver al que esperaba en el mutex profile, por eso no aparece donde creías.
 
 **Ejercicios 8**
 8.1 🔁 ¿Qué es una goroutine leak y por qué se acumula con el tráfico?
@@ -310,7 +318,7 @@ for _, parte := range partes {
 return b.String()
 ```
 
-- **`sync.Pool`** para **reusar objetos caros** que se crean y descartan muy seguido (buffers, structs grandes) en código de alta frecuencia. Reduce allocs y presión de GC — pero es una optimización avanzada, **solo cuando el profile lo justifica** (mal usado, complica sin ganar). ⚠️ Gotcha clásico: `pool.Get()` devuelve un objeto **potencialmente sucio** (reusado de antes), así que **reseteálo antes de usarlo** (ej. `buf.Reset()`); olvidarse es una fuente típica de bugs de datos cruzados entre requests.
+- **`sync.Pool`** para **reusar objetos caros** que se crean y descartan muy seguido (buffers, structs grandes) en código de alta frecuencia. Reduce allocs y presión de GC — pero es una optimización avanzada, **solo cuando el profile lo justifica** (mal usado, complica sin ganar). ⚠️ Gotcha clásico: `pool.Get()` devuelve un objeto **potencialmente sucio** (reusado de antes), así que **reseteálo antes de usarlo** (ej. `buf.Reset()`); olvidarse es una fuente típica de bugs de datos cruzados entre requests. Y ojo: el pool **se vacía en cada ciclo de GC**, así que solo rinde bajo **alta rotación** de objetos del mismo tipo en el hot path; para objetos de vida larga o poco frecuentes no compra nada.
 - **Evitar conversiones `[]byte`↔`string` innecesarias** en hot paths (cada una puede copiar).
 - **Pasar por valor lo chico, por puntero lo grande/mutable** — pero medí: copiar un struct chico suele ser más barato que la indirección + escape al heap del puntero.
 
@@ -336,7 +344,7 @@ return b.String()
 6. **Volvés a medir** con `benchstat` para confirmar mejora real, no ruido.
 
 **El criterio (lo que más importa):**
-- **El cuello casi siempre es I/O, no la CPU de Go.** Antes de micro-optimizar, mirá si el problema no es una query sin índice ([PostgreSQL](postgresql.md)), llamadas de red en serie que deberían ser concurrentes ([Go para backend](go-backend.md), Módulo 4), o falta de caché ([Redis](redis.md)).
+- **El cuello casi siempre es I/O, no la CPU de Go.** Antes de micro-optimizar, mirá si el problema no es una query sin índice ([PostgreSQL](postgresql.md)), llamadas de red en serie que deberían ser concurrentes ([Go para backend](go-backend.md), Módulo 4), o falta de caché ([Redis](redis.md)). Caso típico: el endpoint tarda p95 = 800 ms, capturás el **CPU profile** y tu código **casi no aparece arriba** — el flame graph se ve "plano". Eso no es un misterio: es el profiler diciéndote *"acá no es"*, porque el 90% del tiempo el handler está **esperando** una query o una llamada externa, no quemando CPU. La pista está en la **traza** (latencia de I/O), no en el CPU profile.
 - **Optimización prematura = deuda.** Complejizar sin un profile que lo respalde casi siempre es una mala inversión.
 - **Esto conecta con observabilidad:** los profiles te dicen el *qué* a nivel de código; las métricas y trazas de [Observabilidad](observabilidad.md) te dicen el *dónde* a nivel de sistema. Profiling continuo (Pyroscope/Grafana) lleva `pprof` a producción permanente.
 
