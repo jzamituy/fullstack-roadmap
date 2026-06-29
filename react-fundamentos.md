@@ -54,6 +54,8 @@ function Componente() {
 
 `{ id: 1 }` del render 1 y `{ id: 1 }` del render 2 tienen el **mismo contenido** pero son **objetos distintos** en memoria (`Object.is` da `false`). Esto, que parece un detalle, es la causa de **la mitad de los bugs de hooks**: por qué un `useEffect` corre de más, por qué `React.memo` no frena un re-render, por qué un Context redibuja todo. Anclalo ahora.
 
+**La otra cara de la identidad: las `key` de las listas.** Cuando renderizás una lista, React usa la `key` de cada elemento como su **identidad estable** entre renders para decidir qué se agregó, movió o borró (la *reconciliación*). Por eso `key={index}` es una trampa: si reordenás o insertás al principio, los índices se corren y React asocia el estado/foco al elemento **equivocado** (el texto que tipeaste en un input "salta" a otra fila). Usá un **id estable del dato** (no la posición) como key.
+
 La frase mental: **un render es una foto: React llama a tu función y todo lo de adentro nace y muere en ese render. Objetos y funciones se crean nuevos cada vez — misma forma, distinta identidad.**
 
 **Ejercicios 1**
@@ -61,6 +63,7 @@ La frase mental: **un render es una foto: React llama a tu función y todo lo de
 1.2 🧠 ¿Por qué `{ id: 1 } === { id: 1 }` da `false` en dos renders distintos, si "se ven iguales"? ¿Por qué te debería importar?
 1.3 🧠 ¿Qué significa que "renderizar tiene que ser una función pura"? Dá un ejemplo de algo que NO deberías hacer durante el render.
 1.4 ✍️ Escribí un componente que, en cada render, cree un objeto `{ id: 1 }`, lo guarde en un ref el primer render, y logguee si el objeto de este render es `===` al del render anterior. Forzá re-renders con un botón y mirá la consola: vas a *ver* romperse la identidad referencial.
+1.5 🧠 ¿Por qué `key={index}` puede corromper el estado (o el foco) de una lista al reordenarla o insertar al principio, y qué deberías usar como `key` en su lugar?
 
 ---
 
@@ -74,6 +77,7 @@ La frase mental: **un render es una foto: React llama a tu función y todo lo de
 ¿Por qué la regla 1, que parece arbitraria? Porque **React identifica cada hook por el ORDEN en que se llama**, no por un nombre. Internamente es como una lista: "el primer `useState` de este componente es la edad, el segundo es el nombre…". React no ve los nombres de tus variables; cuenta posiciones.
 
 ```tsx
+// ⚠️ Bloque INTENCIONALMENTE inválido: no compila bien ni pasa el linter — ese es el punto.
 function Form() {
   const [name, setName] = useState('')     // hook #1
   if (name === '') {
@@ -87,7 +91,7 @@ Si el `useState` del medio a veces se llama y a veces no, **el orden se rompe**:
 
 ¿Y la regla 2? Para que **toda la lógica con estado sea visible** desde el código del componente, y para que el linter pueda chequear la regla 1. Por eso los custom hooks se llaman `use*` (módulo 8): es la señal de "esto puede llamar hooks adentro".
 
-La herramienta: el plugin **`eslint-plugin-react-hooks`**. No es opcional — instalalo y respetalo. Te marca las dos reglas y las dependencias de los efectos (módulo 4). ⚠️ Desde su v6 (oct 2025) el preset por defecto usa *flat config* (ESLint 9) y suma **reglas opt-in potenciadas por el React Compiler** (módulo 6), que planean incorporar al preset recomendado más adelante; si tu config es vieja, verificá la forma exacta en la doc.
+La herramienta: el plugin **`eslint-plugin-react-hooks`**. No es opcional — instalalo y respetalo. Te marca las dos reglas y las dependencias de los efectos (módulo 4). ⚠️ Desde su v6 (oct 2025) el preset `recommended` usa *flat config* (ESLint 9) y ya incluye **reglas potenciadas por el React Compiler** (módulo 6) —algunas siguen siendo opt-in dentro del preset—; si tu config es vieja, verificá la forma exacta en la doc.
 
 La frase mental: **React identifica los hooks por orden de llamada, no por nombre. Si un hook se llama condicionalmente, el orden se rompe y React te da el estado equivocado. Por eso: siempre arriba, siempre todos.**
 
@@ -148,6 +152,8 @@ todos.push(nuevo); setTodos(todos)
 setTodos([...todos, nuevo])
 ```
 
+**Conectado: inputs controlados vs no controlados.** Un input **controlado** tiene su valor en estado de React (`value={x}` + `onChange`): React es la fuente de verdad, redibuja en cada tecla y podés validar/transformar al vuelo. Uno **no controlado** deja el valor en el DOM y lo leés cuando hace falta con un ref (`defaultValue` + `ref`, módulo 5): menos re-renders, pero React no "ve" cada cambio. El default es **controlado** (lo que querés casi siempre); el no controlado queda para casos puntuales —integrar con DOM no-React, un form simple de una sola lectura, o `<input type="file">` (que es no controlado obligatoriamente)—.
+
 La frase mental: **el estado es una foto del render, no una variable viva. El setter no la cambia: agenda la próxima foto. Si dependés del valor anterior, `setX(prev => ...)`; y nunca mutes, reemplazá.**
 
 **Ejercicios 3**
@@ -155,6 +161,7 @@ La frase mental: **el estado es una foto del render, no una variable viva. El se
 3.2 🧠 ¿Qué diferencia hay entre `useState(crearInicial())` y `useState(crearInicial)`? ¿Cuándo importa?
 3.3 🧠 Tenés `const [user, setUser] = useState({ name: 'Ana', age: 30 })` y querés cambiar solo la edad. ¿Por qué `user.age = 31; setUser(user)` no redibuja, y cómo lo hacés bien?
 3.4 ✍️ Escribí un componente `Contador` con un botón "+3" que sume tres de una, usando la forma funcional. Explicá en un comentario por qué sin ella sumaría 1.
+3.5 🧠 Diferenciá un input **controlado** de uno **no controlado**. ¿Cuándo conviene cada uno?
 
 ---
 
@@ -254,6 +261,8 @@ function MiInput({ ref, ...props }: { ref?: React.Ref<HTMLInputElement> } & Reac
 }
 ```
 
+(Detalle de tipado: en React 19 `React.ComponentProps<'input'>` **ya incluye `ref`**, así que la intersección con `{ ref?: ... }` de arriba es redundante; la dejamos explícita solo para que se vea de dónde sale.)
+
 `forwardRef` **todavía funciona** en 19.2, pero está en camino de deprecación (hay un codemod para migrar). Para código nuevo: no escribas `forwardRef`. Verificá el estado exacto en react.dev antes de asumir que ya se removió — **no se removió todavía**.
 
 La frase mental: **el estado redibuja; el ref no. Ref = recordar algo sin pintarlo (un nodo del DOM, un timer). Y en React 19, `ref` es una prop más — `forwardRef` quedó para el código viejo.**
@@ -350,6 +359,8 @@ Si metés todo tu estado de app en un solo Context, **cada cambio redibuja media
    (⚠️ con el React Compiler activado, esto puede ser automático — pero el patrón hay que entenderlo.)
 2. **Partí los contextos por frecuencia de cambio.** El patrón clásico: `StateContext` + `DispatchContext` separados, así los que solo despachan acciones no redibujan cuando el estado cambia.
 
+> **Nota — `useReducer` para estado con varias acciones.** Cuando el próximo estado depende del anterior y hay **varias formas de actualizarlo** (agregar / quitar / editar / reset), varios `useState` sueltos se vuelven difíciles de seguir. `useReducer(reducer, inicial)` centraliza esa lógica en una **función pura** `(estado, acción) => nuevoEstado` y te devuelve un `dispatch` de **identidad estable**. Por eso combina tan bien con el `DispatchContext` de arriba: el `dispatch` no cambia entre renders, así que los consumidores que **solo despachan** acciones no redibujan cuando el estado cambia.
+
 La frase mental: **Context transporta un valor a un subárbol sin prop drilling — pero NO es un state manager: cuando el valor cambia, TODOS los consumidores redibujan y `memo` no los salva. Memoizá el value y partí los contextos.**
 
 **Ejercicios 7**
@@ -357,6 +368,7 @@ La frase mental: **Context transporta un valor a un subárbol sin prop drilling 
 7.2 🧠 ¿Por qué se dice que "Context no es un state manager"? ¿Qué pasa con los consumidores cuando el valor cambia?
 7.3 🧠 Tenés `<UserContext value={{ user, setUser }}>`. ¿Por qué esto hace redibujar a TODOS los consumidores en cada render del provider, y cómo lo arreglás?
 7.4 ✍️ Creá un `ThemeContext` tipado (`'light' | 'dark'`), un provider que lo ponga en `"dark"`, y un componente hijo profundo que lo consuma con `useContext`. Usá la sintaxis de React 19.
+7.5 🧠 ¿Cuándo conviene `useReducer` en vez de varios `useState`, y por qué encaja con el patrón `StateContext` + `DispatchContext`?
 
 ---
 
@@ -420,14 +432,14 @@ La frase mental: **un custom hook (`use*`) extrae lógica con estado para reutil
 
 - **Actions + `useActionState`** — para **mutaciones asíncronas** (enviar un form a tu backend). Maneja por vos el estado de *pending*, los errores y el reset:
   ```tsx
-  const [estado, submitAction, isPending] = useActionState(
+  const [estado, formAction, isPending] = useActionState(
     async (prev: string | null, formData: FormData) => {
       const r = await guardarUsuario(formData)  // POST a tu API
       return r.ok ? null : 'Falló el guardado'  // lo que devolvés ES el próximo `estado`
     },
     null,
   )
-  // <form action={submitAction}> ... </form>
+  // <form action={formAction}> ... </form>   (el nombre de la 2ª posición es libre; la doc la llama formAction)
   ```
   Ojo con la tupla: la **primera posición** (`estado`) es **lo que devuelve tu action**, no "el error" por definición. Acá la usamos para el mensaje de error porque eso devolvemos, pero podría ser cualquier cosa (el dato guardado, un objeto, etc.).
 
@@ -442,12 +454,29 @@ No las estudies hoy; reconocé el problema que resuelven y andá a la doc cuando
 - **`useDeferredValue`** — muestra una versión "vieja" de una parte lenta de la UI mientras se recalcula, para mantener la interacción fluida.
 - **`useId`** — genera IDs únicos y estables (server y cliente) para atributos de accesibilidad. **No** es para keys de listas ni para cachés.
 
+### El dúo de carga/error: `<Suspense>` + Error Boundary
+
+Cuando un componente usa `use(promesa)` y se **suspende**, React necesita saber qué mostrar mientras carga y qué hacer si la promesa **falla**. Eso lo dan dos envoltorios:
+- **`<Suspense fallback={...}>`** muestra el fallback mientras el contenido suspendido carga.
+- **Un Error Boundary** (un componente de clase con `getDerivedStateFromError`/`componentDidCatch`, o la librería `react-error-boundary`) captura el error de su subárbol y muestra una UI alternativa.
+
+```tsx
+<ErrorBoundary fallback={<Error />}>
+  <Suspense fallback={<Spinner />}>
+    <Comentarios promesa={promesa} />   {/* hace use(promesa) adentro */}
+  </Suspense>
+</ErrorBoundary>
+```
+
+Es el patrón de carga/error **canónico de 2026**: en vez de manejar `isLoading`/`error` a mano en cada componente, declarás el estado de carga y el de error **una sola vez** alrededor del subárbol. (Error Boundary sigue requiriendo un componente de **clase** — es de los pocos lugares donde React todavía no tiene equivalente con hooks.)
+
 La frase mental: **React 19 te da `use` (leer promesas/contexto, hasta condicionalmente), los Actions (`useActionState`/`useOptimistic`/`useFormStatus`, que matan el boilerplate de pending/error en formularios) y los concurrentes (`useTransition`/`useDeferredValue`) para que la UI no se trabe.**
 
 **Ejercicios 9**
 9.1 🔁 ¿Qué hace `use` que ningún otro hook puede, respecto a dónde se lo puede llamar?
 9.2 🧠 ¿Qué problema concreto te resuelve `useActionState` al enviar un formulario a tu API de Node? ¿Qué tenías que hacer a mano antes?
 9.3 🧠 ¿Para qué sirve `useTransition` y qué tipo de actualización marca?
+9.4 ✍️ Escribí un form con `useActionState`: una action async que simule el POST, un botón deshabilitado con `isPending` mientras envía, y un mensaje de error si la action devuelve uno. Conectalo con `<form action={formAction}>`.
 
 ---
 
@@ -478,6 +507,7 @@ La frase mental de cierre: **el estado va lo más abajo y local posible; subilo 
 10.1 🔁 Enumerá la escalera del estado de menos a más global y decí cuál es el default.
 10.2 🧠 Tenés filtros de un listado (categoría, orden, página) y querés que el usuario pueda compartir el link con esos filtros aplicados. ¿Dónde va ese estado y por qué?
 10.3 🧠 ¿Por qué Context es buena idea para "usuario logueado" o "tema" pero mala para el estado de un formulario que cambia en cada tecla?
+10.4 ✍️ Escribí un componente que sincronice un filtro con la URL: leé `?categoria=...` de los query params al renderizar y actualizalo al cambiar un `<select>`. Usá `URLSearchParams` (o, si tenés router, su API de search params).
 
 ---
 
@@ -508,6 +538,8 @@ function IdentidadReferencial() {
 // Consola: siempre `false` (salvo el primer render, que compara contra null).
 // Mismo contenido { id: 1 }, distinta identidad: esa es la causa raíz de medio módulo.
 ```
+
+**1.5** `key={index}` ata la identidad de cada fila a su **posición**, no al dato. Al reordenar o insertar al principio, los índices se corren: React cree que la fila 0 "sigue siendo" la misma y **reutiliza su estado/DOM** (el valor de un `<input>`, el foco, el scroll) para un dato distinto → el estado "salta" a la fila equivocada. Usá un **id estable del dato** (`key={item.id}`); el índice solo es seguro si la lista es estática (nunca se reordena ni se filtra).
 
 
 
@@ -550,6 +582,8 @@ function Contador() {
   return <button onClick={masTres}>Count: {count} (+3)</button>
 }
 ```
+
+**3.5** **Controlado:** el valor vive en estado de React (`value={x}` + `onChange`), React es la fuente de verdad y redibuja en cada tecla → podés validar, formatear o deshabilitar al vuelo. **No controlado:** el valor vive en el DOM y lo leés con un ref cuando hace falta (`defaultValue` + `ref`) → menos re-renders, pero React no ve cada cambio. Default: **controlado** (validación en vivo, UI que reacciona al input). No controlado: forms simples de una sola lectura, integración con DOM/librerías no-React, y `<input type="file">` (que es no controlado por obligación).
 
 **4.1** **Sirve** para **sincronizar el componente con un sistema externo a React** (suscripciones, conexiones, APIs del navegador, librerías de terceros, DOM no-React) — efectos que ocurren *porque el componente se renderizó*. **NO sirve** como "ciclo de vida": no va para transformar datos para renderizar (eso se calcula en el render) ni para lógica que pertenece a un evento del usuario (eso va en el handler).
 
@@ -673,6 +707,8 @@ function Boton() {
 }
 ```
 
+**7.5** Conviene `useReducer` cuando el estado tiene **varias transiciones** (agregar/quitar/editar/reset) y el próximo valor depende del anterior: en vez de esparcir esa lógica en muchos `setX`, la centralizás en una función pura `(estado, acción) => nuevoEstado`, más fácil de testear y razonar. Encaja con `StateContext` + `DispatchContext` porque `dispatch` tiene **identidad estable** (no cambia entre renders): podés pasarlo por el `DispatchContext` y los componentes que solo despachan acciones **no redibujan** cuando el estado cambia (solo redibujan los que consumen el `StateContext`).
+
 **8.1** Porque el prefijo `use` + mayúscula es la **convención que React y el linter reconocen**: le permite a `eslint-plugin-react-hooks` aplicar las reglas de hooks dentro de la función, y le señala a quien lee que esa función puede llamar hooks (tener estado/efectos). Sin el `use`, el linter no lo trata como hook.
 
 **8.2** Cada uno tiene **el suyo**: cada llamada a un hook (incluido un custom hook) es **completamente independiente**, con su propio estado aislado. Si querés que lo **compartan**, un custom hook no alcanza — tenés que **levantar el estado** al padre común y bajarlo por props, o ponerlo en un **Context**.
@@ -696,15 +732,70 @@ Notá: la lectura va en *lazy initial state* (no en cada render) y la escritura 
 
 **9.1** `use` se puede llamar **condicionalmente** — dentro de un `if`, un loop o después de un `return` temprano —, mientras que **todos los demás hooks** (incluido `useContext`) deben llamarse en el nivel superior, siempre, en el mismo orden. Además, `use` puede leer una **promesa** (suspende con `<Suspense>`), no solo un contexto.
 
-**9.2** `useActionState` te maneja **automáticamente el estado de *pending*, los errores y el reset** de una mutación asíncrona (enviar el form, esperar el POST a tu API). Antes lo hacías **a mano**: un `useState` para `isLoading`, otro para `error`, un `try/catch/finally`, deshabilitar el botón mientras carga, resetear al terminar… todo ese boilerplate lo absorbe el hook, y se conecta con `<form action={submitAction}>`.
+**9.2** `useActionState` te maneja **automáticamente el estado de *pending*, los errores y el reset** de una mutación asíncrona (enviar el form, esperar el POST a tu API). Antes lo hacías **a mano**: un `useState` para `isLoading`, otro para `error`, un `try/catch/finally`, deshabilitar el botón mientras carga, resetear al terminar… todo ese boilerplate lo absorbe el hook, y se conecta con `<form action={formAction}>`.
 
 **9.3** `useTransition` marca actualizaciones de estado como **de baja prioridad e interrumpibles**, para que una actualización pesada (re-renderizar una lista enorme al filtrar) **no bloquee** interacciones urgentes como tipear. Devuelve `[isPending, startTransition]`; envolvés la actualización no urgente en `startTransition(...)` y usás `isPending` para mostrar un indicador.
+
+**9.4**
+```tsx
+import { useActionState } from 'react'
+
+async function fakePost(nombre: string): Promise<{ ok: boolean }> {
+  await new Promise((r) => setTimeout(r, 800))
+  return { ok: nombre.trim().length > 0 }   // "falla" si está vacío
+}
+
+function FormNombre() {
+  const [error, formAction, isPending] = useActionState(
+    async (_prev: string | null, formData: FormData) => {
+      const nombre = String(formData.get('nombre') ?? '')
+      const r = await fakePost(nombre)
+      return r.ok ? null : 'El nombre no puede estar vacío'  // null = sin error
+    },
+    null,
+  )
+  return (
+    <form action={formAction}>
+      <input name="nombre" />
+      <button disabled={isPending}>{isPending ? 'Enviando…' : 'Guardar'}</button>
+      {error && <p role="alert">{error}</p>}
+    </form>
+  )
+}
+// useActionState maneja el pending, el error y el reset; no hace falta useState para isLoading/error.
+```
 
 **10.1** De menos a más global: **(1) estado local (`useState`)** ← el default → **(2) estado levantado al padre común** → **(3) la URL** → **(4) Context** → **(5) state manager**. La regla: usá el escalón más bajo que te resuelva el problema; subí solo cuando necesites compartir.
 
 **10.2** Va en **la URL** (query params: `?categoria=...&orden=...&page=...`). Porque es estado que define "qué estás viendo", y ponerlo en la URL lo hace **compartible por link**, bookmarkeable y resistente al refresh — justo lo que pide el requisito. Meterlo en `useState` o en un store lo perdería al recargar y no se podría compartir.
 
 **10.3** Porque "usuario logueado" y "tema" son datos **transversales que cambian muy poco**: encajan con el modelo de Context (transporte a muchos consumidores, pocos cambios). El estado de un formulario que cambia **en cada tecla** haría que **todos los consumidores del Context redibujen en cada tecla** (módulo 7) — un desastre de performance. Ese estado va **local** al formulario (o a un state manager si es muy complejo), no en Context.
+
+**10.4**
+```tsx
+// Versión con la API del navegador (sin router). La fuente de verdad es la URL, no useState.
+function FiltroCategoria() {
+  const params = new URLSearchParams(window.location.search)
+  const categoria = params.get('categoria') ?? 'todas'
+
+  function cambiar(e: React.ChangeEvent<HTMLSelectElement>) {
+    const next = new URLSearchParams(window.location.search)
+    next.set('categoria', e.target.value)
+    // actualiza la URL sin recargar; en una app real usás el router (TanStack/React Router)
+    window.history.pushState(null, '', `?${next.toString()}`)
+  }
+
+  return (
+    <select value={categoria} onChange={cambiar}>
+      <option value="todas">Todas</option>
+      <option value="libros">Libros</option>
+      <option value="juegos">Juegos</option>
+    </select>
+  )
+}
+// Con un router (recomendado): leés/escribís los search params con su API (useSearchParams),
+// que además dispara el re-render al cambiar la URL — con history.pushState lo manejás vos.
+```
 
 ---
 
