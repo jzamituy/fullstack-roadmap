@@ -1,8 +1,8 @@
-# Banco de casos de diseño de sistemas: 13 problemas resueltos de punta a punta
+# Banco de casos de diseño de sistemas: 14 problemas resueltos de punta a punta
 
-**Los casos clásicos de entrevista senior, resueltos con el método · feed, chat, notificaciones, typeahead, archivos, rate limiter, crawler, reservas/pagos, proximidad, métricas en streaming, edición colaborativa, caché distribuida, streaming de video · el recorrido importa más que la respuesta · 2026**
+**Los casos clásicos de entrevista senior, resueltos con el método · feed, chat, notificaciones, typeahead, archivos, rate limiter, crawler, reservas/pagos, proximidad, métricas en streaming, edición colaborativa, caché distribuida, streaming de video, ledger de pagos · el recorrido importa más que la respuesta · 2026**
 
-> Cómo usar este banco: este módulo es la **práctica** de [Diseño de sistemas backend](system-design.md). Ahí aprendiste el método y el criterio; acá los aplicamos a los 13 problemas que más caen en entrevistas. Para cada caso, **tapá la solución y resolvelo vos primero en voz alta** siguiendo los 6 pasos; después contrastá. Lo que se evalúa no es si llegás a *mi* diseño, sino si recorrés bien: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs.
+> Cómo usar este banco: este módulo es la **práctica** de [Diseño de sistemas backend](system-design.md). Ahí aprendiste el método y el criterio; acá los aplicamos a los 14 problemas que más caen en entrevistas. Para cada caso, **tapá la solución y resolvelo vos primero en voz alta** siguiendo los 6 pasos; después contrastá. Lo que se evalúa no es si llegás a *mi* diseño, sino si recorrés bien: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs.
 
 **El método, en una línea** (de [system-design](system-design.md) módulo 1): **(1)** aclarar requisitos (sobre todo los **no funcionales**: escala, lectura/escritura, latencia, consistencia), **(2)** estimar (back-of-the-envelope), **(3)** API + modelo de datos, **(4)** diseño de alto nivel, **(5)** profundizar **donde duele**, **(6)** discutir trade-offs. No hay respuestas correctas, hay **decisiones justificadas**.
 
@@ -24,6 +24,7 @@
 11. Google Docs / edición colaborativa en tiempo real — *convergencia de ediciones concurrentes (OT / CRDT)*
 12. Caché distribuida (diseñar un Redis/Memcached a escala) — *consistent hashing + defensa contra stampede*
 13. YouTube / Netflix: streaming de video — *transcoding paralelo + adaptive bitrate + CDN*
+14. Payment ledger / billetera — *contabilidad de doble entrada + log inmutable*
 
 > **El patrón que se repite.** Vas a ver que los mismos ladrillos reaparecen en casi todos los casos: **fan-out** (¿escribo a muchos en la escritura o leo de muchos en la lectura?), **caché del camino caliente**, **idempotencia ante reintentos**, **colas para desacoplar y absorber picos**, **sharding por la clave de acceso**, y **el caso patológico** (la celebridad, el prefijo popular, el archivo gigante). Aprender a *reconocer* qué ladrillo aplica es la mitad de la entrevista.
 
@@ -669,6 +670,64 @@ interface Rendition {
 
 ---
 
+## Caso 14 — Payment ledger / billetera (contabilidad de doble entrada)
+
+**1. Requisitos.**
+- Funcionales: registrar **movimientos de dinero** entre cuentas (transferencias, pagos, cobros, depósitos); consultar el **saldo** de cualquier cuenta y su **historial**; cada transacción mueve plata de una(s) cuenta(s) a otra(s).
+- No funcionales: **correctitud absoluta** (es dinero: ni un centavo de más ni de menos); **auditabilidad** (todo movimiento rastreable e inmutable, para compliance y auditorías años después); **consistencia fuerte** (el saldo nunca queda a medias); **idempotencia** (un reintento no puede duplicar un cargo); durabilidad altísima. No es lectura-masiva como un feed — acá **la corrección manda sobre todo lo demás**.
+
+**2. Estimación.** El reto **no es throughput extremo** (aunque un procesador grande haga miles de tx/s) sino **integridad e invariantes**: que la suma del sistema **cuadre siempre**, que ninguna transacción quede a medias, que se pueda **reconstruir y auditar** el pasado. El dato crece **sin parar** (append-only, nunca se borra) → con el tiempo, archivado en frío y snapshots de saldo.
+
+**3. API y datos — el corazón: doble entrada (*double-entry*).**
+```
+POST /transfers   { from, to, amount, Idempotency-Key }  → { transferId }
+GET  /accounts/{id}/balance                               → { balance }
+GET  /accounts/{id}/entries                               → { entries[] }
+```
+- El modelo **no** es "una columna `balance` que sumás y restás". Es un **ledger de doble entrada**: cada transacción genera **≥2 asientos (entries)** que **suman cero** — un **débito** en una cuenta y un **crédito** igual en otra. Invariante sagrado: **la suma de los asientos de una transacción = 0** (la plata no se crea ni se destruye, solo se mueve).
+- `entries`: `entryId | transactionId | accountId | amount (con signo) | createdAt` — **append-only e inmutable**. Nunca se updatea ni se borra; un error se arregla con una **transacción compensatoria** (un asiento que revierte), no editando el pasado.
+- El **balance** de una cuenta = **suma de sus asientos**, no una columna mutable. Se puede **materializar** (un saldo cacheado) por performance, pero la fuente de verdad es el log.
+
+**4. La decisión clave — doble entrada + inmutabilidad + atomicidad.** Tres invariantes que se sostienen juntos:
+- **Doble entrada:** todo movimiento son ≥2 asientos que suman cero. Esto hace al sistema **auto-verificable**: en cualquier momento, la suma de **todos** los asientos debe ser cero (o igual al dinero externo que entró/salió). Si no cuadra, hay un bug — y lo **detectás**. Es la contabilidad de hace 500 años aplicada a software.
+- **Inmutabilidad (append-only):** los asientos nunca cambian. Da **auditabilidad total** (el historial *es* la verdad) y elimina una clase entera de bugs de concurrencia (no hay updates compitiendo sobre una fila de balance). Para corregir, **compensás** (revertís con asientos nuevos), no editás.
+- **Atomicidad:** los ≥2 asientos de una transacción se escriben **en una sola transacción de DB** (todos o ninguno). Si el débito entra y el crédito no, se perdió plata → inaceptable. Acá reusás la **consistencia fuerte del caso 8** (una base transaccional como Postgres, no un store eventual). Esto vale cuando ambas cuentas viven en **la misma DB**; si el movimiento **cruza servicios/DBs**, **no** hay transacción distribuida → la atomicidad pasa a ser *lógica*: asiento en `pending` + **saga** con compensación (lo vemos en el paso 5). Son dos regímenes distintos, no una contradicción: misma DB → una tx ACID; cruza límites → saga.
+
+**5. Donde duele — idempotencia financiera, saldo bajo concurrencia y money movement entre servicios.**
+- **Idempotencia (no doble cargo).** La red reintenta; un `POST /transfers` reintentado no puede cobrar dos veces. Reusás la **idempotency key store-and-return del caso 8**: la primera vez creás la transacción y **guardás el resultado** contra la key; un reintento con la misma key **devuelve el resultado guardado**, no crea otra. El índice `unique` sobre la key es la red de seguridad.
+- **Saldo insuficiente bajo concurrencia.** Si dos débitos concurrentes sobre la misma cuenta podrían dejarla en negativo (*overdraft* no permitido), tenés que verificar el saldo **atómicamente** al asentar — el mismo *check-then-act* del caso 8, ahora sobre "¿hay saldo?". En la práctica eso es un `SELECT ... FOR UPDATE` sobre la **fila de la cuenta** (su **balance materializado**, no re-sumando el log en la ruta caliente — eso sería O(n)), y recién entonces asentás. El append-only evita los updates en conflicto sobre el historial, pero la **regla de negocio** "no sobregirar" igual necesita **serializar por cuenta**. Cuidado: si una transferencia lockea **dos** cuentas, **ordená los locks** por `accountId` (siempre el menor primero) para no caer en *deadlock*.
+- **Mover plata entre servicios (saga).** Mover dinero entre tu ledger y un procesador externo (Stripe, un banco) no es una transacción ACID única → **saga con compensación** (caso 8). Importante: el ledger **solo contiene asientos `posted`** (la verdad inmutable); el estado **`pending → posted | failed`** vive en la **capa de orquestación/saga**, no como un asiento que después se edita. Si el paso externo falla, **no** tocás nada: emitís un asiento **compensatorio** que revierte. El estado intermedio es explícito en la saga, nunca implícito.
+
+> **4 capas — el asiento que entra a medias:**
+> 1. **Qué se rompe:** una transferencia escribe el **débito** de A pero el **crédito** a B falla (crash/timeout) → A perdió plata que nadie recibió y el sistema **deja de cuadrar**.
+> 2. **Por qué a esta escala/uso:** es dinero real y hay concurrencia; cualquier escritura **parcial** viola el invariante de suma-cero y, peor, es plata perdida o duplicada — no un detalle cosmético.
+> 3. **Control de corto plazo:** escribir los ≥2 asientos en **una transacción de DB atómica** (todos o ninguno); idempotency key para que el reintento no duplique.
+> 4. **Cambio de diseño:** ledger de **doble entrada, append-only e inmutable** (se corrige compensando, no editando); transacciones cross-servicio como **saga** con asientos de compensación y estados explícitos (`pending → posted/failed`); **balance derivado** de la suma de asientos, auditable y **reconciliable**.
+
+**6. Trade-offs.**
+- **Balance materializado vs sumar el log.** Sumar todos los asientos cada vez es O(n) y se vuelve lento → se **materializa** un saldo (snapshot + asientos desde el snapshot, el *event sourcing* del caso 11). Trade-off: performance vs una única fuente de verdad. Una **reconciliación periódica** (re-sumar el log y comparar con el saldo materializado) detecta cualquier *drift*.
+- **Inmutabilidad vs storage.** Append-only crece para siempre → archivado de asientos viejos en frío + snapshots para no re-sumar todo desde el origen.
+- **Consistencia fuerte (CP) elegida a propósito.** Como el caso 8, ante una partición preferís **rechazar** antes que arriesgar un saldo incorrecto. Un ledger **no** es eventual.
+- **Precisión numérica.** **Jamás `float` para dinero** (errores de redondeo binario: `0.1 + 0.2 !== 0.3`) → enteros en la unidad mínima (**centavos**) o un decimal de precisión fija. Y ojo con el lenguaje: el `number` de JS **es** un float de 64 bits (enteros exactos solo hasta 2⁵³), así que en producción el monto se **persiste** como `NUMERIC`/decimal de la DB o `bigint`; el `number` del ejemplo de abajo vale como ilustración didáctica, no como tipo de producción. Es el error de junior más clásico del caso.
+- **Multi-moneda.** El invariante "suma = 0" es **por moneda**: cada asiento lleva su `currency` y **nunca** mezclás monedas en una misma ecuación de cero. Una **conversión** no es un asiento cross-currency mágico: son asientos en cada cuenta de moneda más una **cuenta puente de FX** que absorbe el diferencial de redondeo de la tasa fraccional (así cada moneda cuadra por separado). Declaralo fuera de scope salvo que lo pidan, pero sabé que ese es el modelo.
+
+> **El cierre de criterio — no sobre-diseñar.** ¿Llevás "créditos", puntos o likes internos de una app, sin requisitos de auditoría financiera? Una tabla con una columna `balance` y updates transaccionales puede alcanzar. El ledger de doble entrada, la inmutabilidad y la reconciliación son para cuando manejás **dinero real** (o algo que se audita como tal): pagos, billeteras, marketplaces que liquidan a terceros. Ahí el *double-entry* **no es over-engineering, es el estándar** — y un auditor te lo va a exigir.
+
+**Ejercicios — Caso 14**
+14.1 🔁 ¿Por qué el **balance** de una cuenta se modela como la **suma de asientos inmutables** y no como una columna que sumás y restás?
+14.2 🧠 ¿Qué es la **doble entrada** y qué invariante te da "gratis" que vuelve al sistema **auto-verificable**?
+14.3 🧠 ¿Por qué los asientos son **append-only/inmutables**, y cómo corregís un error si no podés editar el pasado?
+14.4 🧠 ¿Por qué los ≥2 asientos de una transacción deben escribirse en **una sola transacción de DB**, y qué dos mecanismos de casos anteriores reusás para "no doble cargo" y "no sobregirar"?
+14.5 ✍️ Implementá `asientosTransferencia(from, to, amountCentavos)`: generá los **dos asientos** de doble entrada (débito en `from`, crédito en `to`), validá que el monto sea un **entero positivo de centavos** (nada de `float`) y que los asientos **sumen 0**. Usá el tipo de abajo.
+```ts
+interface Entry {
+  accountId: string;
+  amount: number; // en centavos (entero); negativo = débito, positivo = crédito
+}
+```
+
+---
+
 # Soluciones
 
 > Mirá esto solo después de intentar cada caso en voz alta. Casi todas son de **criterio**: si tu razonamiento difiere pero justifica bien el trade-off, probablemente también esté bien. En diseño de sistemas, el *cómo* justificás importa más que el *qué* elegís.
@@ -981,8 +1040,42 @@ function elegirRendition(
 // Un ABR de producción además mira el nivel del buffer, no solo la banda (evita oscilar de calidad).
 ```
 
-Estos 13 casos cubren los patrones que más caen: fan-out, tiempo real, async con colas, lectura-intensivo con precómputo, separación metadata/contenido, estado compartido atómico, procesamiento masivo, consistencia fuerte transaccional, indexación espacial, agregación en streaming por event-time, convergencia de ediciones concurrentes (OT/CRDT), particionado por consistent hashing y distribución de contenido por CDN. Para seguir:
+### Caso 14 — Payment ledger / billetera
+**14.1** Porque una columna `balance` mutable **pierde la historia** y es frágil: solo te dice el "ahora", no **cómo** llegaste ahí (imposible de auditar), y cada movimiento es un `UPDATE` que compite con otros bajo concurrencia (carreras, y un bug puede dejar el saldo mal **sin rastro**). Modelar el balance como la **suma de asientos inmutables** hace que el historial **sea** la fuente de verdad: el saldo es una **derivación** reproducible (re-sumás y verificás), cada centavo tiene su asiento rastreable, y no hay updates en conflicto sobre una fila caliente. Por performance se **materializa** un saldo (snapshot), pero siempre podés reconstruirlo y reconciliarlo desde el log.
 
-- **Resolvé en voz alta los que faltan**, reusando los mismos ladrillos: "diseñá un payment ledger" (doble entrada + el caso 8 de consistencia fuerte), "diseñá un full-text search" (índice invertido + el caso 4 de precómputo), "diseñá un order matching engine" (order book en memoria + secuenciador determinista). Lo que se evalúa es el recorrido, no la respuesta.
+**14.2** La **doble entrada** registra cada movimiento como **≥2 asientos que suman cero**: un **débito** en una cuenta y un **crédito** igual en otra (la plata sale de un lado y entra en otro, nunca aparece ni desaparece). El invariante que te da gratis: **la suma de todos los asientos del sistema es siempre 0** (o igual al dinero externo que entró/salió). Eso vuelve al sistema **auto-verificable** — en cualquier momento sumás todo y, si no da cero, **sabés que hay un bug** y dónde mirar. Es una red de seguridad estructural: los errores de plata se **delatan solos** en vez de esconderse en una columna.
+
+**14.3** Porque la inmutabilidad da dos cosas que el dinero exige: **auditabilidad** (el pasado nunca cambia → un auditor puede confiar en que el historial es la verdad, y podés reconstruir el estado a cualquier fecha) y **ausencia de carreras** (no hay `UPDATE` sobre un balance que dos transacciones se peleen — solo `INSERT` de asientos nuevos). Si cometés un error (un cargo equivocado), **no editás ni borrás** el asiento viejo: emitís una **transacción compensatoria** — asientos nuevos que **revierten** el efecto (un crédito que anula el débito errado) y, si corresponde, los asientos correctos. El error y su corrección **quedan ambos en el registro**, que es justo lo que una auditoría necesita ver.
+
+**14.4** Porque los asientos de una transacción son un **paquete indivisible**: si el débito de A entra pero el crédito a B no (crash, timeout), A perdió plata que nadie recibió y el sistema **deja de cuadrar** (la suma ya no es cero). Escribirlos en **una sola transacción de DB** garantiza "todos o ninguno" (atomicidad — la consistencia fuerte del caso 8). Los dos mecanismos reusados: para **no doble cargo**, la **idempotency key store-and-return del caso 8** (un reintento con la misma key devuelve el resultado ya creado, no cobra de nuevo); para **no sobregirar**, el **check-then-act atómico del caso 8** (verificar el saldo y asentar en una operación serializada por cuenta, para que dos débitos concurrentes no dejen la cuenta en negativo). Concretamente: `SELECT ... FOR UPDATE` sobre la **fila de la cuenta** (su balance materializado, no re-sumando el log en la ruta de escritura), y si una transferencia lockea dos cuentas, **ordenás los locks por `accountId`** para evitar *deadlocks*.
+
+**14.5**
+```ts
+interface Entry {
+  accountId: string;
+  amount: number; // en centavos (entero); negativo = débito, positivo = crédito
+}
+
+function asientosTransferencia(from: string, to: string, amountCentavos: number): Entry[] {
+  // Dinero = enteros en la unidad mínima (centavos). Nunca float: 0.1 + 0.2 !== 0.3.
+  if (!Number.isInteger(amountCentavos) || amountCentavos <= 0) {
+    throw new Error("El monto debe ser un entero positivo de centavos");
+  }
+  const asientos: Entry[] = [
+    { accountId: from, amount: -amountCentavos }, // débito: sale de `from`
+    { accountId: to, amount: amountCentavos },    // crédito: entra a `to`
+  ];
+  // Invariante de doble entrada: la suma de los asientos es 0 (la plata solo se movió).
+  const suma = asientos.reduce((acc, e) => acc + e.amount, 0);
+  if (suma !== 0) throw new Error("Los asientos no cuadran (suma ≠ 0)");
+  return asientos;
+}
+// Estos dos asientos se persisten en UNA transacción de DB (atómica, todos o ninguno),
+// idealmente junto con la idempotency key, para que un reintento no genere otra transferencia.
+```
+
+Estos 14 casos cubren los patrones que más caen: fan-out, tiempo real, async con colas, lectura-intensivo con precómputo, separación metadata/contenido, estado compartido atómico, procesamiento masivo, consistencia fuerte transaccional, indexación espacial, agregación en streaming por event-time, convergencia de ediciones concurrentes (OT/CRDT), particionado por consistent hashing, distribución de contenido por CDN y contabilidad de doble entrada. Para seguir:
+
+- **Resolvé en voz alta los que faltan**, reusando los mismos ladrillos: "diseñá un full-text search" (índice invertido + el caso 4 de precómputo), "diseñá un order matching engine" (order book en memoria + secuenciador determinista), "diseñá un distributed job scheduler" (las colas del caso 3/7 + leader election). Lo que se evalúa es el recorrido, no la respuesta.
 - **Conectá cada decisión con su implementación en el hub:** colas e idempotencia en [Event-driven](event-driven.md) y [Redis](redis.md), el contrato de cada API en [API design](api-design.md), tiempo real en [Tiempo real](tiempo-real.md), datos en [PostgreSQL](postgresql.md)/[NoSQL](nosql.md), control de flujo en [Concurrencia](concurrencia.md), y cómo operarlo en [Observabilidad](observabilidad.md).
-- **Volvé al método** de [Diseño de sistemas](system-design.md) módulo 1 cada vez: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs. El método es el mismo para los 13 casos y para cualquier problema nuevo que te tiren.
+- **Volvé al método** de [Diseño de sistemas](system-design.md) módulo 1 cada vez: requisitos → estimación → API/datos → alto nivel → profundizar donde duele → trade-offs. El método es el mismo para los 14 casos y para cualquier problema nuevo que te tiren.
