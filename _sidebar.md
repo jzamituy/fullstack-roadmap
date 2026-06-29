@@ -80,6 +80,7 @@
   - [🛠️ Streams y analytics: laboratorio práctico](streams-practica.md)
   - [🗃️ Datos a escala y multi-tenancy](datos-escala.md)
   - [🛠️ Datos a escala: laboratorio práctico](datos-escala-practica.md)
+  - [🔎 Búsqueda a escala (full-text)](busqueda.md)
   - [🧩 Building blocks y diseño geoespacial](building-blocks.md)
   - [🛠️ Building blocks: laboratorio práctico](building-blocks-practica.md)
 
