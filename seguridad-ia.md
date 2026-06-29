@@ -99,6 +99,8 @@ Si tenés las tres, una prompt injection indirecta puede leer datos privados y m
 # y el que navega la web corre en una sesión sin acceso a la cuenta.
 ```
 
+> **Dos mitigaciones parciales que vas a ver nombradas** (mitigan, NO resuelven — romper el trifecta sigue siendo la defensa de fondo): **(1) Spotlighting/delimiters** (Microsoft): marcás el contenido no confiable con delimitadores explícitos y le decís al modelo "esto son datos, no instrucciones". Reduce la tasa de éxito, pero un atacante decidido la esquiva. **(2) Dual-LLM pattern** (Willison): un LLM **privilegiado** (con tools/credenciales) que **nunca ve datos no confiables**, y un LLM **en cuarentena** que procesa el contenido sucio pero no tiene autoridad para actuar; el privilegiado solo recibe del cuarentenado datos estructurados y saneados, nunca texto crudo con instrucciones.
+
 ---
 
 ## Módulo 5 — OWASP LLM Top 10: el marco de referencia
@@ -143,7 +145,7 @@ Un componente privilegiado (tu agente, que tiene credenciales potentes) es enga�
 
 ### Incidentes que dan credibilidad (no es teoría)
 
-- **postmark-mcp** (sept 2025): primer servidor MCP malicioso *in-the-wild*. Un paquete npm que tras 15 versiones limpias agregó un BCC oculto copiando todos los emails al atacante. ~1.500 organizaciones lo instalaron. (Esto es **LLM03 Supply Chain**.)
+- **postmark-mcp** (sept 2025): primer servidor MCP malicioso *in-the-wild*. Un paquete npm que tras 15 versiones limpias agregó un BCC oculto copiando todos los emails al atacante. ~1.500 descargas semanales; se estima ~300 organizaciones usándolo activamente. (Esto es **LLM03 Supply Chain**.)
 - **GitHub MCP oficial** (Invariant, may 2025): un *issue* malicioso en un repo público llevaba al agente a exfiltrar datos de repos privados.
 - **CVE-2025-49596** (MCP Inspector de Anthropic): RCE crítico (CVSS 9.4); ~560 instancias expuestas en internet.
 
@@ -172,7 +174,7 @@ def call_downstream(user_token: str, action: str): ...
 # 6) HUMAN-IN-THE-LOOP para acciones irreversibles (borrar, gastar, enviar).
 ```
 
-Referencias autoritativas para citar: **OWASP MCP Security Cheat Sheet**, los **MCP Security Best Practices** oficiales (`modelcontextprotocol.io`), **MITRE ATLAS**. La spec de MCP endureció esto en sus revisiones de 2025 (la versión estable vigente a esta escritura es **2025-11-25** — dato volátil, **verificá la versión actual en `modelcontextprotocol.io`**, igual que con las fechas del EU AI Act): servidores como *OAuth 2.0 Resource Servers*, **prohibición de token passthrough**, validación de *audience* (RFC 8707). La propia spec admite el problema de **"consent fatigue"** (los usuarios aprueban en automático) — otra razón para no depender solo del clic de confirmación.
+Referencias autoritativas para citar: **OWASP MCP Security Cheat Sheet**, los **MCP Security Best Practices** oficiales (`modelcontextprotocol.io`), **MITRE ATLAS**. La spec de MCP endureció esto en sus revisiones de 2025 (la versión estable vigente a esta escritura es **2025-11-25** — dato volátil, **verificá la versión actual en `modelcontextprotocol.io`**, igual que con las fechas del EU AI Act): servidores como *OAuth 2.1 Resource Servers*, **prohibición de token passthrough**, validación de *audience* (RFC 8707). La propia spec admite el problema de **"consent fatigue"** (los usuarios aprueban en automático) — otra razón para no depender solo del clic de confirmación.
 
 ---
 
@@ -185,11 +187,14 @@ Tipos:
 - **Clasificadores de entrada/salida** (modelos entrenados para detectar contenido tóxico, jailbreaks, PII): **Llama Guard**, **ShieldGemma**.
 - **Frameworks de rails**: **NeMo Guardrails** (NVIDIA: input/dialog/output rails), **Guardrails AI**. Controlan flujo de conversación y validan formato.
 - **Orientados a agentes**: **LlamaFirewall** (Meta, open-source).
-- **Validación determinista**: longitud, schema, keywords prohibidas, [structured output](prompt-engineering.md) — barata y en CI.
+- **Validación determinista**: longitud, schema, keywords prohibidas, [structured output](prompt-engineering.md) (ej. validar el output contra un schema **Pydantic** antes de usarlo, como en el ejercicio 4) — barata y en CI.
 
 ```python
 # Guardrail de salida simple y determinista: cortar antes de que el daño salga.
 import re
+
+class GuardrailTripped(Exception):
+    pass
 
 PII_PATTERNS = [
     re.compile(r"\b\d{4} ?\d{4} ?\d{4} ?\d{4}\b"),  # tarjeta
@@ -228,8 +233,8 @@ Combina dos modos:
 |---|---|---|
 | **PyRIT** | Microsoft | Enterprise, multi-turno/multimodal, integra con Azure |
 | **Garak** | NVIDIA | Scanner open-source profundo (37+ módulos de probe) |
-| **Promptfoo** | — | 50+ tipos de vulnerabilidad, YAML, integración CI/CD |
-| **DeepTeam** | — | Framework open-source de red-teaming |
+| **Promptfoo** | Promptfoo Inc. (open-source) | 50+ tipos de vulnerabilidad, YAML, integración CI/CD |
+| **DeepTeam** | Confident AI (los de DeepEval, open-source) | Framework de red-teaming |
 
 ```yaml
 # promptfoo: red-team como quality gate en CI (concepto)
@@ -366,7 +371,7 @@ Otra válida: **least privilege en la tool de envío** (solo puede responder *al
 Crescendo distribuye el ataque a lo largo de **varios turnos benignos**: ningún mensaje individual contiene contenido prohibido, así que un clasificador por-turno lo deja pasar todas las veces. El ataque vive en la **secuencia y el priming acumulado**, no en un mensaje. Para tener chance, el guardrail necesita **estado conversacional**: evaluar la trayectoria completa (o una ventana de turnos), detectar escalada temática progresiva, y considerar el contexto acumulado — no fotos aisladas.
 
 ### Solución 4
-Vulnerabilidad: **LLM05 (Improper Output Handling)** + riesgo de SQL injection / exfiltración. El modelo (manipulable por prompt injection) genera SQL que se ejecuta **con los permisos de tu app**. Un atacante puede inducir `DROP TABLE`, `SELECT` sobre tablas de otros tenants, o leer credenciales.
+Vulnerabilidad: **LLM05 (Improper Output Handling)** + riesgo de SQL injection / exfiltración — es exactamente "el LLM como vector de inyección hacia downstream" del módulo 5. El modelo (manipulable por prompt injection) genera SQL que se ejecuta **con los permisos de tu app**. Un atacante puede inducir `DROP TABLE`, `SELECT` sobre tablas de otros tenants, o leer credenciales.
 
 Mitigaciones (combinables):
 - **Nunca ejecutes SQL crudo del modelo.** Hacé que el modelo elija entre **consultas parametrizadas predefinidas** o devuelva [structured output](prompt-engineering.md) (filtros validados con Pydantic) que **tu** código traduce a una query parametrizada.
