@@ -254,7 +254,7 @@ const router = Router()
 
 // El "contrato" del input, validado en runtime
 const CrearUsuario = z.object({
-  email: z.string().email(),
+  email: z.email(),                    // ⚠️ Zod 4: el top-level z.email() — z.string().email() quedó deprecado
   edad: z.number().int().positive(),
 })
 
@@ -291,13 +291,21 @@ Las reglas que separan una API prolija de una chapucera:
 
 El orden del stack completo, de arriba a abajo: `express.json()` → middlewares globales (cors, helmet, logger) → routers de recursos → 404 catch-all → error handler.
 
-La frase mental: **una API REST prolija = routers por recurso + status codes correctos + validación con una librería (Express no valida solo) + 404 catch-all + error handler al final. Nunca confíes en `req.body`: validalo.**
+**La seguridad mínima que el mercado da por sentada.** Como Express es minimalista, tampoco trae seguridad de fábrica: la sumás con tres middlewares de terceros que son el estándar de facto, y van **arriba** del stack (antes de las rutas):
+- **`helmet`** — setea headers HTTP defensivos (`Content-Security-Policy`, `X-Content-Type-Options`, etc.). Una línea, `app.use(helmet())`, y cerrás un montón de agujeros conocidos.
+- **`cors`** — controla **qué orígenes** pueden llamar tu API desde el browser. Sin configurarlo, o bloqueás todo cross-origin o (peor) abrís de más. Acotá el `origin` a tus dominios.
+- **`express-rate-limit`** — limita requests por IP/ventana de tiempo para frenar fuerza bruta y abuso. Tu primera defensa contra el scraping y el credential stuffing.
+
+> **Cuando esto crece**, la validación y la lógica de negocio salen del handler a una **capa de servicio** (el handler queda "delgado": parsea, delega, responde). Es la antesala natural de [SOLID](solid.md) y de la estructura que [NestJS](nestjs.md) te da impuesta (módulo 8).
+
+La frase mental: **una API REST prolija = routers por recurso + status codes correctos + validación con una librería (Express no valida solo) + seguridad de facto (helmet/cors/rate-limit) + 404 catch-all + error handler al final. Nunca confíes en `req.body`: validalo.**
 
 **Ejercicios 6**
 6.1 🔁 ¿Express valida el body del request por vos? Si no, ¿qué usás y por qué es importante?
 6.2 🧠 ¿Qué status code devolvés al crear un recurso con éxito, al recibir input inválido, y al pedir algo que no existe? ¿Por qué no usar `200` para todo?
 6.3 🧠 ¿En qué orden van, de arriba a abajo, `express.json()`, los routers, el 404 catch-all y el error handler? ¿Por qué ese orden?
 6.4 ✍️ Escribí un `POST /api/pedidos` que valide con zod un body `{ productoId: string, cantidad: number positivo }`, devuelva 400 con los errores si falla, y 201 con el pedido si pasa.
+6.5 🧠 El trío de seguridad de facto: ¿qué problema resuelve cada uno de `helmet`, `cors` y `express-rate-limit`, y por qué tienen que ir **arriba** del stack (antes de las rutas)?
 
 ---
 
@@ -408,12 +416,12 @@ app.listen(3000, () => console.log('http://localhost:3000'))
 
 **3.3**
 ```ts
-import { Router } from 'express'
+import { Router, Request, Response } from 'express'
 const router = Router()
 
-router.get('/', (req, res) => { res.json([]) })              // GET  /api/productos
-router.post('/', (req, res) => { res.status(201).json({}) }) // POST /api/productos
-router.get('/:id', (req, res) => { res.json({ id: req.params.id }) }) // GET /api/productos/:id
+router.get('/', (req: Request, res: Response) => { res.json([]) })              // GET  /api/productos
+router.post('/', (req: Request, res: Response) => { res.status(201).json({}) }) // POST /api/productos
+router.get('/:id', (req: Request, res: Response) => { res.json({ id: req.params.id }) }) // GET /api/productos/:id
 
 export default router
 
@@ -524,6 +532,9 @@ router.post('/', (req, res) => {
 
 export default router  // montar con app.use('/api/pedidos', router)
 ```
+
+**6.5** **`helmet`** resuelve los **headers HTTP defensivos** (CSP, anti-sniffing, anti-clickjacking, etc.): cierra agujeros conocidos del browser con una línea. **`cors`** controla **qué orígenes** pueden llamar tu API desde un navegador (política de mismo origen): sin él, o bloqueás todo lo cross-origin o lo abrís de más. **`express-rate-limit`** limita la **cantidad de requests por IP/ventana** para frenar fuerza bruta, scraping y abuso. Van **arriba** del stack porque, como todo middleware, se ejecutan en orden de carga (módulo 4): querés aplicar headers de seguridad, chequear el origen y cortar el exceso de requests **antes** de que la request llegue a tus rutas y gaste recursos. Si los pusieras después de las rutas, las protecciones nunca correrían para esos handlers.
+Nota: `z.number()` **no coacciona desde string** — si el cliente manda `"cantidad": "3"` (string), falla con 400. Eso es lo que querés para un body JSON (donde los números llegan como números). Si necesitaras aceptar y convertir un string —típico en `req.query`, que siempre es string (módulo 7)—, usarías `z.coerce.number()`. Es otra cara del "tipo ≠ runtime" del módulo 7: zod decide en runtime qué entra.
 
 **7.1** Los tres se importan del paquete **`'express'`**: `import { Request, Response, NextFunction } from 'express'`. Necesitás el paquete de tipos **`@types/express`**, y con Express 5 tiene que ser la **línea v5** (hoy `5.0.6`) — no mezclar `@types/express@4` con `express@5`.
 
