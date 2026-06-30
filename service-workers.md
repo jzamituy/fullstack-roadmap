@@ -210,7 +210,7 @@ Reglas que evitan los dolores típicos:
 - **Devolvés una `Promise<Response>`.** Puede venir de la caché, de `fetch()`, o construida a mano (`new Response('...')`).
 - **No interceptes lo que no debés.** Requests `POST`/`PUT` (mutaciones), llamadas a analytics, requests a otros orígenes que no controlás… normalmente conviene **dejarlas pasar** (no llamar `respondWith`). Cachear un `POST` no tiene sentido y la Cache API ni siquiera lo permite por defecto.
 - **Cuidado con cachear respuestas malas.** Antes de guardar una respuesta nueva, verificá que sea válida (`response.ok`, status correcto). Cachear un 404 o un 500 te deja sirviendo basura desde la caché.
-- **Las respuestas `opaque`.** Cuando hacés fetch *cross-origin* sin CORS (modo `no-cors`), recibís una respuesta **opaca**: no podés leer su status ni su contenido, y ocupa más cuota de la que parece. Ojo con un detalle que confunde: en una respuesta opaca, **`response.ok` siempre es `false`** y `status` es `0`, así que **no podés usar `response.ok` como criterio** para decidir si cachearla. Cachear opacas es una decisión explícita (y cara en cuota): hacela solo si sabés lo que hacés.
+- **Las respuestas `opaque`.** Cuando hacés fetch *cross-origin* sin CORS (modo `no-cors`), recibís una respuesta **opaca**: no podés leer su status ni su contenido, y ocupa más cuota de la que parece. Ojo con un detalle que confunde: en una respuesta opaca, **`response.ok` siempre es `false`** y `status` es `0`, así que **no podés usar `response.ok` como criterio** para decidir si cachearla. Una opaca **se puede** cachear (`cache.put` no se queja), pero la guardás **a ciegas**: no podés validar que sea buena y pagás cuota inflada. Cachearlas es una decisión explícita: hacela solo si sabés lo que hacés.
 
 Ejemplo más realista, con guarda, clonado **y fallback offline**:
 
@@ -313,7 +313,7 @@ self.addEventListener('fetch', (event) => {
 })
 ```
 
-⚠️ Soporte: estable en Chromium y Firefox; **Safari aún no lo implementa** — verificá en `caniuse.com`. Es una mejora progresiva: donde no está, el `event.preloadResponse` resuelve a `undefined` y caés al `fetch` normal, así que no rompe nada.
+⚠️ Soporte: en 2026 está en **los tres motores** (Chromium, Firefox y **Safari/WebKit desde Safari 16, ~2022**). Igual es una mejora progresiva bien diseñada: donde no esté, `event.preloadResponse` resuelve a `undefined` y caés al `fetch` normal, así que nunca rompe — verificá en `caniuse.com`.
 
 > 🧰 **En la práctica usás Workbox.** Escribir todo esto a mano es tedioso y propenso a bugs (expiración, límites de entradas, broadcast de updates, y el versionado manual del módulo 8). **Workbox** (de Google) te da estas estrategias como funciones listas, manejo de expiración, navigation preload, y routing por patrón de URL. Para producción, casi nadie escribe el `fetch` handler a mano: usás Workbox o el plugin de tu framework (`vite-plugin-pwa`, etc.). Entender los módulos 4–8 es para **saber qué hace Workbox por debajo** y poder debuggearlo — no para reimplementarlo, ni para sufrir el versionado a mano que vas a ver en el módulo 8.
 
@@ -370,9 +370,9 @@ Dos precisiones que cierran esta trampa del todo:
 
 ```js
 navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' })
-// 'none'    → nunca usa caché HTTP para el sw.js (recomendado)
-// 'imports' → cachea el sw.js pero no sus importScripts
-// 'all'     → comportamiento viejo (cachea todo); evitalo
+// 'none'    → nunca usa caché HTTP, ni para el sw.js ni para sus importScripts (recomendado)
+// 'imports' → DEFAULT: NO usa caché HTTP para el sw.js mismo, pero sí para sus importScripts
+// 'all'     → comportamiento viejo (cachea todo, incluido el sw.js); evitalo
 ```
 
 **c) Avisale al usuario y dejá que él active.** El patrón seguro (ver módulo 4): cuando hay un service worker en *waiting*, mostrás un toast "Nueva versión disponible — Recargar". Al aceptar, le mandás `skipWaiting()` al worker en espera y recargás:
@@ -435,11 +435,13 @@ self.addEventListener('push', (event) => {
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close()
-  event.waitUntil(clients.openWindow('/'))  // abre/enfoca la app al tocar
+  // patrón de producción: enfocá una pestaña ya abierta con clients.matchAll()
+  // antes de abrir una nueva, para no apilar ventanas duplicadas
+  event.waitUntil(clients.openWindow('/'))  // versión simple: abre la app al tocar
 })
 ```
 
-⚠️ Requiere **permiso explícito** del usuario (`Notification.requestPermission()`), suscripción vía `pushManager.subscribe()` con claves **VAPID**, y un backend que envíe el push. En **iOS** llegó tarde y con una condición dura: Web Push existe **desde iOS 16.4 (marzo 2023)** y **solo funciona si el usuario agregó la PWA a la pantalla de inicio** (no en Safari como pestaña normal). En Android/desktop, en cambio, funciona desde el browser sin instalar. Verificá soporte y versión mínima antes de prometer push en iOS.
+⚠️ Requiere **permiso explícito** del usuario (`Notification.requestPermission()`), suscripción vía `pushManager.subscribe()` con claves **VAPID**, y un backend que envíe el push. En **iOS** llegó tarde y con una condición dura: Web Push existe **desde iOS 16.4 (marzo 2023)** y **solo funciona si el usuario agregó la PWA a la pantalla de inicio** (no en Safari como pestaña normal). En Android/desktop, en cambio, funciona desde el browser sin instalar. Verificá soporte y versión mínima antes de prometer push en iOS. (Dato 2026: Safari 18.4 sumó **Declarative Web Push**, que muestra la notificación **sin** service worker — en iOS sigue exigiendo la PWA instalada; en macOS 18.5+ anda incluso en pestaña normal.)
 
 **Background Sync ⚠️.** Si el usuario hace una acción offline (mandar un mensaje, postear un comentario), registrás un *sync*; el browser lo **reintenta automáticamente** cuando vuelve la conexión, despertando al service worker:
 
@@ -613,7 +615,7 @@ La frase mental: **el service worker te da poder a cambio de complejidad permane
 
 El matiz honesto: **el service worker no es una mejora gratis que activás "por las dudas".** Es una pieza de infraestructura con mantenimiento permanente. Si tu único objetivo es "que cargue rápido", **empezá por caché HTTP, CDN y optimización de assets** — son más baratos y resuelven la mayoría de los casos. Reservá el service worker para cuando necesites lo que **solo** él da: **funcionar sin red y reaccionar a eventos con la app cerrada.**
 
-Y la herramienta práctica: si decidís que sí, **no lo escribas a mano para producción — usá Workbox** (o el plugin PWA de tu framework: Vite PWA, Next PWA, Angular service worker). Entender los módulos 4–11 es lo que te permite **usar esas herramientas con criterio y debuggearlas**, no reinventarlas.
+Y la herramienta práctica: si decidís que sí, **no lo escribas a mano para producción — usá Workbox** (o el plugin PWA de tu framework: Vite PWA, **Serwist** —el sucesor mantenido de Workbox, hoy el camino en Next—, Angular service worker). Entender los módulos 4–11 es lo que te permite **usar esas herramientas con criterio y debuggearlas**, no reinventarlas.
 
 La frase mental de cierre: **el service worker es la herramienta para offline, push e instalabilidad — no un acelerador genérico. Si solo querés velocidad, la caché HTTP es más barata. Si necesitás que la app viva sin red o reaccione con la pestaña cerrada, no hay sustituto — pero asumí el mantenimiento, versioná siempre, y tené un kill switch.**
 
