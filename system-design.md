@@ -313,6 +313,10 @@ Patrones clave:
 - **Circuit breaker:** si un servicio falla repetidamente, dejá de llamarlo un rato (estado **open**) en vez de seguir golpeándolo. Cada tanto probás (estado **half-open**); si responde, volvés a **closed**. Le da aire al servicio caído y falla rápido en vez de colgarte.
 - **Bulkhead:** aislá recursos (pools de conexiones separados por dependencia) para que una dependencia saturada no se lleve puesto a todo el servicio.
 - **Graceful degradation:** si el servicio de recomendaciones se cae, mostrá productos genéricos, no un error 500. Degradá funcionalidad, no disponibilidad.
+- **Backpressure (contrapresión):** cuando el productor va más rápido que el consumidor, no dejes que la cola crezca sin techo (memoria que explota, latencia que se dispara). Acotá la cola y **frená al productor** —bloquear/rechazar, flujo *pull*, créditos/ventana— o escalá el consumidor (*autoscaling*). Es el control de flujo del sistema (ver también el **módulo 8**, para el caso de colas/DLQ); la mecánica fina (colas acotadas, `pause()`/`drain` en streams) está en [Concurrencia](concurrencia.md) módulo 17.
+- **Load shedding (descartar carga):** bajo presión extrema, **rechazá parte del tráfico a propósito** (`503`) —empezando por lo de **baja prioridad** (por clase de cliente/endpoint) o por las requests **más nuevas** (rechazar lo recién llegado deja terminar lo que ya está en vuelo y evita gastar capacidad en pedidos cuya *deadline* quizá ya venció)—. Es la contracara *server-side* del rate limiting (módulo 12): preferís servir bien al 80% antes que caerte para el 100%. ([Concurrencia](concurrencia.md) módulo 19.)
+
+> **Dos ejes de falla, no uno.** Timeout / retry / circuit breaker / bulkhead atacan *"una dependencia se cayó o se puso lenta"*; backpressure / load shedding atacan *"entra más carga de la que puedo procesar"*. Son problemas distintos: el primero es **aislar el fallo de otro**, el segundo es **protegerte de tu propio éxito**. Nombrar cuál de los dos estás resolviendo es lo que separa "tiré patrones de resiliencia" de "entendí qué falla". Eso sí, en la práctica los ejes se **encadenan**: una dependencia lenta (eje 1) hace que las requests se apilen y disparen sobrecarga aguas arriba (eje 2) —que puede ser **externa** (un pico real) o **autoinfligida** (un fan-out propio o el *retry storm* de 10.2)—, así que solés combinar patrones de los dos.
 
 ```ts
 // Backoff exponencial con jitter (compila en --strict)
@@ -329,6 +333,7 @@ function backoffMs(intento: number, baseMs = 100, maxMs = 10_000): number {
 10.1 🔁 ¿Qué hace un circuit breaker y cuáles son sus tres estados?
 10.2 🧠 ¿Por qué los retries **sin** backoff ni jitter pueden empeorar una caída en vez de ayudar? (describí el *retry storm*)
 10.3 ✍️ Escribí `reintentarConBackoff(fn, maxIntentos)` que reintente una función async con backoff exponencial + jitter y propague el error si se agotan los intentos.
+10.4 🧠 ¿Qué problema ataca el **backpressure** y cuál el **load shedding**, en qué se diferencian de un circuit breaker, y cuándo recurrís a cada uno?
 
 ---
 
@@ -552,6 +557,8 @@ async function reintentarConBackoff<T>(
   throw ultimoError;
 }
 ```
+
+**10.4** **Backpressure** ataca *"el productor va más rápido que el consumidor"*: en vez de dejar que una cola/buffer crezca hasta agotar la memoria, acotás la cola y frenás al productor (lo bloqueás, lo rechazás, o usás flujo *pull* con créditos) o escalás el consumidor — es **control de flujo** continuo. **Load shedding** ataca *"entra más carga de la que puedo procesar y ya estoy al límite"*: rechazás parte del tráfico a propósito (`503`), priorizando lo que más importa, para no caerte del todo. Se diferencian del **circuit breaker** en el eje: el breaker te protege de *una dependencia ajena que falla* (dejás de llamarla); backpressure y load shedding te protegen de *tu propia sobrecarga* (demasiada demanda legítima). Recurrís a backpressure cuando podés **frenar o encolar** al productor (pipeline interno, streams, colas); a load shedding cuando **no podés frenar** la entrada (tráfico de usuarios) y la única salida es rechazar con criterio antes de colapsar.
 
 ### Módulo 11
 **11.1** **Logs** (eventos discretos: "¿qué pasó exactamente acá?"), **métricas** (números agregados en el tiempo: "¿está sano el sistema? ¿cuál es la tendencia?") y **traces** (el viaje de una request entre servicios: "¿dónde se fue el tiempo / dónde falló en la cadena?").
