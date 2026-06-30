@@ -40,6 +40,9 @@
   - [🐘 PostgreSQL + ORM](postgresql.md)
   - [🍃 NoSQL: MongoDB y DynamoDB](nosql.md)
 
+- **Analytics y BI**
+  - [📊 Analytics embebido y capa semántica](analytics-embebido.md)
+
 - **Seguridad**
   - [🔐 Autenticación y autorización](autenticacion.md)
 
