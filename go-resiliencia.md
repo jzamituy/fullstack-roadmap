@@ -81,11 +81,11 @@ Claves:
 
 **Teoría.** Reintentar está bien — **si lo hacés con disciplina**. Tres reglas:
 
-1. **Backoff exponencial con tope:** esperá cada vez más entre intentos (ej. 100 ms, 200 ms, 400 ms, 800 ms…), pero **con un techo** (`min(base·2^i, maxEspera)`): sin cap, el shift desborda y las esperas se vuelven absurdas. No martilles, pero tampoco esperes una eternidad.
+1. **Backoff exponencial con tope:** esperá cada vez más entre intentos (ej. 100 ms, 200 ms, 400 ms, 800 ms…), pero **con un techo** (`min(base·2^i, maxEspera)`): sin cap, la espera crece sin límite y se vuelve absurda (y con suficientes intentos, `base·2^i` hasta desborda el entero). No martilles, pero tampoco esperes una eternidad.
 2. **Jitter (aleatoriedad):** sumá una porción al azar a cada espera. Sin jitter, mil clientes que fallaron al mismo tiempo reintentan **sincronizados** y crean picos coordinados (el *thundering herd*). El jitter los **desparrama**. La variante canónica de AWS es el **full jitter** (`espera = rand(0, tope)`); el ejemplo de abajo usa una variante aditiva, igual de válida para el objetivo.
 3. **Tope de intentos y respeto del `context`:** límite de reintentos (ej. 3-5) y abortar si el `ctx` se cancela. Reintentar para siempre es otra forma de colgarse.
 
-> 📝 El ejemplo usa **`math/rand`** (v1). En Go 1.22+ lo idiomático es **`math/rand/v2`**, donde la función es `rand.Int64N(int64(espera))` (no `Int63n`) y no necesita *seed* global manual. No mezcles los dos paquetes.
+> 📝 El ejemplo usa **`math/rand/v2`** (Go 1.22+), con `rand.Int64N(...)` y sin *seed* global manual. En la `math/rand` v1 clásica la función era `rand.Int63n(...)` (la vas a ver en código viejo); no mezcles los dos paquetes.
 
 ```go
 func conReintentos(ctx context.Context, intentos int, op func() error) error {
@@ -99,8 +99,8 @@ func conReintentos(ctx context.Context, intentos int, op func() error) error {
 			return err // 4xx, validación: NO reintentar
 		}
 		// backoff exponencial CON TOPE (cap), más jitter para desincronizar
-		espera := min(base*(1<<i), 30*time.Second)          // cap: no crece sin techo (evita overflow y esperas eternas)
-		espera += time.Duration(rand.Int63n(int64(espera))) // jitter +0–100% (math/rand v1)
+		espera := min(base*time.Duration(1<<i), 30*time.Second) // cap: acota la espera (sin él crecería sin techo)
+		espera += time.Duration(rand.Int64N(int64(espera)))     // jitter +0–100% (math/rand/v2)
 		select {
 		case <-time.After(espera):
 		case <-ctx.Done():
@@ -182,7 +182,7 @@ cb := gobreaker.NewCircuitBreaker[*Respuesta](gobreaker.Settings{
 })
 
 resp, err := cb.Execute(func() (*Respuesta, error) {
-	return llamarPagos(ctx, req)
+	return llamarPagos(ctx, req) // ctx y req vienen del handler que envuelve esta llamada
 })
 if err != nil {
 	// puede ser el error real O gobreaker.ErrOpenState (falló rápido): degradá acá
@@ -324,7 +324,7 @@ func limpiador(ctx context.Context) {
 - **Colas de trabajo (job queues):** desacoplás el productor del consumidor con una cola persistente (Redis/`asynq`, una tabla en Postgres, SQS, NATS). Esto da reintentos, *backoff*, *dead-letter queue* y trabajo distribuido entre varias instancias — y es lo correcto cuando el trabajo no puede perderse. Lo cubre [Redis](redis.md) (BullMQ/asynq) y [Event-driven](event-driven.md).
 
 Dos verdades que se arrastran de esos módulos:
-- **Casi todas las colas son *at-least-once*:** un mensaje puede entregarse **más de una vez** (reintento tras un fallo). Por eso el consumidor debe ser **idempotente** (Módulo 4): procesar el mismo job dos veces no debe duplicar el efecto. En el caso de una cola, la *idempotency key* suele ser el **ID del job** o un **hash del payload** (no hay un "cliente" que la genere como en una API).
+- **Casi todas las colas son *at-least-once*:** un mensaje puede entregarse **más de una vez** (reintento tras un fallo). Por eso el consumidor debe ser **idempotente** — es la **misma idempotencia del Módulo 4**, ahora aplicada al consumidor: procesar el mismo job dos veces no debe duplicar el efecto. Lo único que cambia es la *idempotency key*: en una cola suele ser el **ID del job** o un **hash del payload** (no hay un "cliente" que la genere como en una API).
 - **Cron ingenuo en multi-instancia se ejecuta N veces:** si corrés 3 réplicas, cada una dispara el ticker → la limpieza corre 3 veces. Necesitás un **lock distribuido** (Redis `SET NX`, advisory lock de Postgres) o un scheduler que garantice una sola ejecución.
 
 **Ejercicios 8**
@@ -386,7 +386,7 @@ El criterio que importa:
 Esto cierra el arco de Go para backend: del [servicio base](go-backend.md) → comunicación con [gRPC](go-grpc.md) → medición con [profiling](go-performance.md) → y acá, **sobrevivir cuando las piezas fallan**, que es lo que de verdad evalúan a nivel senior.
 
 **Ejercicios 10**
-10.1 🧠 Ordená las cinco capas de resiliencia para una llamada a un servicio de pagos, e indicá qué hace cada una.
+10.1 🔁 Ordená las cinco capas de resiliencia para una llamada a un servicio de pagos, e indicá qué hace cada una.
 10.2 🧠 ¿Por qué "escribo mi propio circuit breaker" suele ser mala idea, y qué hacés en su lugar?
 10.3 🧠 ¿Por qué la resiliencia tiene que ser observable, y qué métrica te diría que tu sistema está degradado aunque "responda"?
 
@@ -426,7 +426,7 @@ func obtener(ctx context.Context, url string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("armar request: %w", err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req) // acá el deadline lo da el ctx, no el cliente; en producción igual seteá http.Client{Timeout:...} como segunda defensa
 	if err != nil {
 		return nil, fmt.Errorf("GET %s: %w", url, err) // incluye DeadlineExceeded si venció
 	}
@@ -447,8 +447,8 @@ func obtener(ctx context.Context, url string) ([]byte, error) {
 ```
 ```go
 // 3.3 (dentro del loop, antes de calcular el backoff propio)
-espera := min(base*(1<<i), 30*time.Second)          // backoff con cap
-espera += time.Duration(rand.Int63n(int64(espera))) // jitter
+espera := min(base*time.Duration(1<<i), 30*time.Second) // backoff con cap
+espera += time.Duration(rand.Int64N(int64(espera)))     // jitter
 if d, ok := retryAfter(err); ok {
 	espera = d // el servidor manda: respetamos Retry-After en vez de nuestro backoff
 }
@@ -504,6 +504,7 @@ func correrConLimite(ctx context.Context, tareas []func(context.Context) error) 
 		select {
 		case sem <- struct{}{}: // tomar permiso
 		case <-ctx.Done():
+			wg.Wait() // drenamos lo ya lanzado antes de salir (coherente con el "drain" del Módulo 7)
 			return
 		}
 		wg.Add(1)
