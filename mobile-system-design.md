@@ -91,7 +91,7 @@ Regla: las features **no se conocen entre sí**; comparten a través de `core/*`
 
 ### Lo que cambió en React Native (2026)
 
-Desde **RN 0.76 (oct 2024) la New Architecture es el default**. Después: la arquitectura vieja se **congeló en 0.80 (jun 2025)** y quedó **always-on / no desactivable en 0.82 (oct 2025)**. Si trabajás con **Expo**, la frontera práctica es el SDK: **SDK 54 fue el último que permitía legacy; SDK 55 (RN 0.83) ya corre solo New Architecture**. Para system design importan tres piezas:
+La New Architecture ya es **la base por defecto**, no "lo nuevo": default desde **RN 0.76 (oct 2024)**, la arquitectura vieja se **congeló en 0.80 (jun 2025)**, quedó **always-on / no desactivable en 0.82 (oct 2025)** y en **0.84 (feb 2026) se eliminaron las clases de la arquitectura vieja**. "Lo que cambió" hoy es el SDK 55, no la New Arch en sí. Si trabajás con **Expo**, la frontera práctica es el SDK: **SDK 54 fue el último que permitía legacy; SDK 55 (RN 0.83) ya corre solo New Architecture**. Para system design importan tres piezas:
 
 - **JSI** (JavaScript Interface) — JS llama a C++/nativo **directo, sin serializar a JSON** por un "puente".
 - **Fabric** — el nuevo renderer; permite layout síncrono y mejor interoperabilidad con vistas nativas.
@@ -289,7 +289,7 @@ Puntos finos que distinguen a un senior:
 
 ### Las dos fuentes clásicas de jank
 
-1. **Listas largas sin virtualizar.** Renderizar 10.000 filas mata la memoria. Solución: virtualización — **FlashList** (RN, mejor que `FlatList`), `LazyColumn` (Compose), `UICollectionView` con prefetch (iOS).
+1. **Listas largas sin virtualizar.** Renderizar 10.000 filas mata la memoria. Solución: virtualización — **FlashList** (RN, mejor que `FlatList`), `LazyColumn` (Compose), `UICollectionView` con prefetch (iOS). Dato fino 2026: **FlashList v2** es un rewrite **solo para New Architecture** (alineado con el default actual) y ya **no exige `estimatedItemSize`**.
 2. **Trabajo pesado en el hilo principal.** Parseo/imagen/crypto en el UI thread. Movelo a workers/hilos de fondo.
 
 ### Tamaño de la app (importa antes de que la instalen)
@@ -337,6 +337,7 @@ Distinto del caché efímero: acá el usuario **elige** descargar (canciones, ep
 - Canales nativos: **APNs** (Apple) y **FCM** (Android/cross). Ojo dato 2026: la **API legacy de FCM se discontinuó (jun 2024)** → hay que usar **FCM HTTP v1**. En Expo, **Expo Push** abstrae ambos.
 - **Notification messages** (las muestra el SO) vs **data messages / silent push** (despiertan tu código para sincronizar en background, con límites estrictos del SO).
 - **Ciclo de vida del token**: registrás, el token rota, lo refrescás y lo limpiás en logout. Mandar push a tokens viejos ensucia métricas.
+- **Pedí el permiso con criterio (*pre-permission priming*)**: el prompt nativo de notificaciones se puede pedir **una sola vez**; si lo negás, recuperarlo obliga a ir a Ajustes. Mostrá primero un *pre-prompt* propio que explique el valor y solo entonces disparás el del SO — sube muchísimo la tasa de opt-in.
 - **La entrega NO está garantizada.** Diseñá idempotente y no asumas que la push llegó: la verdad la define un *sync* al abrir, no la notificación.
 - **Live Activities** (iOS) para estados en vivo (pedido, partido) en pantalla de bloqueo.
 
@@ -385,7 +386,7 @@ Publicás al **1% → 10% → 50% → 100%**, mirando crash-free rate entre esca
 Actualizar el **bundle JS/assets sin pasar por la store**. Cambios clave:
 
 - **Microsoft App Center se retiró el 31 de marzo de 2025**, llevándose el CodePush hosteado. Microsoft liberó el server de **CodePush como open source** → podés self-hostearlo.
-- **EAS Update (Expo)** es hoy la opción más sólida para la mayoría. **Expo SDK 55 (feb 2026, RN 0.83 — ya solo New Architecture, ver Módulo 1)** sumó **diffing de bytecode Hermes** (updates más chicos), **Rollouts** (liberar a un % de usuarios) y **Republish/rollback** (revertir un update malo).
+- **EAS Update (Expo)** es hoy la opción más sólida para la mayoría. **Expo SDK 55 (feb 2026, RN 0.83 — ya solo New Architecture, ver Módulo 1)** sumó **diffing de bytecode Hermes** (updates más chicos — en beta en SDK 55), **Rollouts** (liberar a un % de usuarios) y **Republish/rollback** (revertir un update malo).
 - **Límite legal/store**: OTA solo para **JS y assets**, no código nativo, y **sin cambiar el propósito de la app** (regla de Apple/Google). No uses OTA para meter una feature que la store rechazaría.
 
 ### Deep linking
@@ -565,6 +566,7 @@ Cuando te tiran "diseñá el feed de Instagram" / "diseñá WhatsApp" / "diseñ�
 - **Tokens, pinning, attestation** → [Autenticación y autorización](autenticacion.md).
 - **Push/colas de mutaciones y caché** → [Redis](redis.md) del lado servidor.
 - **Testear la capa offline/sync** (red simulada, reloj controlado, time-travel de conflictos) → [Testing práctico](testing.md).
+- **El costo de cada decisión** (egress de CDN, N versiones de API vivas, datos móviles que paga el usuario) → [Costo y economía del diseño](costo.md).
 
 ## Fuentes
 
