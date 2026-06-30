@@ -61,7 +61,7 @@ Esto importa porque explica los aciertos y los fallos del agente: cuando corre l
 
 El cuello de botella de un agente no es qué tan inteligente es el modelo, sino **qué tiene en su contexto**. Dos verdades:
 
-- **El contexto es finito y se degrada** (*context rot*: a más tokens, peor recall). Volcarle todo el repo no ayuda — lo confunde.
+- **El contexto es finito y se degrada** (*context rot*: a más tokens, peor recall). No es solo el "lost-in-the-middle" (lo del medio se pierde): la degradación se da por la **longitud** misma del input, incluso en tareas simples. Volcarle todo el repo no ayuda — lo confunde.
 - El patrón ganador es **just-in-time**: el agente trae el archivo o el fragmento que necesita **cuando lo necesita** (grep/read), en vez de precargar todo. Por eso un repo bien estructurado, con nombres claros y módulos chicos, es más fácil de operar para un agente (igual que para un humano).
 
 Palancas concretas para darle buen contexto:
@@ -117,6 +117,7 @@ Principios:
 - **Entendé antes de mergear.** Si no podés explicar qué hace el código, no estás en condiciones de aprobarlo. "Funciona en la demo" no es entender.
 - **Buscá los fallos típicos de la IA**: APIs alucinadas (métodos que no existen), manejo de errores ausente, casos borde ignorados, código que pasa los tests felices pero no los adversos, sobre-ingeniería (te resuelve un problema que no tenías).
 - **Cuidado con el *rubber-stamping***: aprobar en automático porque "se ve bien" y son muchos diffs. Es el modo de fallo más común y el más peligroso, porque escala.
+- **El review tiene un límite humano real.** A volumen, la capacidad de revisar *de verdad* cae (la *review fatigue*: el PR de 2000 líneas que "nadie lee" entero). La respuesta no es revisar más rápido, es generar **diffs chicos** que sí se puedan revisar — exactamente el *baby steps* del Módulo 5 visto desde el otro lado.
 
 El review de código asistido por IA **es** un trabajo de liderazgo técnico: revisás más volumen, así que tu criterio sobre qué mirar primero (seguridad, límites, contratos) importa más que nunca.
 
@@ -128,7 +129,7 @@ Si generás más rápido, necesitás verificar más rápido — y de forma **aut
 
 - **TDD con IA**: escribir (o pedir) los tests **primero** le da al agente un objetivo verificable y un criterio de "terminado". El loop del agente se vuelve mucho más confiable cuando puede correr los tests y ver rojo→verde (puente con [tdd.md](tdd.md)).
 - **Corré los tests siempre**, en el loop del agente y en CI. "Lo que no corre automáticamente no existe" ([api-testing.md](api-testing.md)).
-- **Métrica de código generado**: *functional correctness* / **pass@k** — ¿el código pasa los tests? (pass@k = probabilidad de que **al menos una** de *k* muestras generadas pase los tests; pass@1 es el caso de un solo intento.) Es la métrica honesta para código, a diferencia de tareas subjetivas que necesitan LLM-judge ([evals.md](evals.md)).
+- **Métrica de código generado**: *functional correctness* / **pass@k** — ¿el código pasa los tests? (pass@k = probabilidad de que **al menos una** de *k* muestras generadas pase los tests; pass@1 es el caso de un solo intento. En la práctica se estima generando *n > k* muestras para bajar la varianza.) Es la métrica honesta para código, a diferencia de tareas subjetivas que necesitan LLM-judge ([evals.md](evals.md)).
 - **El ángulo AI QA**: testear features construidas con asistencia de IA es tu terreno. Y un paso más: si tu producto *genera* código o artefactos con IA, necesitás **evals** de esa generación — un golden set de tareas con su criterio de correctitud, corriendo en CI como quality gate.
 
 ---
@@ -139,7 +140,7 @@ El código generado **hereda los riesgos de su origen probabilístico**. Cuatro 
 
 1. **Vulnerabilidades copiadas.** La IA aprende de código público, que incluye patrones inseguros. Puede generar SQL concatenado, validación ausente, secrets hardcodeados. **No asumas que es seguro porque funciona.**
 2. **Dependencias alucinadas (*slopsquatting*).** El modelo puede sugerir importar un paquete que **no existe** — y un atacante puede registrar ese nombre con malware esperando que alguien lo instale. Verificá que las deps que sugiere son reales y mantenidas (riesgo de supply chain, LLM03 del OWASP LLM Top 10).
-3. **Prompt injection en el agente de coding.** Si tu agente lee archivos de terceros (un issue, un README de una dependencia, un repo clonado), ese contenido puede contener instrucciones inyectadas. El caso real **MCPoison (CVE-2025-54136)** en Cursor mostró cómo una config aprobada se modificaba después para ejecutar código.
+3. **Prompt injection en el agente de coding.** Si tu agente lee archivos de terceros (un issue, un README de una dependencia, un repo clonado), ese contenido puede contener instrucciones inyectadas. El caso real **MCPoison (CVE-2025-54136)** en Cursor mostró cómo una config aprobada se modificaba después para ejecutar código. La contramedida operativa: **limitá lo que el agente puede ejecutar sin aprobación** — modo plan, *allowlist* de comandos, sandbox, aprobación explícita de herramientas peligrosas. No alcanza con reconocer el riesgo: hay que acotar el *blast radius*.
 4. **Secrets y datos.** Cuidado con qué le das de contexto al agente (no le pegues secretos de producción) y qué manda a un servicio externo.
 
 El reflejo: **el código de la IA pasa por el mismo (o más) escrutinio de seguridad que el tuyo**, no menos.
@@ -156,7 +157,7 @@ Casos donde esto habilita lo que el CLI interactivo no puede:
 - **Flujos con aprobación custom** que bloquean operaciones peligrosas antes de ejecutarlas.
 - Cualquier flujo que necesite **output estructurado** del agente en vez de una conversación.
 
-Esto es, esencialmente, el proyecto "PromptLab" del tipo de curso que inspiró este módulo: una plataforma para diseñar, versionar, testear y optimizar el uso del modelo a escala. Cuándo construir esto vs usar Claude Code directo: **construí cuando la app dirige el agente** (sin humano en cada paso); **usá el CLI cuando vos dirigís**.
+El patrón general es una plataforma para diseñar, versionar, testear y optimizar el uso del modelo **a escala**, con el agente como una pieza de tu producto y no como tu IDE. Cuándo construir esto vs usar Claude Code directo: **construí cuando la app dirige el agente** (sin humano en cada paso); **usá el CLI cuando vos dirigís**.
 
 ---
 
@@ -235,7 +236,8 @@ Argumento técnico: que los tests pasen prueba *functional correctness sobre los
 
 ### Solución 7
 Los fallos que el test feliz no atrapa:
-1. **Dependencia/API alucinada** (Módulo 9, slopsquatting): `node-crypto-helpers` y su `encrypt` tienen pinta inventada. Verificá que el paquete existe en npm y está mantenido **antes** de instalarlo; para cifrar/hashear usá el módulo `crypto` nativo o una lib ya conocida del proyecto. Que importe y "ande" no prueba que sea real ni seguro.
+1. **Dependencia/API alucinada** (Módulo 9, slopsquatting): `node-crypto-helpers` y su `encrypt` tienen pinta inventada. El riesgo no es solo "la API no existe": si un atacante registró ese nombre exacto en npm con malware, instalarlo **ejecuta su código** — eso es *slopsquatting*. Verificá que el paquete existe y está mantenido **antes** de instalarlo; para cifrar/hashear usá el módulo `crypto` nativo o una lib ya conocida del proyecto. Que importe y "ande" no prueba que sea real ni seguro.
 2. **Secret hardcodeado** (Módulo 9): `API_KEY = "sk-live-..."` en el código fuente termina en el repo y en el historial de git. Va a una variable de entorno / gestor de secretos, nunca en el código.
 3. **SQL concatenado → inyección** (puente con [postgresql.md](postgresql.md)): construir la query con `+` permite SQL injection vía `userId`/`cifrado`. Usá **consultas parametrizadas** (`$1`, `$2`).
-4. **Manejo de errores y caso borde ausentes**: no hay `try/catch` (¿qué pasa si la DB falla o el `UPDATE` no afecta filas?) y `res.rows[0]` asume que siempre hay resultado — si el `userId` no existe, devuelve `undefined` en silencio. Manejá el error y el "0 filas afectadas" explícitamente.
+4. **Manejo de errores ausente**: no hay `try/catch` — si la conexión a la DB falla, la excepción se propaga sin contexto. Envolvé y manejá el error explícitamente.
+5. **Caso borde ignorado**: `res.rows[0]` asume que siempre hay resultado. Si el `userId` no existe, el `UPDATE` afecta 0 filas y devolvés `undefined` en silencio. Chequeá el "0 filas afectadas" y respondé acorde.
