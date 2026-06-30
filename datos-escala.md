@@ -316,10 +316,17 @@ La elección:
 
 > El insight que sorprende en entrevista: **el ID no es solo "único", también define la localidad de tu índice.** Un UUID v4 random destruye la performance de inserción de un B-tree (M10); un ID **time-ordered** (Snowflake/ULID/UUIDv7) mantiene los inserts contiguos (van al final del árbol) → menos splits, mejor cache. Por eso a escala se usa Snowflake/ULID, no UUID v4. Lo construís en el [laboratorio](datos-escala-practica.md).
 
+> **El asterisco del "sin coordinación" — worker id y reloj.** Snowflake genera sin coordinación *en caliente*, pero esconde dos dependencias que un entrevistador staff busca:
+> 1. **El `worker id` tiene que ser único — y eso sí se coordina.** Los ≈10 bits dan **1024** ids de nodo; como cada proceso lleva su **propia** secuencia, dos nodos que arrancan con el **mismo** worker id generan en paralelo el mismo `(timestamp, worker, secuencia)` → **IDs idénticos**. Asignarlos sin choque necesita un árbitro: o **config estática** (frágil cuando los pods se reciclan/autoescalan) o un **registro central** (ZooKeeper/etcd con nodos efímeros, como hizo Twitter). Es un punto de coordinación y, si el registro es único, un **SPOF de *arranque*** — no de generación: una vez que el nodo tomó su id, genera solo. La coordinación se corrió del *path* de cada ID al *bootstrap* del nodo.
+> 2. **El reloj que retrocede rompe la unicidad.** El timestamp embebido **es hora de pared** (epoch en ms) —tiene que serlo, para ser comparable entre nodos y traducible a tiempo real— y va adelante asumiendo que el reloj **solo avanza**; pero NTP corrige hacia atrás, una VM migra, un *leap second*… si el reloj **retrocede**, podés re-emitir un `(timestamp, secuencia)` ya usado → **colisión**. La garantía de no-retroceso **no la da un reloj monótono del SO** (ese no se traduce a hora real): la impone el **propio generador**, que recuerda el **último timestamp emitido** y, si el reloj actual es **menor**, **se niega a generar** (el Snowflake original de Twitter lanza *"Clock is moving backwards"*); algunas implementaciones más tolerantes **esperan** a que el reloj alcance en vez de fallar. (No confundir: el "esperar al próximo ms" del original es para cuando se **agota la secuencia** dentro del mismo milisegundo, no para el reloj que retrocede.)
+>
+> Es el mismo *clock skew* del que se cuida [Consenso](consenso.md): en distribuido, **la hora de pared no es una fuente de verdad**.
+
 **Ejercicios 13**
 13.1 🔁 ¿Por qué un auto-increment de una tabla no sirve para IDs en un sistema shardeado?
 13.2 🧠 ¿Por qué un UUID v4 random es malo como clave de un índice B-tree?
 13.3 🧠 ¿Qué tres partes tiene un Snowflake ID y qué propiedad gana por tener el timestamp adelante?
+13.4 🧠 Snowflake "genera sin coordinación". ¿Qué necesita coordinarse igual al arrancar un nodo, y qué falla concreta produce si el reloj de un nodo **retrocede**?
 
 ---
 
@@ -465,6 +472,8 @@ La elección:
 **13.2** Porque es **aleatorio**: cada inserción cae en una **página al azar** del B-tree → page splits dispersos, cache misses y fragmentación (el árbol no puede agregar al final, tiene que insertar en cualquier lado). Insertar muchos UUIDs v4 toca muchas páginas distintas → I/O aleatorio y mala performance de inserción.
 
 **13.3** (1) **Timestamp** (≈41 bits, ms), (2) **machine/worker id** (≈10 bits), (3) **secuencia** (≈12 bits, contador dentro del mismo ms). Con el timestamp **adelante**, los IDs quedan **aproximadamente ordenados por tiempo** → buena **localidad** de índice (los inserts nuevos van contiguos al final del B-tree), generados localmente sin coordinación.
+
+**13.4** Lo que se coordina al arrancar es la **asignación del `worker id` único**: como cada proceso lleva su propia secuencia, dos nodos con el mismo worker id generan en paralelo el mismo `(timestamp, worker, secuencia)` → IDs **duplicados**, así que el id se reparte por config estática o por un registro central (ZooKeeper/etcd) — coordinación en el *bootstrap*, no en cada ID (y un posible SPOF de arranque). Si el **reloj retrocede** (corrección de NTP, migración de VM, leap second), el generador puede re-emitir un `(timestamp, secuencia)` ya usado → **colisión de IDs**. El timestamp embebido **es wall-clock** (no un reloj monótono, que no se traduce a tiempo real); la garantía de no-retroceso la pone el **software**: recuerda el último timestamp y, si el reloj actual es menor, **se niega a generar** (el Snowflake original falla con *"Clock is moving backwards"*; otras implementaciones esperan a que el reloj alcance).
 
 **14.1** Un índice invertido es un mapa `término → lista de documentos que lo contienen` (posting list); buscar = intersecar/unir posting lists. `LIKE %x%` no escala porque tiene que **escanear cada fila** comparando el patrón (full scan, sin poder usar un índice por el comodín inicial) → O(n) sobre todo el corpus.
 
