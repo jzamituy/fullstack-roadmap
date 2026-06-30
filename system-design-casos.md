@@ -39,7 +39,7 @@
 - Funcionales: un usuario postea; sus seguidores ven ese post en su **home timeline** (los posts de la gente que siguen, ordenados por recencia).
 - No funcionales: **lectura-intensivo** (mirás el feed mucho más de lo que posteás); el timeline tolera **consistencia eventual** (que un post tarde segundos en aparecer está bien); latencia de lectura baja (abrir la app tiene que ser instantáneo); grafo social muy desbalanceado (un famoso tiene 100M seguidores, vos 200).
 
-**2. Estimación.** 300M usuarios activos, cada uno abre el feed ~10 veces/día → ~35K lecturas/s promedio, picos de varios cientos de miles. Escrituras (posts): mucho menos, ~5K/s. Ratio lectura:escritura ~100:1 o más. Cada timeline muestra ~20 posts por pantalla.
+**2. Estimación.** 300M usuarios activos, cada uno abre el feed ~10 veces/día → ~35K lecturas/s promedio, picos de varios cientos de miles. Escrituras (posts): mucho menos, ~5K/s. Ratio lectura:escritura ~100:1 o más. Cada timeline muestra ~20 posts por pantalla. El número que **decide** el diseño no es el promedio de lecturas sino el **fan-out de escritura**: un post normal se copia a ~cientos de timelines (barato), pero un post de una cuenta con 100M seguidores son **100M escrituras** — un solo famoso posteando una vez por segundo ya empuja el fan-out on write puro al orden de **10⁸ escrituras/s**. El número exacto no importa: basta que se acerque para que el push puro sea inviable, y esa sola cuenta ya fuerza el modelo híbrido (módulos 4-5).
 
 **3. API y datos.**
 ```
@@ -82,7 +82,7 @@ El default para lectura-intensivo es **push** (pagás una vez al escribir, leés
 - Funcionales: enviar/recibir mensajes 1-a-1 (y grupos chicos); entrega en tiempo real; estados (enviado/entregado/leído); historial persistente; funciona offline (recibís lo perdido al reconectar).
 - No funcionales: latencia de entrega de **sub-segundo**; **ninguna pérdida de mensajes**; orden por conversación; presencia (online/last seen); altísima cantidad de conexiones **persistentes** simultáneas.
 
-**2. Estimación.** 500M usuarios, 50M conexiones WebSocket vivas en pico, ~40 mensajes/usuario/día → ~230K mensajes/s promedio, picos mayores. El cuello no es CPU: es **mantener millones de conexiones abiertas** (memoria/FD por conexión) y rutear entre ellas.
+**2. Estimación.** 500M usuarios, 50M conexiones WebSocket vivas en pico, ~40 mensajes/usuario/día → ~230K mensajes/s promedio, picos mayores. El cuello no es CPU: es **mantener millones de conexiones abiertas** (memoria/FD por conexión) y rutear entre ellas. El dimensionado se hace por **conexiones concurrentes, no por mensajes/s**: 50M sockets × ~10 KB de estado cada uno (buffers + metadata) ≈ **500 GB** solo en sostenerlos vivos, repartidos en **decenas a cientos de gateways** (~100K-1M conexiones por nodo según RAM y file descriptors). Por eso el diseño gira alrededor de la capa de presencia/routing, no del throughput de mensajes.
 
 **3. API y datos.** Transporte: **WebSocket** (conexión persistente bidireccional, ver [Tiempo real](tiempo-real.md)), no HTTP polling.
 ```
@@ -121,7 +121,7 @@ WS  ← { tipo: "delivered" | "read", msgId }
 - Funcionales: un evento del sistema ("te mencionaron", "tu pago se acreditó") genera una notificación que llega al usuario por uno o más **canales** (push móvil/APNs+FCM, email, SMS, in-app); respetar las **preferencias** del usuario (qué quiere recibir y por dónde).
 - No funcionales: **alta disponibilidad** (no perder una notificación importante); tolerar picos enormes (un evento masivo dispara millones de golpe); **no duplicar** (recibir el mismo push 3 veces enoja); latencia de segundos es aceptable (es async por naturaleza).
 
-**2. Estimación.** Decenas de millones de notificaciones/día, con picos brutales (un partido, una caída que dispara alertas a todos). El sistema tiene que **absorber el pico** sin tumbar a los proveedores externos (APNs/FCM/el proveedor de SMS tienen sus propios rate limits).
+**2. Estimación.** Decenas de millones de notificaciones/día, con picos brutales (un partido, una caída que dispara alertas a todos). El sistema tiene que **absorber el pico** sin tumbar a los proveedores externos (APNs/FCM/el proveedor de SMS tienen sus propios rate limits). El promedio (decenas de millones/día ≈ cientos/s) no dimensiona nada; lo que manda es el **pico**: un evento que avisa a 10M usuarios, drenados en ~10 s, son **~1M/s**, muy por encima de lo que esos proveedores aceptan sostenido → dimensionás para **absorber el frente y drenar al ritmo del proveedor**, no para el promedio (mismo principio que el frente de medianoche del **caso 17**).
 
 **3. API y datos.** Asíncrono de punta a punta (ver [Event-driven](event-driven.md)).
 ```
@@ -193,7 +193,7 @@ GET /suggest?q=lap        → { sugerencias: ["laptop", "lapicera", ...] }   # t
 - Funcionales: subir/bajar archivos; sincronizarlos entre los dispositivos de un usuario; versionado; compartir.
 - No funcionales: **durabilidad altísima** (no perder archivos jamás); manejar archivos grandes; subidas resumibles (las redes cortan); uso eficiente de ancho de banda y almacenamiento (no resubir lo que no cambió).
 
-**2. Estimación.** Cientos de millones de usuarios, archivos de KB a GB. El volumen total son **petabytes**; el costo dominante es **almacenamiento y ancho de banda**, no CPU. Muchos archivos son idénticos entre usuarios (el mismo PDF, el mismo instalador) → la **deduplicación** ahorra una fortuna.
+**2. Estimación.** Cientos de millones de usuarios, archivos de KB a GB. El volumen total son **petabytes**; el costo dominante es **almacenamiento y ancho de banda**, no CPU. Muchos archivos son idénticos entre usuarios (el mismo PDF, el mismo instalador) → la **deduplicación** ahorra una fortuna. Concreto: cientos de millones de usuarios × varios GB = un bruto de **petabytes**, y muchos chunks se repiten entre cuentas (el mismo instalador, el mismo adjunto). Ese número fuerza una decisión: la dedup **global** (cross-account) recorta típicamente **30-50%** del almacenamiento —decenas a cientos de millones de dólares al año a esta escala— pero exige content-addressing (el hash del chunk como clave) y un índice de chunks compartido, con costo en privacidad (un atacante infiere si un chunk ya existe midiendo el tiempo de subida) y en borrado (reference counting); la dedup **por cuenta** es más simple y segura pero ahorra mucho menos. La estimación acá no busca un QPS: es el eje que decide **global vs aislada** y por qué el diseño optimiza **bytes únicos**, no cómputo.
 
 **3. API y datos.** Separá **metadata** de **contenido**.
 ```
