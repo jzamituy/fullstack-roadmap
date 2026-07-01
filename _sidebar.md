@@ -51,7 +51,8 @@
   - [🔴 TDD como disciplina](tdd.md)
 
 - **DevOps**
-  - [🐳 Docker, deploy y CI/CD](docker-deploy.md)
+  - [🐳 Docker a fondo: prácticas y casos de uso](docker.md)
+  - [🚀 Docker, deploy y CI/CD](docker-deploy.md)
   - [⚖️ Reverse proxy y capa web](reverse-proxy.md)
   - [☸️ Kubernetes: orquestación](kubernetes.md)
   - [🔭 Observabilidad práctica](observabilidad.md)
