@@ -70,6 +70,7 @@
   - [🧯 SOLID: los cinco principios](solid.md)
   - [🧱 Domain-Driven Design](ddd.md)
   - [🔀 Event-driven aplicada](event-driven.md)
+  - [🏢 Multi-tenancy full stack](multi-tenancy.md)
   - [🏛️ Diseño de sistemas backend](system-design.md)
   - [🗂️ Banco de casos de diseño](system-design-casos.md)
   - [✅ Checklist de entrevista (4 capas)](system-design-checklist.md)
